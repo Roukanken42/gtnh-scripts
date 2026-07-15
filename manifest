@@ -2,3 +2,9 @@
 # Lists every file install.lua downloads onto an OpenComputers machine.
 
 install.lua
+pump/ae2.lua
+? pump/config.lua
+pump/gases.lua
+pump/main.lua
+pump/probe.lua
+pump/pumps.lua

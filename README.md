@@ -11,7 +11,7 @@ files straight from the GitLab repo onto a machine.
 Run this once in the machine's shell (needs an **Internet Card**):
 
 ```
-wget https://gitlab.com/Roukanken/gtnh-scripts/-/raw/main/install.lua && install
+wget https://gitlab.com/Roukanken/gtnh-scripts/-/raw/main/install.lua && ./install
 ```
 
 `install` reads the [`manifest`](manifest) file and downloads every listed file

@@ -1,0 +1,9 @@
+# Editors / IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini

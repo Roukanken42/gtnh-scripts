@@ -1,0 +1,4 @@
+# Normalize line endings to LF so files served raw to OpenComputers are clean.
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.png binary

@@ -108,9 +108,10 @@ local function apply(needy, want)
 
     for _, n in ipairs(needy) do
         local have = held[n.name] or 0
+        local parallels = n.gas.parallels or cfg.parallels
         while have < want[n.name] and #free > 0 do
             local p = table.remove(free)
-            local ok, err = p:setConfig(n.gas.planet, n.gas.gas)
+            local ok, err = p:setConfig(n.gas.planet, n.gas.gas, parallels)
             if ok then
                 p.assignedName = n.name
                 p:setEnabled(true)

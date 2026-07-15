@@ -3,38 +3,39 @@
 -- The allocation/demand logic in main.lua only ever calls the small interface
 -- below (setConfig / setEnabled / isActive / currentConfig). Everything about
 -- HOW a pump is driven lives here, so:
---   * the TecTech parameter API can be corrected in one spot after `probe`, and
+--   * the TecTech parameter layout can be corrected in one spot, and
 --   * a future modem/worker transport (remote pumps) can be slotted in here
 --     without touching the demand logic.
 
 local component = require("component")
 
 -- =====================================================================
--- PENDING PHASE 0 VERIFICATION. Run `probe <PUMP_TYPE>` in-game and fix
--- the constants below to match what the pump's Adapter actually exposes.
+-- TecTech parameter layout for the Space Elevator pumping module.
+--
+-- Parameters are written with:  setParameters(hatch:int, id:int, value:double)
+-- and the machine is toggled with:  setWorkAllowed(work:boolean)
+--
+-- Each thread i (0-indexed) occupies hatches 2i and 2i+1:
+--   planet    -> hatch 2i,   id 0
+--   gas       -> hatch 2i,   id 1
+--   parallels -> hatch 2i+1, id 0   (pumping speed; hatch 2i+1 id 1 is unused)
+--
+-- Verified for thread 0 (planet (0,0), gas (0,1), parallels (1,0)). Higher-tier
+-- pumps with multiple threads follow the same pattern; this MVP drives thread 0
+-- only, but the layout below already generalizes to any thread index.
 -- =====================================================================
 
--- Component type the pump's Adapter surfaces. TecTech multiblocks usually show
--- up as "gt_machine"; confirm with `probe` (look for the pumping module).
-local PUMP_TYPE = "gt_machine"
+local PUMP_TYPE = "gt_machine"   -- component type the pump's Adapter exposes
+local PARAM_SET = "setParameters"
 
--- Method that writes an input parameter. Best guess from TecTech's OC glue;
--- confirm the exact name + argument order from `probe <PUMP_TYPE>` docs.
-local SET_PARAM = "setParameterIn"
-
--- Translate a (planet, gas) configuration into the raw parameter writes.
--- Default guess: parameter slot 0 side A = planet, slot 0 side B = gas.
--- Adjust indices/sides once the real layout is known.
-local function paramWrites(planet, gas)
+local function layout(thread)
+    thread = thread or 0
     return {
-        { index = 0, isB = false, value = planet },
-        { index = 0, isB = true,  value = gas },
+        planet    = { hatch = 2 * thread,     id = 0 },
+        gas       = { hatch = 2 * thread,     id = 1 },
+        parallels = { hatch = 2 * thread + 1, id = 0 },
     }
 end
-
--- Some machines require being stopped before parameters change. If probing
--- shows live changes are fine, set this to false to avoid a stop/start cycle.
-local STOP_BEFORE_RECONFIGURE = true
 -- =====================================================================
 
 local Pump = {}
@@ -44,30 +45,37 @@ function Pump.new(address)
     local self = setmetatable({}, Pump)
     self.address = address
     self.proxy = component.proxy(address)
-    self.config = nil        -- { planet=, gas= } last applied by us
+    self.config = nil        -- { planet=, gas=, parallels= } last applied by us
     self.assignedName = nil  -- gas name main.lua allocated to this pump
     return self
 end
 
--- Applies a (planet, gas) parameter configuration. Returns true, or false+err.
-function Pump:setConfig(planet, gas)
-    local setter = self.proxy[SET_PARAM]
+local function writeParam(proxy, slot, value)
+    local setter = proxy[PARAM_SET]
     if type(setter) ~= "function" then
-        return false, SET_PARAM .. " not available on " .. self.address
+        return false, PARAM_SET .. " not available"
+    end
+    return pcall(setter, slot.hatch, slot.id, value)
+end
+
+-- Applies a (planet, gas) configuration to a thread (default 0), optionally the
+-- parallels count too (pass nil to leave the pump's existing parallels
+-- untouched). Returns true, or false + error.
+function Pump:setConfig(planet, gas, parallels, thread)
+    local slots = layout(thread)
+
+    local ok, err = writeParam(self.proxy, slots.planet, planet)
+    if not ok then return false, tostring(err) end
+
+    ok, err = writeParam(self.proxy, slots.gas, gas)
+    if not ok then return false, tostring(err) end
+
+    if parallels ~= nil then
+        ok, err = writeParam(self.proxy, slots.parallels, parallels)
+        if not ok then return false, tostring(err) end
     end
 
-    if STOP_BEFORE_RECONFIGURE then
-        self:setEnabled(false)
-    end
-
-    for _, w in ipairs(paramWrites(planet, gas)) do
-        local ok, err = pcall(setter, w.index, w.isB, w.value)
-        if not ok then
-            return false, tostring(err)
-        end
-    end
-
-    self.config = { planet = planet, gas = gas }
+    self.config = { planet = planet, gas = gas, parallels = parallels }
     return true
 end
 
@@ -87,7 +95,7 @@ function Pump:isActive()
     return false
 end
 
--- The last (planet, gas) we applied, or nil if never configured this run.
+-- The last (planet, gas, parallels) we applied, or nil if never configured.
 function Pump:currentConfig()
     return self.config
 end

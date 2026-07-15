@@ -18,14 +18,18 @@ Needs an **Internet Card** (to install) and an **Adapter** on each pumping modul
 1. **Discover the hardware/API** with the probe:
    ```
    probe                 -- list components + total count (component budget)
-   probe gt_machine      -- methods+docs of a pump (find the parameter setter)
-   probe ae drop         -- exact "drop of Xyz" labels for gases.lua
+   probe gt_machine      -- methods+docs of a pump
+   probe fluids          -- clean fluid labels (e.g. "Molten Redstone") for gases.lua
    ```
-2. **Finalize the data/code** from that output:
-   - `gases.lua` — the ~40 configs (planet/gas ints, amounts, `item` labels).
-   - `pumps.lua` — the `PENDING PHASE 0` block (component type, parameter setter
-     name, and the planet/gas → parameter mapping).
-   - `config.lua` — `cfg.pumps` addresses and your `cfg.demand`.
+2. **Finalize the data/config** from that output:
+   - `gases.lua` — the ~40 configs (planet/gas ints, amounts, `fluid` labels).
+   - `config.lua` — `cfg.pumps` addresses and your `cfg.demand` (targets in mB).
+
+The TecTech parameter layout is already set in `pumps.lua`: parameters are
+written with `setParameters(hatch, id, value)` — planet `(0,0)`, gas `(0,1)`,
+parallels `(1,0)` — and the pump is toggled with `setWorkAllowed(bool)`. The
+layout generalizes to thread `i` as planet `(2i,0)`, gas `(2i,1)`, parallels
+`(2i+1,0)`. This MVP drives **one thread per pump**.
 3. **Dry run** (`cfg.dryRun = true`, the default): run `main` and confirm the
    logged allocation looks right — no pump is touched.
 4. **Go live**: set `cfg.dryRun = false` and run `main`.

@@ -1,6 +1,7 @@
 -- Thin AE2 wrapper: reads how much of each gas is currently stored in the
--- network. Gases are stored as ae2fc "drop of Xyz" items, so we query
--- getItemsInNetwork (NOT getFluidsInNetwork) and sum their stack sizes.
+-- network. Gases are read as fluids via getFluidsInNetwork(), whose `label` is
+-- the clean user-facing name (e.g. "Molten Redstone", without the "drop of"
+-- prefix) and whose `amount` is the stored quantity in mB.
 --
 -- Mirrors the style of aether/src/AE2.lua.
 
@@ -19,40 +20,36 @@ function ae2.getMe()
 end
 
 -- Given the gas definitions (see gases.lua), returns a map of
---   gas.name -> current amount stored in the network
+--   gas.name -> current amount (mB) stored in the network
 -- Every gas in `gases` is present in the result (0 if none stored).
 --
--- Matching precedence per gas:
---   * gas.itemName (unlocalized id), optionally narrowed by gas.itemDamage
---   * otherwise gas.item (localized label, e.g. "drop of Hydrogen")
+-- Matching per gas (against getFluidsInNetwork() entries):
+--   * gas.fluidName (unlocalized id) if provided, else
+--   * gas.fluid     (localized label, e.g. "Molten Redstone")
 function ae2.getStock(gases)
     local me, err = ae2.getMe()
     if not me then
         return nil, err
     end
 
-    -- Build O(1) lookups so we only walk the network item list once.
-    local byName, byLabel = {}, {}
+    -- Build O(1) lookups so we only walk the network fluid list once.
+    local byLabel, byName = {}, {}
     local stock = {}
     for _, gas in ipairs(gases) do
         stock[gas.name] = 0
-        if gas.itemName then
-            byName[gas.itemName .. "#" .. tostring(gas.itemDamage or 0)] = gas
-            byName[gas.itemName] = byName[gas.itemName] or gas
-        elseif gas.item then
-            byLabel[gas.item] = gas
+        if gas.fluidName then
+            byName[gas.fluidName] = gas
+        elseif gas.fluid then
+            byLabel[gas.fluid] = gas
         end
     end
 
-    local items = me.getItemsInNetwork()
-    for i = 1, #items do
-        local it = items[i]
-        local gas = byLabel[it.label]
-        if not gas and it.name then
-            gas = byName[it.name .. "#" .. tostring(it.damage or 0)] or byName[it.name]
-        end
+    local fluids = me.getFluidsInNetwork()
+    for i = 1, #fluids do
+        local f = fluids[i]
+        local gas = (f.name and byName[f.name]) or byLabel[f.label]
         if gas then
-            stock[gas.name] = stock[gas.name] + (it.size or 0)
+            stock[gas.name] = stock[gas.name] + (f.amount or 0)
         end
     end
 

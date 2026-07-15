@@ -12,13 +12,19 @@ cfg.pumps = {
 }
 
 -- Demand: for each gas you want kept in stock,
---   target   = amount to maintain (in AE2 item count / "drops")
+--   target   = amount (mB) to maintain in the AE2 network
 --   priority = higher number wins when there are not enough pumps for everyone
 cfg.demand = {
-    -- ["Hydrogen"] = { target = 64000, priority = 10 },
-    -- ["Helium"]   = { target = 16000, priority = 5  },
-    -- ["Nitrogen"] = { target = 8000,  priority = 1  },
+    -- ["Hydrogen"] = { target = 64000000, priority = 10 },
+    -- ["Helium"]   = { target = 16000000, priority = 5  },
+    -- ["Nitrogen"] = { target = 8000000,  priority = 1  },
 }
+
+-- Optional default "parallels" count (pumping speed, hatch 1 id 0) to set on a
+-- pump when it is assigned to a gas. Leave nil to never touch parallels and use
+-- whatever each pump was set to manually. A per-gas `parallels` in gases.lua
+-- overrides this.
+cfg.parallels = nil
 
 -- Seconds between control cycles.
 cfg.sleep = 10

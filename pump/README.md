@@ -47,13 +47,24 @@ layout generalizes to thread `i` as planet `(2i,0)`, gas `(2i,1)`, parallels
 
 The allocation unit is a **thread** (each pump contributes one per tier level:
 MK-1 = 1, MK-2/3 = 4). Each cycle: read AE2 stock → find gases below target (with
-hysteresis so a thread does not flap around the target) → sort by priority, then
-deficit → assign threads to each needy gas until its estimated production over
-one cycle covers the deficit (a thread makes `gas.amount × parallels` mB/s), then
-move to the next gas. Higher-priority gases get threads first; a big deficit can
-pull several threads. Threads already serving a still-needy gas are kept (sticky)
-to avoid needless reconfiguration; unused threads are idled (parallels 0) and
-fully-idle pumps are disabled.
+hysteresis so a thread does not flap around the target) → rank them by a **score**
+that blends priority with how empty the tank is:
+
+```
+score = priority * (1 + (criticalWeight - 1) * missingFraction^2)
+```
+
+A full tank scores `priority × 1`, an empty one `priority × criticalWeight`, so a
+critically-low fluid can outrank a well-stocked but higher-priority one; the
+square keeps the boost small until a tank is genuinely low. See `cfg.criticalWeight`.
+
+Threads are then assigned **breadth-first by score**: every served gas gets one
+thread before any gets a second, so with few threads and many gases only the top
+scorers are served (no thrashing across all 40). Any leftover threads are shared
+among the served gases in proportion to score, capped by each gas's estimated
+need (a thread makes `gas.amount × parallels` mB/s). Threads already serving a gas
+are reused for it (sticky) to avoid reconfiguration; unused threads are idled
+(parallels 0) and fully-idle pumps disabled.
 
 ## Files
 

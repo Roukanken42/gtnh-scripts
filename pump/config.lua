@@ -9,7 +9,11 @@ local cfg = {}
 
 -- Demand: for each gas you want kept in stock,
 --   target   = amount (mB) to maintain in the AE2 network (0 = do not pump it)
---   priority = higher number wins when there are not enough pumps for everyone
+--   priority = base importance; higher wins when threads are scarce
+-- Threads are assigned by a score that boosts priority as a tank empties:
+--   score = priority * (1 + (criticalWeight - 1) * missingFraction^2)
+-- so a nearly-empty low-priority gas can outrank a well-stocked high-priority one
+-- (see cfg.criticalWeight below). priority = 0 means "only if threads are spare".
 -- Every gas from gases.lua is listed below with target 0 (disabled). Set a
 -- target and priority for the gases you want maintained; delete the rest if you
 -- like. Grouped by planet to match gases.lua.
@@ -77,6 +81,13 @@ cfg.sleep = 30
 -- not pumped again until it drops below (lowWater * target). Prevents a thread
 -- from flapping on/off around the target. 0.9 = resume at 90% of target.
 cfg.lowWater = 0.9
+
+-- Criticality: how many times more important a gas is when EMPTY versus FULL.
+-- With criticalWeight = 10, an empty tank scores 10x its priority and a full one
+-- scores 1x; the boost ramps up quadratically, so it stays small until a tank is
+-- genuinely low. Raise it to let emptiness override bigger priority gaps; set to
+-- 1 to disable criticality and rank purely by priority.
+cfg.criticalWeight = 10
 
 -- Safety: when true, the controller only LOGS the allocation it would make and
 -- never touches a pump. Flip to false once you have verified the plan in-game.

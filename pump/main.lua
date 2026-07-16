@@ -1,8 +1,9 @@
 -- Pump regulator: keeps demanded gas stocks topped up by allocating pump
--- THREADS to under-stocked gases in priority order. Each pump has one thread per
--- tier (MK-1: 1, MK-2/3: 4), and every thread can be set to a different gas.
--- Multiple threads may serve the same gas; a thread's estimated output is used
--- to assign just enough threads to cover each gas's deficit.
+-- THREADS to under-stocked gases. Each pump has one thread per tier level
+-- (MK-1: 1, MK-2/3: 4), and every thread can be set to a different gas. Gases are
+-- ranked by a score blending priority with how empty the tank is (see
+-- computeNeedy), then threads are handed out breadth-first by score so the top
+-- gases are served first when threads are scarce.
 --
 -- Run from this folder:  main
 -- See config.lua for demand and the dry-run safety switch.
@@ -26,6 +27,7 @@ local pumpList = pumps.discover()
 local satisfied = {} -- gas name -> boolean (hysteresis latch)
 local lowWater = cfg.lowWater or 0.9
 local interval = cfg.sleep or 30
+local criticalWeight = cfg.criticalWeight or 10
 
 -- Flatten pumps into individual thread "slots" (built once; slot.name carries
 -- the current gas assignment across cycles for sticky reallocation).
@@ -42,8 +44,12 @@ local function estPerCycle(slot, gas)
     return slot.parallels * gas.amount * interval
 end
 
--- Returns the list of gases that need pumping right now, sorted by priority
--- (then by deficit), applying hysteresis to avoid flapping around the target.
+-- Returns the list of gases that need pumping right now, sorted by score,
+-- applying hysteresis to avoid flapping around the target. The score blends
+-- configured priority with criticality (how empty the tank is):
+--   score = priority * (1 + (criticalWeight - 1) * missingFraction^2)
+-- so a full tank scores priority*1 and an empty one priority*criticalWeight;
+-- the square keeps the boost small until a tank is genuinely low.
 local function computeNeedy(stock)
     local needy = {}
     for name, demand in pairs(cfg.demand) do
@@ -65,13 +71,17 @@ local function computeNeedy(stock)
             end
 
             if need then
+                local priority = demand.priority or 0
+                local missingFraction = (target - current) / target
                 needy[#needy + 1] = {
                     name = name,
                     gas = gas,
-                    priority = demand.priority or 0,
+                    priority = priority,
                     deficit = target - current,
                     target = target,
                     current = current,
+                    missingFraction = missingFraction,
+                    score = priority * (1 + (criticalWeight - 1) * missingFraction * missingFraction),
                     threadsAssigned = 0,
                     estProduction = 0,
                 }
@@ -80,61 +90,72 @@ local function computeNeedy(stock)
     end
 
     table.sort(needy, function(a, b)
-        if a.priority ~= b.priority then return a.priority > b.priority end
-        return a.deficit > b.deficit
+        if a.score ~= b.score then return a.score > b.score end
+        if a.missingFraction ~= b.missingFraction then return a.missingFraction > b.missingFraction end
+        return a.priority > b.priority
     end)
     return needy
 end
 
 -- Assigns threads to needy gases and returns a map slot -> gas name (nil = idle).
--- Sticky: threads already serving a still-needy gas are kept; only the surplus
--- and previously-idle threads are (re)assigned, biggest thread first.
+-- Threads are scarce relative to demand, so allocation is breadth-first by score:
+-- every served gas gets one thread before any gets a second. When threads are
+-- plentiful, the surplus is shared among the served gases in proportion to score.
+-- Sticky: a thread already serving a gas is reused for it to avoid reconfiguring.
 local function allocate(needy)
-    local needyByName = {}
-    for _, n in ipairs(needy) do needyByName[n.name] = n end
-
-    -- Partition current assignments into sticky (still needed) vs free.
-    local keptByGas, free = {}, {}
-    for _, s in ipairs(slots) do
-        if s.name and needyByName[s.name] then
-            local list = keptByGas[s.name]
-            if not list then list = {}; keptByGas[s.name] = list end
-            list[#list + 1] = s
-        else
-            free[#free + 1] = s
-        end
-    end
+    -- Single pool of all threads, biggest (most parallels) first.
+    local free = {}
+    for _, s in ipairs(slots) do free[#free + 1] = s end
+    table.sort(free, function(a, b) return a.parallels > b.parallels end)
 
     local newName = {}
 
-    -- Phase 1: keep sticky threads up to each gas's deficit; free the surplus.
-    for _, n in ipairs(needy) do
-        for _, s in ipairs(keptByGas[n.name] or {}) do
-            if n.estProduction >= n.deficit then
-                free[#free + 1] = s
-            else
-                newName[s] = n.name
-                n.threadsAssigned = n.threadsAssigned + 1
-                n.estProduction = n.estProduction + estPerCycle(s, n.gas)
+    -- Take a thread for gas `name`: reuse one already on it (no reconfigure) if
+    -- available, else the biggest still-free thread. free[i]=false marks taken.
+    local function takeThreadFor(name)
+        local pick
+        for i = 1, #free do
+            if free[i] and free[i].name == name then pick = i; break end
+        end
+        if not pick then
+            for i = 1, #free do
+                if free[i] then pick = i; break end
             end
         end
+        if not pick then return nil end
+        local s = free[pick]
+        free[pick] = false
+        return s
     end
 
-    -- Phase 2: cover remaining deficits from the free pool, biggest thread first
-    -- and in priority order. free[i] = false marks a thread as taken.
-    table.sort(free, function(a, b) return a.parallels > b.parallels end)
+    local function assign(n)
+        local s = takeThreadFor(n.name)
+        if not s then return false end
+        newName[s] = n.name
+        n.threadsAssigned = n.threadsAssigned + 1
+        n.estProduction = n.estProduction + estPerCycle(s, n.gas)
+        return true
+    end
+
+    -- Breadth: one thread to each needy gas in score order until threads run out.
+    -- With few threads and many gases this picks the top-scoring working set.
+    local served = {}
     for _, n in ipairs(needy) do
-        local i = 1
-        while n.estProduction < n.deficit and i <= #free do
-            local s = free[i]
-            if s then
-                newName[s] = n.name
-                n.threadsAssigned = n.threadsAssigned + 1
-                n.estProduction = n.estProduction + estPerCycle(s, n.gas)
-                free[i] = false
+        if not assign(n) then break end
+        served[#served + 1] = n
+    end
+
+    -- Depth: hand any remaining threads to served gases by highest-averages on
+    -- score (score / (threads+1)), skipping gases already covered this cycle.
+    while true do
+        local best, bestVal
+        for _, n in ipairs(served) do
+            if n.estProduction < n.deficit then
+                local val = n.score / (n.threadsAssigned + 1)
+                if not bestVal or val > bestVal then best, bestVal = n, val end
             end
-            i = i + 1
         end
+        if not best or not assign(best) then break end
     end
 
     return newName
@@ -173,13 +194,22 @@ local function logAllocation(needy)
         log("All demanded gases satisfied; " .. #slots .. " thread(s) idle.")
         return
     end
-    local used = 0
+    -- needy is sorted by score, so served gases are the top entries.
+    local used, unserved, topUnserved = 0, 0, nil
     for _, n in ipairs(needy) do
-        used = used + n.threadsAssigned
-        log(string.format("  %-18s cur=%d/%d prio=%d -> %d thread(s), ~%d mB/cycle",
-            n.name, n.current, n.target, n.priority, n.threadsAssigned, n.estProduction))
+        if n.threadsAssigned > 0 then
+            used = used + n.threadsAssigned
+            log(string.format("  %-18s %3d%% full  prio=%d score=%.0f -> %d thread(s), ~%d mB/cycle",
+                n.name, math.floor((1 - n.missingFraction) * 100 + 0.5),
+                n.priority, n.score, n.threadsAssigned, n.estProduction))
+        else
+            unserved = unserved + 1
+            topUnserved = topUnserved or n.name
+        end
     end
-    log(string.format("  (%d/%d threads assigned)", used, #slots))
+    log(string.format("  (%d/%d threads assigned; %d gas(es) waiting%s)",
+        used, #slots, unserved,
+        topUnserved and (", next: " .. topUnserved) or ""))
 end
 
 if #pumpList == 0 then

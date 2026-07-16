@@ -1,9 +1,11 @@
--- Pump regulator: keeps demanded gas stocks topped up by allocating the
--- available pumps to under-stocked gases in priority order, doubling several
--- pumps onto one gas when its deficit warrants a faster refill.
+-- Pump regulator: keeps demanded gas stocks topped up by allocating pump
+-- THREADS to under-stocked gases in priority order. Each pump has one thread per
+-- tier (MK-1: 1, MK-2/3: 4), and every thread can be set to a different gas.
+-- Multiple threads may serve the same gas; a thread's estimated output is used
+-- to assign just enough threads to cover each gas's deficit.
 --
 -- Run from this folder:  main
--- See config.lua for demand, pump addresses, and the dry-run safety switch.
+-- See config.lua for demand and the dry-run safety switch.
 
 local ae2 = require("ae2")
 local pumps = require("pumps")
@@ -22,9 +24,23 @@ end
 
 local pumpList = pumps.discover()
 local satisfied = {} -- gas name -> boolean (hysteresis latch)
-
 local lowWater = cfg.lowWater or 0.9
-local maxPerGas = cfg.maxPumpsPerGas or math.max(1, #pumpList)
+local interval = cfg.sleep or 30
+
+-- Flatten pumps into individual thread "slots" (built once; slot.name carries
+-- the current gas assignment across cycles for sticky reallocation).
+local slots = {}
+for _, p in ipairs(pumpList) do
+    for thread = 0, (p.threads or 1) - 1 do
+        slots[#slots + 1] = { pump = p, thread = thread, parallels = p.parallels or 0, name = nil }
+    end
+end
+
+-- Estimated production (mB) of one thread serving `gas` over one cycle.
+-- Each parallel produces `gas.amount` mB of fluid per second.
+local function estPerCycle(slot, gas)
+    return slot.parallels * gas.amount * interval
+end
 
 -- Returns the list of gases that need pumping right now, sorted by priority
 -- (then by deficit), applying hysteresis to avoid flapping around the target.
@@ -56,6 +72,8 @@ local function computeNeedy(stock)
                     deficit = target - current,
                     target = target,
                     current = current,
+                    threadsAssigned = 0,
+                    estProduction = 0,
                 }
             end
         end
@@ -68,86 +86,107 @@ local function computeNeedy(stock)
     return needy
 end
 
--- Decides how many pumps each needy gas should get: one pump each in priority
--- order first (breadth), then leftover pumps double up on the highest-priority
--- gases (depth), capped by maxPerGas.
-local function desiredCounts(needy, nPumps)
-    local want = {}
-    for _, n in ipairs(needy) do want[n.name] = 0 end
+-- Assigns threads to needy gases and returns a map slot -> gas name (nil = idle).
+-- Sticky: threads already serving a still-needy gas are kept; only the surplus
+-- and previously-idle threads are (re)assigned, biggest thread first.
+local function allocate(needy)
+    local needyByName = {}
+    for _, n in ipairs(needy) do needyByName[n.name] = n end
 
-    local remaining = nPumps
-    while remaining > 0 do
-        local progress = false
-        for _, n in ipairs(needy) do
-            if remaining == 0 then break end
-            if want[n.name] < maxPerGas then
-                want[n.name] = want[n.name] + 1
-                remaining = remaining - 1
-                progress = true
+    -- Partition current assignments into sticky (still needed) vs free.
+    local keptByGas, free = {}, {}
+    for _, s in ipairs(slots) do
+        if s.name and needyByName[s.name] then
+            local list = keptByGas[s.name]
+            if not list then list = {}; keptByGas[s.name] = list end
+            list[#list + 1] = s
+        else
+            free[#free + 1] = s
+        end
+    end
+
+    local newName = {}
+
+    -- Phase 1: keep sticky threads up to each gas's deficit; free the surplus.
+    for _, n in ipairs(needy) do
+        for _, s in ipairs(keptByGas[n.name] or {}) do
+            if n.estProduction >= n.deficit then
+                free[#free + 1] = s
+            else
+                newName[s] = n.name
+                n.threadsAssigned = n.threadsAssigned + 1
+                n.estProduction = n.estProduction + estPerCycle(s, n.gas)
             end
         end
-        if not progress then break end
     end
-    return want
+
+    -- Phase 2: cover remaining deficits from the free pool, biggest thread first
+    -- and in priority order. free[i] = false marks a thread as taken.
+    table.sort(free, function(a, b) return a.parallels > b.parallels end)
+    for _, n in ipairs(needy) do
+        local i = 1
+        while n.estProduction < n.deficit and i <= #free do
+            local s = free[i]
+            if s then
+                newName[s] = n.name
+                n.threadsAssigned = n.threadsAssigned + 1
+                n.estProduction = n.estProduction + estPerCycle(s, n.gas)
+                free[i] = false
+            end
+            i = i + 1
+        end
+    end
+
+    return newName
 end
 
--- Reconciles physical pumps with the desired allocation, keeping pumps on a gas
--- they are already serving (sticky) to minimize costly reconfigurations.
-local function apply(needy, want)
-    local free = {}
-    local held = {} -- gas name -> number of pumps kept on it
+-- Applies the assignment to the hardware: configures assigned threads, idles the
+-- rest (parallels 0), and enables pumps with any active thread / disables idle
+-- ones. Also updates slot.name for next cycle's stickiness.
+local function applyAllocation(newName)
+    local active = {}
+    for _, s in ipairs(slots) do
+        if newName[s] then active[s.pump] = true end
+    end
+
+    for _, s in ipairs(slots) do
+        local name = newName[s]
+        if name then
+            local g = gasByName[name]
+            local ok, err = s.pump:setThread(s.thread, g.planet, g.gas, s.parallels)
+            if not ok then
+                log("ERROR " .. s.pump.address .. " thread " .. s.thread .. ": " .. tostring(err))
+            end
+        else
+            s.pump:idleThread(s.thread)
+        end
+        s.name = name
+    end
 
     for _, p in ipairs(pumpList) do
-        local name = p.assignedName
-        if name and (want[name] or 0) > (held[name] or 0) then
-            held[name] = (held[name] or 0) + 1
-        else
-            free[#free + 1] = p
-        end
-    end
-
-    for _, n in ipairs(needy) do
-        local have = held[n.name] or 0
-        local parallels = n.gas.parallels or cfg.parallels
-        while have < want[n.name] and #free > 0 do
-            local p = table.remove(free)
-            local ok, err = p:setConfig(n.gas.planet, n.gas.gas, parallels)
-            if ok then
-                p.assignedName = n.name
-                p:setEnabled(true)
-                have = have + 1
-            else
-                log("ERROR configuring pump " .. p.address .. ": " .. tostring(err))
-            end
-        end
-    end
-
-    for _, p in ipairs(free) do
-        p:setEnabled(false)
-        p.assignedName = nil
+        p:setEnabled(active[p] == true)
     end
 end
 
-local function logAllocation(needy, want)
+local function logAllocation(needy)
     if #needy == 0 then
-        log("All demanded gases satisfied; " .. #pumpList .. " pump(s) idle.")
+        log("All demanded gases satisfied; " .. #slots .. " thread(s) idle.")
         return
     end
     local used = 0
     for _, n in ipairs(needy) do
-        local w = want[n.name] or 0
-        used = used + w
-        log(string.format("  %-16s cur=%d/%d prio=%d -> %d pump(s)",
-            n.name, n.current, n.target, n.priority, w))
+        used = used + n.threadsAssigned
+        log(string.format("  %-18s cur=%d/%d prio=%d -> %d thread(s), ~%d mB/cycle",
+            n.name, n.current, n.target, n.priority, n.threadsAssigned, n.estProduction))
     end
-    log(string.format("  (%d/%d pumps assigned)", used, #pumpList))
+    log(string.format("  (%d/%d threads assigned)", used, #slots))
 end
 
 if #pumpList == 0 then
     log("No pumps discovered. Are the pump Adapters connected? (try `probe gt_machine`)")
 end
-log("Pump regulator started -- discovered " .. #pumpList .. " pump(s)" ..
-    (cfg.dryRun and " [DRY RUN -- no pumps will be touched]" or "") .. ":")
+log(string.format("Pump regulator started -- %d pump(s), %d thread(s), %ds cycle%s:",
+    #pumpList, #slots, interval, cfg.dryRun and " [DRY RUN -- no pumps will be touched]" or ""))
 for _, p in ipairs(pumpList) do
     log(string.format("  %s  %s (%d thread(s), %d parallels)",
         p.address, p.tierName or "?", p.threads or 0, p.parallels or 0))
@@ -159,11 +198,11 @@ while true do
         log("AE2 error: " .. tostring(err))
     else
         local needy = computeNeedy(stock)
-        local want = desiredCounts(needy, #pumpList)
+        local newName = allocate(needy)
         if not cfg.dryRun then
-            apply(needy, want)
+            applyAllocation(newName)
         end
-        logAllocation(needy, want)
+        logAllocation(needy)
     end
-    os.sleep(cfg.sleep or 10)
+    os.sleep(interval)
 end

@@ -37,18 +37,23 @@ The TecTech parameter layout is already set in `pumps.lua`: parameters are
 written with `setParameters(hatch, id, value)` — planet `(0,0)`, gas `(0,1)`,
 parallels `(1,0)` — and the pump is toggled with `setWorkAllowed(bool)`. The
 layout generalizes to thread `i` as planet `(2i,0)`, gas `(2i,1)`, parallels
-`(2i+1,0)`. This MVP drives **one thread per pump**.
+`(2i+1,0)`, and each thread is set independently (MK-1 has 1 thread, MK-2/3 have
+4), so one pump can serve several gases at once.
 3. **Dry run** (`cfg.dryRun = true`, the default): run `main` and confirm the
    logged allocation looks right — no pump is touched.
 4. **Go live**: set `cfg.dryRun = false` and run `main`.
 
 ## How allocation works
 
-Each cycle: read AE2 stock → find gases below target (with hysteresis so a pump
-does not flap around the target) → sort by priority, then deficit → give every
-needy gas one pump first, then double leftover pumps onto the highest-priority
-gases (up to `cfg.maxPumpsPerGas`). Pumps stay on their current gas when still
-needed (sticky) to avoid needless reconfiguration.
+The allocation unit is a **thread** (each pump contributes one per tier level:
+MK-1 = 1, MK-2/3 = 4). Each cycle: read AE2 stock → find gases below target (with
+hysteresis so a thread does not flap around the target) → sort by priority, then
+deficit → assign threads to each needy gas until its estimated production over
+one cycle covers the deficit (a thread makes `gas.amount × parallels` mB/s), then
+move to the next gas. Higher-priority gases get threads first; a big deficit can
+pull several threads. Threads already serving a still-needy gas are kept (sticky)
+to avoid needless reconfiguration; unused threads are idled (parallels 0) and
+fully-idle pumps are disabled.
 
 ## Files
 
@@ -58,6 +63,6 @@ needed (sticky) to avoid needless reconfiguration.
 | `pumps.lua`  | pump abstraction — the only place that drives TecTech hardware |
 | `ae2.lua`    | reads gas stock from the AE2 network |
 | `gases.lua`  | static data: the available pumping configurations |
-| `config.lua` | your demand, pump addresses, tuning (never overwritten by updates) |
+| `config.lua` | your demand + tuning (never overwritten by updates) |
 | `probe.lua`  | in-game discovery tool |
 | `check.lua`  | validates gases.lua names/keys against the AE2 network |

@@ -1,7 +1,7 @@
 -- Pump abstraction layer -- the ONE place that talks to the TecTech hardware.
 --
 -- The allocation/demand logic in main.lua only ever calls the small interface
--- below (setConfig / setEnabled / isActive / currentConfig). Everything about
+-- below (setThread / idleThread / setEnabled / isActive). Everything about
 -- HOW a pump is driven lives here, so:
 --   * the TecTech parameter layout can be corrected in one spot, and
 --   * a future modem/worker transport (remote pumps) can be slotted in here
@@ -63,8 +63,8 @@ function Pump.new(address, tier, proxy)
     self.threads = stats.threads
     self.parallels = stats.parallels
 
-    self.config = nil        -- { planet=, gas=, parallels= } last applied by us
-    self.assignedName = nil  -- gas name main.lua allocated to this pump
+    -- Per-thread hardware config last applied by us (thread index -> table).
+    self.threadConfig = {}
     return self
 end
 
@@ -76,10 +76,9 @@ local function writeParam(proxy, slot, value)
     return pcall(setter, slot.hatch, slot.id, value)
 end
 
--- Applies a (planet, gas) configuration to a thread (default 0), optionally the
--- parallels count too (pass nil to leave the pump's existing parallels
--- untouched). Returns true, or false + error.
-function Pump:setConfig(planet, gas, parallels, thread)
+-- Configures one thread to pump (planet, gas) at the given parallels count.
+-- Returns true, or false + error.
+function Pump:setThread(thread, planet, gas, parallels)
     local slots = layout(thread)
 
     local ok, err = writeParam(self.proxy, slots.planet, planet)
@@ -88,12 +87,19 @@ function Pump:setConfig(planet, gas, parallels, thread)
     ok, err = writeParam(self.proxy, slots.gas, gas)
     if not ok then return false, tostring(err) end
 
-    if parallels ~= nil then
-        ok, err = writeParam(self.proxy, slots.parallels, parallels)
-        if not ok then return false, tostring(err) end
-    end
+    ok, err = writeParam(self.proxy, slots.parallels, parallels)
+    if not ok then return false, tostring(err) end
 
-    self.config = { planet = planet, gas = gas, parallels = parallels }
+    self.threadConfig[thread] = { planet = planet, gas = gas, parallels = parallels }
+    return true
+end
+
+-- Idles one thread by setting its parallels to 0 (produces nothing) without
+-- disturbing the other threads. Returns true, or false + error.
+function Pump:idleThread(thread)
+    local ok, err = writeParam(self.proxy, layout(thread).parallels, 0)
+    self.threadConfig[thread] = nil
+    if not ok then return false, tostring(err) end
     return true
 end
 
@@ -111,11 +117,6 @@ function Pump:isActive()
         return ok and v == true
     end
     return false
-end
-
--- The last (planet, gas, parallels) we applied, or nil if never configured.
-function Pump:currentConfig()
-    return self.config
 end
 
 local pumps = {}

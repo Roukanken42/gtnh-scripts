@@ -6,10 +6,9 @@
 --              (e.g. "Molten Redstone"), so it must match the in-game label.
 --   planet     TecTech parameter (hatch 0, id 0) selecting the planet.
 --   gas        TecTech parameter (hatch 0, id 1) selecting the gas type.
---   amount     Relative pumping speed of this configuration (higher = faster).
---              Reserved for future throughput-based pump-count tuning.
---   parallels  (optional) Parallels count to set on a pump serving this gas
---              (hatch 1, id 0). Leave nil to keep the pump's manual setting.
+--   amount     Fluid produced per parallel per second (mB). The controller uses
+--              it to estimate a thread's output and assign enough threads to
+--              cover each gas's deficit.
 --
 -- Sorted by planet then gas. Run `check` to verify names against the AE2
 -- network and to detect duplicate names / (planet, gas) pairs.

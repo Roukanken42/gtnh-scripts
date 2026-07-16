@@ -69,24 +69,14 @@ cfg.demand = {
     ["Molten Tin"]        = { target = 0, priority = 0 },
 }
 
--- Optional default "parallels" count (pumping speed, hatch 1 id 0) to set on a
--- pump when it is assigned to a gas. Leave nil to never touch parallels and use
--- whatever each pump was set to manually. A per-gas `parallels` in gases.lua
--- overrides this.
-cfg.parallels = nil
-
--- Seconds between control cycles.
-cfg.sleep = 10
+-- Seconds between control cycles. Also the window used to estimate how much a
+-- thread will produce (each parallel makes <gas.amount> mB per second).
+cfg.sleep = 30
 
 -- Hysteresis: once a gas reaches its target it is considered satisfied and is
--- not pumped again until it drops below (lowWater * target). Prevents a pump
+-- not pumped again until it drops below (lowWater * target). Prevents a thread
 -- from flapping on/off around the target. 0.9 = resume at 90% of target.
 cfg.lowWater = 0.9
-
--- Maximum pumps that may be assigned to a single gas. Every needy gas gets one
--- pump first (in priority order); leftover pumps then double up on the highest
--- priority gases, up to this cap. Defaults to "all pumps" if left nil.
-cfg.maxPumpsPerGas = nil
 
 -- Safety: when true, the controller only LOGS the allocation it would make and
 -- never touches a pump. Flip to false once you have verified the plan in-game.

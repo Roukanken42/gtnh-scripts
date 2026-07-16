@@ -120,3 +120,7 @@ print(string.format("Done: %d installed, %d kept, %d failed.", installed, kept, 
 if failed > 0 then
     print("Some files failed - check the URL/branch in install.lua and your Internet Card.")
 end
+if installed > 0 then
+    print("Reboot before running (or `reboot`) so updated libraries reload -")
+    print("OpenComputers caches required modules until the computer restarts.")
+end

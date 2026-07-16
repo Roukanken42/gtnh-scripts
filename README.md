@@ -17,7 +17,9 @@ wget https://gitlab.com/Roukanken/gtnh-scripts/-/raw/main/install.lua && ./insta
 `install` reads the [`manifest`](manifest) file and downloads every listed file
 into place, creating directories as needed.
 
-- Re-run `install` any time to update a machine to the latest version.
+- Re-run `install` any time to update a machine to the latest version, then
+  **`reboot`** — OpenComputers caches required libraries, so updated modules do
+  not take effect until the computer restarts.
 - Install only part of the repo by passing a path prefix, e.g. `install aether`
   installs just the files under `aether/`.
 - Files marked with `?` in the manifest (e.g. `config.lua`) are only fetched

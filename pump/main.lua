@@ -27,7 +27,7 @@ local pumpList = pumps.discover()
 local satisfied = {} -- gas name -> boolean (hysteresis latch)
 local lowWater = cfg.lowWater or 0.9
 local interval = cfg.sleep or 30
-local criticalWeight = cfg.criticalWeight or 10
+local criticalWeight = cfg.criticalWeight or 4
 
 -- Flatten pumps into individual thread "slots" (built once; slot.name carries
 -- the current gas assignment across cycles for sticky reallocation).

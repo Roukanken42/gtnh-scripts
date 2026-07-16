@@ -83,11 +83,11 @@ cfg.sleep = 30
 cfg.lowWater = 0.9
 
 -- Criticality: how many times more important a gas is when EMPTY versus FULL.
--- With criticalWeight = 10, an empty tank scores 10x its priority and a full one
+-- With criticalWeight = 4, an empty tank scores 4x its priority and a full one
 -- scores 1x; the boost ramps up quadratically, so it stays small until a tank is
 -- genuinely low. Raise it to let emptiness override bigger priority gaps; set to
 -- 1 to disable criticality and rank purely by priority.
-cfg.criticalWeight = 10
+cfg.criticalWeight = 4
 
 -- Safety: when true, the controller only LOGS the allocation it would make and
 -- never touches a pump. Flip to false once you have verified the plan in-game.

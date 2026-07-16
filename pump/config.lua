@@ -43,7 +43,6 @@ cfg.demand = {
     ["Salt Water"]        = { target = 0, priority = 0 },
     ["Helium"]            = { target = 0, priority = 0 },
     ["Liquid Oxygen"]     = { target = 0, priority = 0 },
-    ["Liquid"]            = { target = 0, priority = 0 },
     ["Neon"]              = { target = 0, priority = 0 },
     ["Argon"]             = { target = 0, priority = 0 },
     ["Krypton"]           = { target = 0, priority = 0 },

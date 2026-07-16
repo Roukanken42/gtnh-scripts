@@ -40,7 +40,6 @@ local gases = {
     { name = "Salt Water",        planet = 5, gas =  3, amount = 2800000 },
     { name = "Helium",            planet = 5, gas =  4, amount = 1400000 },
     { name = "Liquid Oxygen",     planet = 5, gas =  5, amount = 896000 },
-    { name = "Liquid",            planet = 5, gas =  5, amount = 896000 },
     { name = "Neon",              planet = 5, gas =  6, amount = 32000 },
     { name = "Argon",             planet = 5, gas =  7, amount = 32000 },
     { name = "Krypton",           planet = 5, gas =  8, amount = 8000 },

@@ -22,7 +22,7 @@ Needs an **Internet Card** (to install) and an **Adapter** on each pumping modul
    probe fluids          -- clean fluid labels (e.g. "Molten Redstone") for gases.lua
    ```
 2. **Finalize the data/config** from that output:
-   - `gases.lua` — the ~40 configs (planet/gas ints, amounts, `fluid` labels).
+   - `gases.lua` — the ~40 configs; each `name` must match the fluid label.
    - `config.lua` — `cfg.pumps` addresses and your `cfg.demand` (targets in mB).
 
 The TecTech parameter layout is already set in `pumps.lua`: parameters are

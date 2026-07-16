@@ -23,31 +23,25 @@ end
 --   gas.name -> current amount (mB) stored in the network
 -- Every gas in `gases` is present in the result (0 if none stored).
 --
--- Matching per gas (against getFluidsInNetwork() entries):
---   * gas.fluidName (unlocalized id) if provided, else
---   * gas.fluid     (localized label, e.g. "Molten Redstone")
+-- gas.name is matched against each fluid's `label` from getFluidsInNetwork().
 function ae2.getStock(gases)
     local me, err = ae2.getMe()
     if not me then
         return nil, err
     end
 
-    -- Build O(1) lookups so we only walk the network fluid list once.
-    local byLabel, byName = {}, {}
+    -- Build an O(1) lookup so we only walk the network fluid list once.
+    local byLabel = {}
     local stock = {}
     for _, gas in ipairs(gases) do
         stock[gas.name] = 0
-        if gas.fluidName then
-            byName[gas.fluidName] = gas
-        elseif gas.fluid then
-            byLabel[gas.fluid] = gas
-        end
+        byLabel[gas.name] = gas
     end
 
     local fluids = me.getFluidsInNetwork()
     for i = 1, #fluids do
         local f = fluids[i]
-        local gas = (f.name and byName[f.name]) or byLabel[f.label]
+        local gas = f.label and byLabel[f.label]
         if gas then
             stock[gas.name] = stock[gas.name] + (f.amount or 0)
         end

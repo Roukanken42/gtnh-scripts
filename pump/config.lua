@@ -4,12 +4,8 @@
 
 local cfg = {}
 
--- Component addresses of the pumps this computer controls. Run `probe` to list
--- connected components and copy the pumping modules' addresses here. Partial
--- (prefix) addresses are fine. Only pumps listed here are ever reconfigured.
-cfg.pumps = {
-    -- "a1b2c3d4",
-}
+-- Pumps are auto-discovered on the network (any gt_machine whose getName() is
+-- "projectmodulepumptN"), so there is no pump list to maintain here.
 
 -- Demand: for each gas you want kept in stock,
 --   target   = amount (mB) to maintain in the AE2 network (0 = do not pump it)

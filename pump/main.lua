@@ -20,7 +20,7 @@ for _, g in ipairs(gases) do
     gasByName[g.name] = g
 end
 
-local pumpList = pumps.load(cfg.pumps or {})
+local pumpList = pumps.discover()
 local satisfied = {} -- gas name -> boolean (hysteresis latch)
 
 local lowWater = cfg.lowWater or 0.9
@@ -144,10 +144,14 @@ local function logAllocation(needy, want)
 end
 
 if #pumpList == 0 then
-    log("No pumps configured. Set cfg.pumps in config.lua (run `probe` for addresses).")
+    log("No pumps discovered. Are the pump Adapters connected? (try `probe gt_machine`)")
 end
-log("Pump regulator started with " .. #pumpList .. " pump(s)" ..
-    (cfg.dryRun and " [DRY RUN -- no pumps will be touched]" or ""))
+log("Pump regulator started -- discovered " .. #pumpList .. " pump(s)" ..
+    (cfg.dryRun and " [DRY RUN -- no pumps will be touched]" or "") .. ":")
+for _, p in ipairs(pumpList) do
+    log(string.format("  %s  %s (%d thread(s), %d parallels)",
+        p.address, p.tierName or "?", p.threads or 0, p.parallels or 0))
+end
 
 while true do
     local stock, err = ae2.getStock(gases)

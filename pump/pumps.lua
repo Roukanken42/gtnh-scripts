@@ -28,6 +28,16 @@ local component = require("component")
 local PUMP_TYPE = "gt_machine"   -- component type the pump's Adapter exposes
 local PARAM_SET = "setParameters"
 
+-- Pumps are identified by getName() == "projectmodulepumptN", where N is the
+-- tier. Each tier has fixed stats (stored on the Pump for later multi-thread /
+-- parallels-aware allocation).
+local PUMP_NAME = "projectmodulepumpt"
+local TIERS = {
+    [1] = { name = "MK-1", threads = 1, parallels = 4 },
+    [2] = { name = "MK-2", threads = 4, parallels = 4 },
+    [3] = { name = "MK-3", threads = 4, parallels = 64 },
+}
+
 local function layout(thread)
     thread = thread or 0
     return {
@@ -41,10 +51,18 @@ end
 local Pump = {}
 Pump.__index = Pump
 
-function Pump.new(address)
+function Pump.new(address, tier, proxy)
     local self = setmetatable({}, Pump)
     self.address = address
-    self.proxy = component.proxy(address)
+    self.proxy = proxy or component.proxy(address)
+
+    -- Per-tier stats (see TIERS), kept for later multi-thread / parallels use.
+    local stats = TIERS[tier] or {}
+    self.tier = tier
+    self.tierName = stats.name
+    self.threads = stats.threads
+    self.parallels = stats.parallels
+
     self.config = nil        -- { planet=, gas=, parallels= } last applied by us
     self.assignedName = nil  -- gas name main.lua allocated to this pump
     return self
@@ -102,33 +120,27 @@ end
 
 local pumps = {}
 
--- Builds Pump objects for an explicit list of component addresses (may be
--- partial addresses -- they are resolved against PUMP_TYPE). A bad address is
--- skipped with a warning rather than crashing the controller.
-function pumps.load(addresses)
+-- Autodiscovers pump multiblocks on the network. Every gt_machine whose
+-- getName() is "projectmodulepumptN" (N = a known tier) becomes a Pump carrying
+-- that tier's stats. Machines that error on getName() or are not pumps are
+-- skipped. Returns the list of Pump objects.
+function pumps.discover()
     local list = {}
-    for _, addr in ipairs(addresses or {}) do
-        local full = component.get(addr, PUMP_TYPE) or addr
-        local ok, pump = pcall(Pump.new, full)
-        if ok then
-            list[#list + 1] = pump
-        else
-            print("WARN: could not load pump '" .. tostring(addr) .. "': " .. tostring(pump))
+    for addr in component.list(PUMP_TYPE) do
+        local proxy = component.proxy(addr)
+        local ok, name = pcall(function() return proxy.getName() end)
+        if ok and type(name) == "string" then
+            local tier = tonumber(name:match("^" .. PUMP_NAME .. "(%d+)$"))
+            if tier and TIERS[tier] then
+                list[#list + 1] = Pump.new(addr, tier, proxy)
+            end
         end
     end
     return list
 end
 
--- Lists candidate pump addresses currently on the network (for config setup).
-function pumps.discover()
-    local found = {}
-    for addr in component.list(PUMP_TYPE) do
-        found[#found + 1] = addr
-    end
-    return found
-end
-
 pumps.Pump = Pump
 pumps.TYPE = PUMP_TYPE
+pumps.TIERS = TIERS
 
 return pumps

@@ -23,9 +23,15 @@ Needs an **Internet Card** (to install) and an **Adapter** on each pumping modul
    ```
 2. **Finalize the data/config** from that output:
    - `gases.lua` — the ~40 configs; each `name` must match the fluid label.
-   - `config.lua` — `cfg.pumps` addresses and your `cfg.demand` (targets in mB).
+   - `config.lua` — your `cfg.demand` (targets in mB). Pumps are auto-discovered,
+     so there are no addresses to configure.
    Then run `check` to verify every gas name matches an AE2 fluid label and to
    catch duplicate names / (planet, gas) pairs.
+
+Pumps are found automatically: any `gt_machine` whose `getName()` is
+`projectmodulepumptN` is treated as a tier-N pump (MK-1/2/3), and its thread and
+parallels stats are recorded for allocation. `main` logs what it discovered on
+startup.
 
 The TecTech parameter layout is already set in `pumps.lua`: parameters are
 written with `setParameters(hatch, id, value)` — planet `(0,0)`, gas `(0,1)`,

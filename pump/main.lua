@@ -72,6 +72,7 @@ local function computeNeedy(stock)
 
             if need then
                 local priority = demand.priority or 0
+                local cw = demand.criticalWeight or criticalWeight
                 local missingFraction = (target - current) / target
                 needy[#needy + 1] = {
                     name = name,
@@ -81,7 +82,7 @@ local function computeNeedy(stock)
                     target = target,
                     current = current,
                     missingFraction = missingFraction,
-                    score = priority * (1 + (criticalWeight - 1) * missingFraction * missingFraction),
+                    score = priority * (1 + (cw - 1) * missingFraction * missingFraction),
                     threadsAssigned = 0,
                     estProduction = 0,
                 }

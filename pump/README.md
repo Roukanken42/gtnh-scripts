@@ -56,7 +56,8 @@ score = priority * (1 + (criticalWeight - 1) * missingFraction^2)
 
 A full tank scores `priority × 1`, an empty one `priority × criticalWeight`, so a
 critically-low fluid can outrank a well-stocked but higher-priority one; the
-square keeps the boost small until a tank is genuinely low. See `cfg.criticalWeight`.
+square keeps the boost small until a tank is genuinely low. See `cfg.criticalWeight`
+(a gas can override it with a `criticalWeight` field in its demand entry).
 
 Threads are then assigned **breadth-first by score**: every served gas gets one
 thread before any gets a second, so with few threads and many gases only the top

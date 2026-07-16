@@ -8,8 +8,9 @@ local cfg = {}
 -- "projectmodulepumptN"), so there is no pump list to maintain here.
 
 -- Demand: for each gas you want kept in stock,
---   target   = amount (mB) to maintain in the AE2 network (0 = do not pump it)
---   priority = base importance; higher wins when threads are scarce
+--   target         = amount (mB) to maintain in the AE2 network (0 = do not pump it)
+--   priority       = base importance; higher wins when threads are scarce
+--   criticalWeight = (optional) per-gas override of cfg.criticalWeight below
 -- Threads are assigned by a score that boosts priority as a tank empties:
 --   score = priority * (1 + (criticalWeight - 1) * missingFraction^2)
 -- so a nearly-empty low-priority gas can outrank a well-stocked high-priority one
@@ -86,7 +87,8 @@ cfg.lowWater = 0.9
 -- With criticalWeight = 4, an empty tank scores 4x its priority and a full one
 -- scores 1x; the boost ramps up quadratically, so it stays small until a tank is
 -- genuinely low. Raise it to let emptiness override bigger priority gaps; set to
--- 1 to disable criticality and rank purely by priority.
+-- 1 to disable criticality and rank purely by priority. Individual gases can
+-- override this via a `criticalWeight` field in their demand entry above.
 cfg.criticalWeight = 4
 
 -- Safety: when true, the controller only LOGS the allocation it would make and

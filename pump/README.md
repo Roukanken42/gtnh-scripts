@@ -24,6 +24,8 @@ Needs an **Internet Card** (to install) and an **Adapter** on each pumping modul
 2. **Finalize the data/config** from that output:
    - `gases.lua` — the ~40 configs; each `name` must match the fluid label.
    - `config.lua` — `cfg.pumps` addresses and your `cfg.demand` (targets in mB).
+   Then run `check` to verify every gas name matches an AE2 fluid label and to
+   catch duplicate names / (planet, gas) pairs.
 
 The TecTech parameter layout is already set in `pumps.lua`: parameters are
 written with `setParameters(hatch, id, value)` — planet `(0,0)`, gas `(0,1)`,
@@ -52,3 +54,4 @@ needed (sticky) to avoid needless reconfiguration.
 | `gases.lua`  | static data: the available pumping configurations |
 | `config.lua` | your demand, pump addresses, tuning (never overwritten by updates) |
 | `probe.lua`  | in-game discovery tool |
+| `check.lua`  | validates gases.lua names/keys against the AE2 network |

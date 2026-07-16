@@ -5,6 +5,7 @@ install.lua
 pump/ae2.lua
 ? pump/config.lua
 pump/gases.lua
+pump/check.lua
 pump/main.lua
 pump/probe.lua
 pump/pumps.lua

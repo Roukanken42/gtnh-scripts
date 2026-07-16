@@ -12,12 +12,66 @@ cfg.pumps = {
 }
 
 -- Demand: for each gas you want kept in stock,
---   target   = amount (mB) to maintain in the AE2 network
+--   target   = amount (mB) to maintain in the AE2 network (0 = do not pump it)
 --   priority = higher number wins when there are not enough pumps for everyone
+-- Every gas from gases.lua is listed below with target 0 (disabled). Set a
+-- target and priority for the gases you want maintained; delete the rest if you
+-- like. Grouped by planet to match gases.lua.
 cfg.demand = {
-    -- ["Hydrogen"] = { target = 64000000, priority = 10 },
-    -- ["Helium"]   = { target = 16000000, priority = 5  },
-    -- ["Nitrogen"] = { target = 8000000,  priority = 1  },
+    -- Planet 2
+    ["Chlorobenzene"]     = { target = 0, priority = 0 },
+
+    -- Planet 3
+    ["Ender Goo"]         = { target = 0, priority = 0 },
+    ["Very Heavy Oil"]    = { target = 0, priority = 0 },
+    ["Lava"]              = { target = 0, priority = 0 },
+    ["Natural Gas"]       = { target = 0, priority = 0 },
+
+    -- Planet 4
+    ["Sulfuric Acid"]     = { target = 0, priority = 0 },
+    ["Molten Iron"]       = { target = 0, priority = 0 },
+    ["Oil"]               = { target = 0, priority = 0 },
+    ["Heavy Oil"]         = { target = 0, priority = 0 },
+    ["Molten Lead"]       = { target = 0, priority = 0 },
+    ["Raw Oil"]           = { target = 0, priority = 0 },
+    ["Light Oil"]         = { target = 0, priority = 0 },
+    ["Carbon Dioxide"]    = { target = 0, priority = 0 },
+
+    -- Planet 5
+    ["Carbon Monoxide"]   = { target = 0, priority = 0 },
+    ["Helium-3"]          = { target = 0, priority = 0 },
+    ["Salt Water"]        = { target = 0, priority = 0 },
+    ["Helium"]            = { target = 0, priority = 0 },
+    ["Liquid Oxygen"]     = { target = 0, priority = 0 },
+    ["Liquid"]            = { target = 0, priority = 0 },
+    ["Neon"]              = { target = 0, priority = 0 },
+    ["Argon"]             = { target = 0, priority = 0 },
+    ["Krypton"]           = { target = 0, priority = 0 },
+    ["Methane"]           = { target = 0, priority = 0 },
+    ["Hydrogen Sulfide"]  = { target = 0, priority = 0 },
+    ["Ethane"]            = { target = 0, priority = 0 },
+
+    -- Planet 6
+    ["Deuterium"]         = { target = 0, priority = 0 },
+    ["Tritium"]           = { target = 0, priority = 0 },
+    ["Ammonia"]           = { target = 0, priority = 0 },
+    ["Xenon"]             = { target = 0, priority = 0 },
+    ["Ethylene"]          = { target = 0, priority = 0 },
+
+    -- Planet 7
+    ["Hydrofluoric Acid"] = { target = 0, priority = 0 },
+    ["Fluorine"]          = { target = 0, priority = 0 },
+    ["Nitrogen"]          = { target = 0, priority = 0 },
+    ["Oxygen"]            = { target = 0, priority = 0 },
+
+    -- Planet 8
+    ["Hydrogen"]          = { target = 0, priority = 0 },
+    ["Liquid Air"]        = { target = 0, priority = 0 },
+    ["Molten Copper"]     = { target = 0, priority = 0 },
+    ["Unknown Liquid"]    = { target = 0, priority = 0 },
+    ["Distilled Water"]   = { target = 0, priority = 0 },
+    ["Radon"]             = { target = 0, priority = 0 },
+    ["Molten Tin"]        = { target = 0, priority = 0 },
 }
 
 -- Optional default "parallels" count (pumping speed, hatch 1 id 0) to set on a

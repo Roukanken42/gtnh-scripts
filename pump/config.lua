@@ -95,4 +95,9 @@ cfg.criticalWeight = 4
 -- never touches a pump. Flip to false once you have verified the plan in-game.
 cfg.dryRun = true
 
+-- Show the full-screen dashboard (needs a GPU + screen). Set to false to run
+-- headless with plain text logging instead. Falls back to text automatically if
+-- no GPU/screen is present.
+cfg.ui = true
+
 return cfg

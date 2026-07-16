@@ -12,9 +12,18 @@ local ae2 = require("ae2")
 local pumps = require("pumps")
 local gases = require("gases")
 local cfg = require("config")
+local ui = require("ui")
+
+-- Recent log lines. Shown in the UI's log panel; also printed to the console
+-- when the UI is not active.
+local messages = {}
+local MAX_MESSAGES = 50
 
 local function log(msg)
-    print("[" .. os.date("%H:%M:%S") .. "] " .. msg)
+    local line = "[" .. os.date("%H:%M:%S") .. "] " .. msg
+    messages[#messages + 1] = line
+    if #messages > MAX_MESSAGES then table.remove(messages, 1) end
+    if not ui.active then print(line) end
 end
 
 -- name -> gas definition
@@ -190,6 +199,94 @@ local function applyAllocation(newName)
     end
 end
 
+-- Human-readable "2x MK-1  1x MK-3" summary of the discovered fleet.
+local tierSummary
+do
+    local counts = {}
+    for _, p in ipairs(pumpList) do
+        local t = p.tierName or "?"
+        counts[t] = (counts[t] or 0) + 1
+    end
+    local parts = {}
+    for tier, c in pairs(counts) do parts[#parts + 1] = c .. "x " .. tier end
+    table.sort(parts)
+    tierSummary = table.concat(parts, "  ")
+end
+
+local function statusFor(g)
+    if g.threads > 0 then return "PUMP" end
+    if not g.needy then return "OK" end
+    if g.fill < 0.25 then return "CRIT" end
+    return "WAIT"
+end
+
+-- Assembles the read-only snapshot the UI renders. Keeps all display shaping out
+-- of the allocation logic above.
+local function buildState(stock, needy, newName, cycle)
+    -- Per-pump view with each thread's current assignment + parallels in use.
+    local pumpView, pumpIndex = {}, {}
+    for _, p in ipairs(pumpList) do
+        local pv = {
+            tierName = p.tierName, address = p.address, parallels = p.parallels,
+            threadCount = p.threads or 0, threads = {}, active = 0,
+        }
+        pumpIndex[p] = pv
+        pumpView[#pumpView + 1] = pv
+    end
+    local parallels = 0
+    for _, s in ipairs(slots) do
+        local name = newName[s]
+        if name then
+            local pv = pumpIndex[s.pump]
+            pv.threads[s.thread] = name
+            pv.active = pv.active + 1
+            parallels = parallels + s.parallels
+        end
+    end
+
+    local needyByName = {}
+    for _, n in ipairs(needy) do needyByName[n.name] = n end
+
+    -- Every demanded gas (target > 0), whether needy or satisfied.
+    local gasView = {}
+    for name, demand in pairs(cfg.demand) do
+        if (demand.target or 0) > 0 and gasByName[name] then
+            local current = stock[name] or 0
+            local target = demand.target
+            local n = needyByName[name]
+            local g = {
+                name = name, current = current, target = target,
+                fill = math.min(1, current / target),
+                priority = demand.priority or 0,
+                score = n and n.score or 0,
+                threads = n and n.threadsAssigned or 0,
+                needy = n ~= nil,
+            }
+            g.status = statusFor(g)
+            gasView[#gasView + 1] = g
+        end
+    end
+    table.sort(gasView, function(a, b)
+        if (a.threads > 0) ~= (b.threads > 0) then return a.threads > 0 end
+        if a.needy ~= b.needy then return a.needy end
+        if a.score ~= b.score then return a.score > b.score end
+        return a.fill < b.fill
+    end)
+
+    local threadsUsed = 0
+    for _, pv in ipairs(pumpView) do threadsUsed = threadsUsed + pv.active end
+
+    return {
+        dryRun = cfg.dryRun, cycle = cycle, updated = os.date("%H:%M:%S"),
+        pumps = pumpView, tierSummary = tierSummary, gases = gasView,
+        totals = {
+            pumps = #pumpList, threadsUsed = threadsUsed, threadsTotal = #slots,
+            parallels = parallels, euPerTick = parallels * 2097152,
+        },
+        messages = messages,
+    }
+end
+
 local function logAllocation(needy)
     if #needy == 0 then
         log("All demanded gases satisfied; " .. #slots .. " thread(s) idle.")
@@ -213,27 +310,45 @@ local function logAllocation(needy)
         topUnserved and (", next: " .. topUnserved) or ""))
 end
 
+local uiActive = (cfg.ui ~= false) and ui.init()
+
 if #pumpList == 0 then
     log("No pumps discovered. Are the pump Adapters connected? (try `probe gt_machine`)")
 end
-log(string.format("Pump regulator started -- %d pump(s), %d thread(s), %ds cycle%s:",
-    #pumpList, #slots, interval, cfg.dryRun and " [DRY RUN -- no pumps will be touched]" or ""))
+log(string.format("Pump regulator started -- %d pump(s), %d thread(s), %ds cycle%s",
+    #pumpList, #slots, interval, cfg.dryRun and " [DRY RUN]" or ""))
 for _, p in ipairs(pumpList) do
     log(string.format("  %s  %s (%d thread(s), %d parallels)",
         p.address, p.tierName or "?", p.threads or 0, p.parallels or 0))
 end
 
-while true do
-    local stock, err = ae2.getStock(gases)
-    if not stock then
-        log("AE2 error: " .. tostring(err))
-    else
-        local needy = computeNeedy(stock)
-        local newName = allocate(needy)
-        if not cfg.dryRun then
-            applyAllocation(newName)
+local cycle = 0
+local function loop()
+    while true do
+        cycle = cycle + 1
+        local stock, err = ae2.getStock(gases)
+        local needy, newName = {}, {}
+        if not stock then
+            log("AE2 error: " .. tostring(err))
+            stock = {}
+        else
+            needy = computeNeedy(stock)
+            newName = allocate(needy)
+            if not cfg.dryRun then
+                applyAllocation(newName)
+            end
         end
-        logAllocation(needy)
+
+        if uiActive then
+            ui.render(buildState(stock, needy, newName, cycle))
+        else
+            logAllocation(needy)
+        end
+        os.sleep(interval)
     end
-    os.sleep(interval)
 end
+
+-- Restore the screen on exit (including Ctrl-C, which surfaces as an error).
+local ok, err = pcall(loop)
+ui.shutdown()
+if not ok then error(err, 0) end

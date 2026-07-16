@@ -67,11 +67,22 @@ need (a thread makes `gas.amount × parallels` mB/s). Threads already serving a 
 are reused for it (sticky) to avoid reconfiguration; unused threads are idled
 (parallels 0) and fully-idle pumps disabled.
 
+## Dashboard
+
+With a GPU + screen, `main` shows a live full-screen dashboard (`ui.lua`, toggle
+with `cfg.ui`): a KPI strip (pumps, active threads, **parallels in use**, and the
+resulting **power draw** at 2,097,152 EU/t per parallel), a fluids table with
+colour-coded fill bars / score / status, a per-pump thread panel showing what each
+thread is pumping, and a scrolling log. It runs headless with plain text logging
+if there is no screen or `cfg.ui = false`. The display is pure render — all state
+comes from `main.lua`, so the controller logic is unaffected.
+
 ## Files
 
 | File | Role |
 |------|------|
 | `main.lua`   | control loop + demand/allocation logic |
+| `ui.lua`     | full-screen dashboard (pure display; `cfg.ui`) |
 | `pumps.lua`  | pump abstraction — the only place that drives TecTech hardware |
 | `ae2.lua`    | reads gas stock from the AE2 network |
 | `gases.lua`  | static data: the available pumping configurations |

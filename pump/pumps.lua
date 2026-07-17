@@ -70,7 +70,7 @@ end
 
 local function writeParam(proxy, slot, value)
     local setter = proxy[PARAM_SET]
-    if type(setter) ~= "function" then
+    if setter == nil then
         return false, PARAM_SET .. " not available"
     end
     return pcall(setter, slot.hatch, slot.id, value)
@@ -105,14 +105,14 @@ end
 
 -- Allows / disallows the machine to work.
 function Pump:setEnabled(enabled)
-    if type(self.proxy.setWorkAllowed) == "function" then
+    if self.proxy.setWorkAllowed ~= nil then
         pcall(self.proxy.setWorkAllowed, enabled)
     end
 end
 
 -- True if the machine is currently running.
 function Pump:isActive()
-    if type(self.proxy.isMachineActive) == "function" then
+    if self.proxy.isMachineActive ~= nil then
         local ok, v = pcall(self.proxy.isMachineActive)
         return ok and v == true
     end

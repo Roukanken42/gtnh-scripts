@@ -19,8 +19,10 @@
 --                     threads = { [threadIndex] = gasName | nil } }, ... }
 --   tierSummary   string           -- e.g. "2x MK-1  1x MK-3"
 --   gases         { { name, current, target, fill (0..1), priority, score,
---                     threads, status }, ... }   -- status: PUMP|CRIT|WAIT|OK
---   totals        { pumps, threadsUsed, threadsTotal, parallels, euPerTick }
+--                     threads, status, etaOne }, ... }  -- status: PUMP|CRIT|WAIT|OK
+--                                                       -- etaOne: sec for 1 parallel
+--   totals        { pumps, threadsUsed, threadsTotal, parallels, euPerTick,
+--                   etaSumOne, etaRealtime }            -- fill-time ETAs, seconds
 --   messages      { "HH:MM:SS  text", ... }      -- newest last
 
 local component = require("component")
@@ -100,6 +102,21 @@ local function human(n)
     if a >= 1e6 then return string.format("%.1fM", n / 1e6) end
     if a >= 1e3 then return string.format("%.1fk", n / 1e3) end
     return string.format("%d", n)
+end
+
+-- Compact duration: seconds -> "45s" / "12m" / "3h20m" / "2d5h". Shows the two
+-- largest non-zero units. "--" for non-finite (e.g. a zero-rate gas).
+local function dur(s)
+    s = s or 0
+    if s ~= s or s == math.huge or s < 0 then return "--" end
+    s = math.floor(s + 0.5)
+    if s < 60 then return s .. "s" end
+    local m = math.floor(s / 60)
+    if m < 60 then local r = s % 60; return r > 0 and (m .. "m" .. r .. "s") or (m .. "m") end
+    local h = math.floor(m / 60)
+    if h < 24 then local r = m % 60; return r > 0 and (h .. "h" .. r .. "m") or (h .. "h") end
+    local d = math.floor(h / 24); local r = h % 24
+    return r > 0 and (d .. "d" .. r .. "h") or (d .. "d")
 end
 
 local function box(x, y, w, h, borderColor, fillColor)
@@ -224,7 +241,7 @@ end
 
 local function drawKPIs(state, y)
     local t = state.totals or {}
-    local n = 5
+    local n = 6
     local gap = 1
     local w = math.floor((W - 2 - (n - 1) * gap) / n)
     local x = 2
@@ -235,6 +252,16 @@ local function drawKPIs(state, y)
     kpiCard(x, y, w, "PARALLELS IN USE", tostring(t.parallels or 0), C.accent2)
     x = x + w + gap
     kpiCard(x, y, w, "POWER DRAW", human(t.euPerTick or 0) .. " EU/t", C.warn)
+    x = x + w + gap
+    -- Fill-time ETA: real-time headline (whole fleet) + one-parallel total.
+    local fillVal, fillColorKpi
+    if (t.etaSumOne or 0) <= 0 then
+        fillVal, fillColorKpi = "DONE", C.good
+    else
+        fillVal = dur(t.etaRealtime) .. "  1p " .. dur(t.etaSumOne)
+        fillColorKpi = C.accent
+    end
+    kpiCard(x, y, w, "TIME TO FILL", fillVal, fillColorKpi)
     x = x + w + gap
     local st, stColor
     if state.paused then
@@ -252,14 +279,16 @@ local function drawFluidRow(x, y, g, wide)
     local col = fillColor(g.fill)
     local pct = string.format("%3d%%", math.floor(g.fill * 100 + 0.5))
     if wide then
-        text(x, y, padR(g.name, 16), C.text, C.panel)
-        bar(x + 17, y, 26, g.fill, col, C.panelHi)
-        text(x + 44, y, pct, col, C.panel)
-        text(x + 49, y, padL(human(g.current), 8) .. "/" .. padR(human(g.target), 8), C.dim, C.panel)
-        text(x + 67, y, "p" .. padR(tostring(g.priority), 3), C.faint, C.panel)
-        text(x + 72, y, padL(string.format("%.0f", g.score or 0), 5), C.dim, C.panel)
+        local eta = (g.etaOne and g.etaOne > 0) and dur(g.etaOne) or "--"
+        text(x, y, padR(g.name, 15), C.text, C.panel)
+        bar(x + 16, y, 20, g.fill, col, C.panelHi)
+        text(x + 37, y, pct, col, C.panel)
+        text(x + 42, y, padL(human(g.current), 7) .. "/" .. padR(human(g.target), 7), C.dim, C.panel)
+        text(x + 58, y, "p" .. padR(tostring(g.priority), 3), C.faint, C.panel)
+        text(x + 63, y, padL(string.format("%.0f", g.score or 0), 5), C.dim, C.panel)
+        text(x + 69, y, padR(eta, 8), C.accent, C.panel)
         text(x + 78, y, g.threads > 0 and string.rep(BLOCK, math.min(g.threads, 4)) or "", C.pump, C.panel)
-        text(x + 84, y, padR(g.status or "", 5), STATUS_COLOR[g.status] or C.dim, C.panel)
+        text(x + 83, y, padR(g.status or "", 5), STATUS_COLOR[g.status] or C.dim, C.panel)
     else
         text(x, y, padR(g.name, 13), C.text, C.panel)
         bar(x + 14, y, 14, g.fill, col, C.panelHi)
@@ -283,8 +312,17 @@ local function drawFluids(state, x, y, w, h)
     -- Wide detailed rows need ~92 columns; use them when they fit and everything
     -- shows in one column. Otherwise fall back to compact 1- or 2-column rows.
     if innerW >= 92 and #gases <= rowsAvail then
-        text(innerX, y + 1, padR("FLUID", 16) .. " " .. padR("LEVEL", 26) ..
-            "  PCT   " .. padR("STORED / TARGET", 17) .. " PRIO SCORE  THR STATUS", C.faint, C.panel)
+        -- Header labels at the same column offsets used by drawFluidRow(wide).
+        local hy = y + 1
+        text(innerX,      hy, "FLUID", C.faint, C.panel)
+        text(innerX + 16, hy, "LEVEL", C.faint, C.panel)
+        text(innerX + 37, hy, "PCT", C.faint, C.panel)
+        text(innerX + 42, hy, "STORED / TARGET", C.faint, C.panel)
+        text(innerX + 58, hy, "PRIO", C.faint, C.panel)
+        text(innerX + 63, hy, "SCORE", C.faint, C.panel)
+        text(innerX + 69, hy, "1P ETA", C.faint, C.panel)
+        text(innerX + 78, hy, "THR", C.faint, C.panel)
+        text(innerX + 83, hy, "STATUS", C.faint, C.panel)
         for i, g in ipairs(gases) do
             if i > rowsAvail then break end
             drawFluidRow(innerX, y + 1 + i, g, true)

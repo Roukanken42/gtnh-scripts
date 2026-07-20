@@ -54,6 +54,11 @@ for _, p in ipairs(pumpList) do
     end
 end
 
+-- Total parallels the whole fleet can run at once (every thread active). Used to
+-- turn the summed per-parallel fill time into a rough real-time ETA.
+local fleetParallels = 0
+for _, s in ipairs(slots) do fleetParallels = fleetParallels + s.parallels end
+
 -- Estimated production (mB) of one thread serving `gas` over one cycle.
 -- Each parallel produces `gas.amount` mB of fluid per second.
 local function estPerCycle(slot, gas)
@@ -255,11 +260,20 @@ local function buildState(stock, needy, newName, cycle)
     for _, n in ipairs(needy) do needyByName[n.name] = n end
 
     -- Every demanded gas (target > 0), whether needy or satisfied.
+    -- etaOne = seconds for a SINGLE parallel to cover the deficit (deficit / mB
+    -- per parallel per second). Per-fluid real time is unknowable because pumps
+    -- switch between gases, so this normalised "one-parallel" figure is shown
+    -- instead; summed across gases it also feeds the overall real-time ETA.
     local gasView = {}
+    local etaSumOne = 0 -- total one-parallel seconds to fill all deficits
     for name, demand in pairs(cfg.demand) do
         if (demand.target or 0) > 0 and gasByName[name] then
             local current = stock[name] or 0
             local target = demand.target
+            local gas = gasByName[name]
+            local deficit = math.max(0, target - current)
+            local etaOne = (deficit > 0 and (gas.amount or 0) > 0) and (deficit / gas.amount) or 0
+            etaSumOne = etaSumOne + etaOne
             local n = needyByName[name]
             local g = {
                 name = name, current = current, target = target,
@@ -268,6 +282,7 @@ local function buildState(stock, needy, newName, cycle)
                 score = n and n.score or 0,
                 threads = n and n.threadsAssigned or 0,
                 needy = n ~= nil,
+                etaOne = etaOne,
             }
             g.status = statusFor(g)
             gasView[#gasView + 1] = g
@@ -289,6 +304,10 @@ local function buildState(stock, needy, newName, cycle)
         totals = {
             pumps = #pumpList, threadsUsed = threadsUsed, threadsTotal = #slots,
             parallels = parallels, euPerTick = parallels * 2097152,
+            -- Fill-time ETA: the summed one-parallel seconds, plus a rough
+            -- real-time figure assuming the whole fleet pumps demand flat out.
+            etaSumOne = etaSumOne,
+            etaRealtime = (fleetParallels > 0) and (etaSumOne / fleetParallels) or 0,
         },
         messages = messages,
     }

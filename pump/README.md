@@ -81,12 +81,25 @@ controller; a headless machine with no keyboard simply runs uninterrupted.
 ## Dashboard
 
 With a GPU + screen, `main` shows a live full-screen dashboard (`ui.lua`, toggle
-with `cfg.ui`): a KPI strip (pumps, active threads, **parallels in use**, and the
-resulting **power draw** at 2,097,152 EU/t per parallel), a fluids table with
-colour-coded fill bars / score / status, a per-pump thread panel showing what each
-thread is pumping, and a scrolling log. It runs headless with plain text logging
-if there is no screen or `cfg.ui = false`. The display is pure render — all state
-comes from `main.lua`, so the controller logic is unaffected.
+with `cfg.ui`): a KPI strip (pumps, active threads, **parallels in use**, the
+resulting **power draw** at 2,097,152 EU/t per parallel, and a **time-to-fill**
+ETA), a fluids table with colour-coded fill bars / score / status, a per-pump
+thread panel showing what each thread is pumping, and a scrolling log. It runs
+headless with plain text logging if there is no screen or `cfg.ui = false`. The
+display is pure render — all state comes from `main.lua`, so the controller logic
+is unaffected.
+
+### Fill-time estimate
+
+The dashboard shows a rough estimate of how long it will take to top every gas
+back up to its target. Because pumps constantly switch between gases, a per-gas
+*real* time is meaningless, so each fluid's `1P ETA` column shows the time for a
+**single parallel** to cover that gas's deficit (`deficit ÷ mB-per-parallel-per-
+second`) — a stable, comparable figure. The `TIME TO FILL` KPI sums those into an
+overall one-parallel total (`1p …`) and also divides it by the fleet's total
+parallel capacity for a rough **real-time** headline (assumes every parallel stays
+busy on demand, so it is optimistic). It reads `DONE` when nothing is below target.
+The compact fallback layout omits the per-fluid column but still shows the KPI.
 
 The dashboard repaint is **decoupled** from the control cycle: it refreshes every
 `cfg.uiRefresh` seconds (default `1`), re-polling AE2 stock so the fill bars,

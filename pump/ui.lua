@@ -274,21 +274,40 @@ local function drawKPIs(state, y)
     kpiCard(x, y, w, "STATUS", st, stColor)
 end
 
--- Draws one fluid entry inside the fluids panel.
-local function drawFluidRow(x, y, g, wide)
+-- Column x-offsets (relative to the row's left edge) for the wide fluids layout,
+-- given the elastic level-bar width. Name and bar are on the left; everything
+-- after the bar shifts with it. Keeps the header and rows in lockstep. The row's
+-- total width is barW + 70 (15 name + 4 pct + 15 stored/target + 4 prio + 5 score
+-- + 8 eta + 5 thr + 6 status, plus a 1-col gap between each of the 9 columns).
+local function fluidCols(barW)
+    local c = { name = 0, bar = 16 } -- 15-wide name + 1 gap
+    c.pct    = c.bar + barW + 1
+    c.stored = c.pct + 5             -- pct 4 + gap
+    c.prio   = c.stored + 16         -- stored/target 15 + gap
+    c.score  = c.prio + 5            -- prio 4 + gap
+    c.eta    = c.score + 6           -- score 5 + gap
+    c.thr    = c.eta + 9             -- eta 8 + gap
+    c.status = c.thr + 6             -- thr 5 + gap
+    return c
+end
+
+-- Draws one fluid entry inside the fluids panel. In wide mode barW sets the
+-- elastic level-bar width so the table fills the available panel width.
+local function drawFluidRow(x, y, g, wide, barW)
     local col = fillColor(g.fill)
     local pct = string.format("%3d%%", math.floor(g.fill * 100 + 0.5))
     if wide then
+        local c = fluidCols(barW)
         local eta = (g.etaOne and g.etaOne > 0) and dur(g.etaOne) or "--"
-        text(x, y, padR(g.name, 15), C.text, C.panel)
-        bar(x + 16, y, 20, g.fill, col, C.panelHi)
-        text(x + 37, y, pct, col, C.panel)
-        text(x + 42, y, padL(human(g.current), 7) .. "/" .. padR(human(g.target), 7), C.dim, C.panel)
-        text(x + 58, y, "p" .. padR(tostring(g.priority), 3), C.faint, C.panel)
-        text(x + 63, y, padL(string.format("%.0f", g.score or 0), 5), C.dim, C.panel)
-        text(x + 69, y, padR(eta, 8), C.accent, C.panel)
-        text(x + 78, y, g.threads > 0 and string.rep(BLOCK, math.min(g.threads, 4)) or "", C.pump, C.panel)
-        text(x + 83, y, padR(g.status or "", 5), STATUS_COLOR[g.status] or C.dim, C.panel)
+        text(x + c.name, y, padR(g.name, 15), C.text, C.panel)
+        bar(x + c.bar, y, barW, g.fill, col, C.panelHi)
+        text(x + c.pct, y, pct, col, C.panel)
+        text(x + c.stored, y, padL(human(g.current), 7) .. "/" .. padR(human(g.target), 7), C.dim, C.panel)
+        text(x + c.prio, y, "p" .. padR(tostring(g.priority), 3), C.faint, C.panel)
+        text(x + c.score, y, padL(string.format("%.0f", g.score or 0), 5), C.dim, C.panel)
+        text(x + c.eta, y, padR(eta, 8), C.accent, C.panel)
+        text(x + c.thr, y, g.threads > 0 and string.rep(BLOCK, math.min(g.threads, 4)) or "", C.pump, C.panel)
+        text(x + c.status, y, padR(g.status or "", 5), STATUS_COLOR[g.status] or C.dim, C.panel)
     else
         text(x, y, padR(g.name, 13), C.text, C.panel)
         bar(x + 14, y, 14, g.fill, col, C.panelHi)
@@ -312,20 +331,23 @@ local function drawFluids(state, x, y, w, h)
     -- Wide detailed rows need ~92 columns; use them when they fit and everything
     -- shows in one column. Otherwise fall back to compact 1- or 2-column rows.
     if innerW >= 92 and #gases <= rowsAvail then
+        -- The level bar takes whatever width is left after the fixed columns.
+        local barW = math.max(innerW - 70, 8)
+        local c = fluidCols(barW)
         -- Header labels at the same column offsets used by drawFluidRow(wide).
         local hy = y + 1
-        text(innerX,      hy, "FLUID", C.faint, C.panel)
-        text(innerX + 16, hy, "LEVEL", C.faint, C.panel)
-        text(innerX + 37, hy, "PCT", C.faint, C.panel)
-        text(innerX + 42, hy, "STORED / TARGET", C.faint, C.panel)
-        text(innerX + 58, hy, "PRIO", C.faint, C.panel)
-        text(innerX + 63, hy, "SCORE", C.faint, C.panel)
-        text(innerX + 69, hy, "1P ETA", C.faint, C.panel)
-        text(innerX + 78, hy, "THR", C.faint, C.panel)
-        text(innerX + 83, hy, "STATUS", C.faint, C.panel)
+        text(innerX + c.name,   hy, "FLUID", C.faint, C.panel)
+        text(innerX + c.bar,    hy, "LEVEL", C.faint, C.panel)
+        text(innerX + c.pct,    hy, "PCT", C.faint, C.panel)
+        text(innerX + c.stored, hy, "STORED / TARGET", C.faint, C.panel)
+        text(innerX + c.prio,   hy, "PRIO", C.faint, C.panel)
+        text(innerX + c.score,  hy, "SCORE", C.faint, C.panel)
+        text(innerX + c.eta,    hy, "1P ETA", C.faint, C.panel)
+        text(innerX + c.thr,    hy, "THR", C.faint, C.panel)
+        text(innerX + c.status, hy, "STATUS", C.faint, C.panel)
         for i, g in ipairs(gases) do
             if i > rowsAvail then break end
-            drawFluidRow(innerX, y + 1 + i, g, true)
+            drawFluidRow(innerX, y + 1 + i, g, true, barW)
         end
         return
     end
@@ -385,6 +407,19 @@ local function drawLog(state, x, y, w, h)
     end
 end
 
+-- Width the pumps/threads panel actually needs: enough for the longest gas name
+-- (thread rows) and the widest title. Independent of the screen fraction, so the
+-- fluids panel can claim the rest. Reserves for the "HALTED" title even when not
+-- paused so the layout doesn't jump when pausing.
+local function pumpsWidth(state)
+    local maxName = 6 -- floor so short-name configs still fit the header/title
+    for _, g in ipairs(state.gases or {}) do
+        if #g.name > maxName then maxName = #g.name end
+    end
+    -- thread row = "> Tn " (5) + name + left/right chrome (~7); title needs ~30.
+    return math.max(maxName + 12, 30)
+end
+
 function ui.render(state)
     if not ui.active then return end
     -- Draw the frame off-screen (buffer stays the active target between renders).
@@ -399,9 +434,10 @@ function ui.render(state)
     local logY = H - logH + 1
     local contentH = logY - contentY - 1
 
-    local leftW = math.floor((W - 3) * 0.62)
-    local rightX = 2 + leftW + 1
-    local rightW = W - rightX
+    -- Pumps panel is clamped to its content width; fluids takes everything else.
+    local rightW = pumpsWidth(state)
+    local rightX = W - rightW
+    local leftW = rightX - 3 -- left margin (col 2) + fluids + 1-col gap = rightX
 
     drawFluids(state, 2, contentY, leftW, contentH)
     drawPumps(state, rightX, contentY, rightW, contentH)

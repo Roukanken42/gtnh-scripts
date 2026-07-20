@@ -38,6 +38,8 @@ end
 local pumpList = pumps.discover()
 local satisfied = {} -- gas name -> boolean (hysteresis latch)
 local paused = false -- user-toggled halt: all pumps off, allocation frozen (SPACE/P)
+local showLog = false -- user-toggled log panel (L); hidden by default so the
+                      -- fluids table gets the full height
 local lowWater = cfg.lowWater or 0.9
 local interval = cfg.sleep or 30
 -- How often the dashboard repaints (and re-polls AE2 stock for live fill bars),
@@ -308,7 +310,8 @@ local function buildState(stock, needy, newName, cycle)
     for _, pv in ipairs(pumpView) do threadsUsed = threadsUsed + pv.active end
 
     return {
-        dryRun = cfg.dryRun, paused = paused, cycle = cycle, updated = os.date("%H:%M:%S"),
+        dryRun = cfg.dryRun, paused = paused, showLog = showLog,
+        cycle = cycle, updated = os.date("%H:%M:%S"),
         pumps = pumpView, tierSummary = tierSummary, gases = gasView,
         totals = {
             pumps = #pumpList, threadsUsed = threadsUsed, threadsTotal = #slots,
@@ -352,7 +355,7 @@ if #pumpList == 0 then
 end
 log(string.format("Pump regulator started -- %d pump(s), %d thread(s), %ds cycle%s",
     #pumpList, #slots, interval, cfg.dryRun and " [DRY RUN]" or ""))
-log("Press SPACE (or P) to pause/resume all pumps.")
+log("Press SPACE (or P) to pause/resume all pumps; L to toggle the log panel.")
 for _, p in ipairs(pumpList) do
     log(string.format("  %s  %s (%d thread(s), %d parallels)",
         p.address, p.tierName or "?", p.threads or 0, p.parallels or 0))
@@ -431,10 +434,10 @@ local function loop()
         local timeout = wake - computer.uptime()
         if timeout > 0 then
             local _, _, _, code = event.pull(timeout, "key_down")
-            if code and PAUSE_KEYS[code] then
-                local now = computer.uptime()
-                if now - lastToggle >= 0.3 then
-                    lastToggle = now
+            -- Debounce shared across hotkeys so a held key doesn't rapid-fire.
+            if code and computer.uptime() - lastToggle >= 0.3 then
+                if PAUSE_KEYS[code] then
+                    lastToggle = computer.uptime()
                     paused = not paused
                     if paused then
                         log("PAUSED by user -- all pumps halted. Press SPACE to resume.")
@@ -444,6 +447,10 @@ local function loop()
                         nextCycle = computer.uptime()  -- re-decide + apply at once
                     end
                     refresh()  -- reflect the new status immediately
+                elseif code == keyboard.keys.l then
+                    lastToggle = computer.uptime()
+                    showLog = not showLog
+                    refresh()
                 end
             end
         end

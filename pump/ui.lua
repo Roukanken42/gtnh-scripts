@@ -12,6 +12,7 @@
 -- State contract (all fields optional-safe):
 --   dryRun        boolean
 --   paused        boolean          -- user halt; pumps off and allocation frozen
+--   showLog       boolean          -- whether the log panel is shown (toggle: L)
 --   cycle         integer          -- control-cycle counter
 --   tick          integer          -- repaint counter (drives the spinner)
 --   updated       string           -- "HH:MM:SS"
@@ -233,7 +234,7 @@ local function drawTitle(state)
     rect(1, 1, W, 1, C.titleBg)
     local titleStr = " SPACE ELEVATOR " .. EMDASH .. " PUMP CONTROLLER"
     text(2, 1, titleStr, C.accent, C.titleBg)
-    text(2 + #titleStr + 2, 1, "[SPACE] pause/resume", C.faint, C.titleBg)
+    text(2 + #titleStr + 2, 1, "[SPACE] pause  [L] log", C.faint, C.titleBg)
 
     local badge, badgeColor
     if state.paused then
@@ -447,10 +448,12 @@ function ui.render(state)
     local kpiY = 3
     drawKPIs(state, kpiY)
 
+    -- Log panel is optional (toggled with L): when hidden the fluids/pumps
+    -- content claims the full height, fitting many more detailed rows.
     local contentY = kpiY + 5
-    local logH = 6
+    local logH = state.showLog and 6 or 0
     local logY = H - logH + 1
-    local contentH = logY - contentY - 1
+    local contentH = state.showLog and (logY - contentY - 1) or (H - contentY + 1)
 
     -- Pumps panel is clamped to its content width; fluids takes everything else.
     local rightW = pumpsWidth(state)
@@ -459,7 +462,7 @@ function ui.render(state)
 
     drawFluids(state, 2, contentY, leftW, contentH)
     drawPumps(state, rightX, contentY, rightW, contentH)
-    drawLog(state, 2, logY, W - 2, logH)
+    if state.showLog then drawLog(state, 2, logY, W - 2, logH) end
 
     -- Present the finished frame to the screen in a single blit (no flicker).
     if buffer then gpu.bitblt(0, 1, 1, W, H, buffer, 1, 1) end

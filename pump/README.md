@@ -94,11 +94,17 @@ controller; a headless machine with no keyboard simply runs uninterrupted.
 With a GPU + screen, `main` shows a live full-screen dashboard (`ui.lua`, toggle
 with `cfg.ui`): a KPI strip (pumps, active threads, **parallels in use**, the
 resulting **power draw** at 2,097,152 EU/t per parallel, and a **time-to-fill**
-ETA), a fluids table with colour-coded fill bars / score / status, a per-pump
-thread panel showing what each thread is pumping, and a scrolling log. It runs
-headless with plain text logging if there is no screen or `cfg.ui = false`. The
-display is pure render — all state comes from `main.lua`, so the controller logic
-is unaffected.
+ETA), a fluids table with colour-coded fill bars / score / status, and a per-pump
+thread panel showing what each thread is pumping. It runs headless with plain text
+logging if there is no screen or `cfg.ui = false`. The display is pure render —
+all state comes from `main.lua`, so the controller logic is unaffected.
+
+The **log panel is hidden by default** so the fluids table gets the full screen
+height; press **L** to toggle it. On a maxed tier-3 screen (160×50) that leaves
+room for **40 detailed rows** — every gas in `gases.lua` — with the log hidden,
+or ~33 with it shown (roughly `screenHeight − 10`). Messages keep accumulating
+while hidden, and if the table still can't fit (smaller screen, or the log shown
+with many gases) it falls back to a compact multi-column layout.
 
 ### Fill-time estimate
 

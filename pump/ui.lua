@@ -94,14 +94,32 @@ end
 local function padR(s, w) s = trunc(s, w); return s .. string.rep(" ", w - #s) end
 local function padL(s, w) s = trunc(s, w); return string.rep(" ", w - #s) .. s end
 
+-- SI-style magnitude prefixes for 1e3, 1e6, ... 1e30. Covers everything up to
+-- the largest SI prefix (quetta), far beyond what a filled AE2 network can hold,
+-- so late-game stock totals never overflow into raw digits.
+local HUMAN_PREFIX = { "k", "M", "G", "T", "P", "E", "Z", "Y", "R", "Q" }
+
+-- Human-readable magnitude: 999 -> "999", 1234 -> "1.23k", 5e12 -> "5.00T",
+-- 7.7e24 -> "7.70Y". Kept to ~3 significant figures so the width stays bounded
+-- (<= 5 chars incl. suffix) regardless of how large the number grows.
 local function human(n)
     n = n or 0
     local a = math.abs(n)
-    if a >= 1e12 then return string.format("%.2fT", n / 1e12) end
-    if a >= 1e9 then return string.format("%.2fG", n / 1e9) end
-    if a >= 1e6 then return string.format("%.1fM", n / 1e6) end
-    if a >= 1e3 then return string.format("%.1fk", n / 1e3) end
-    return string.format("%d", n)
+    if a < 1e3 then return string.format("%.0f", n) end
+    -- Climb prefixes until the mantissa is < 1000 (or we hit the largest prefix).
+    local div, tier = 1e3, 1
+    while tier < #HUMAN_PREFIX and a >= div * 1e3 do
+        div = div * 1e3; tier = tier + 1
+    end
+    local scaled = n / div
+    -- Rounding can nudge e.g. 999.6 up to 1000; promote to the next prefix so the
+    -- mantissa stays 3 digits ("1.00T" rather than "1000G").
+    if math.abs(scaled) >= 999.5 and tier < #HUMAN_PREFIX then
+        tier = tier + 1; scaled = n / (div * 1e3)
+    end
+    local mag = math.abs(scaled)
+    local fmt = (mag < 10 and "%.2f%s") or (mag < 100 and "%.1f%s") or "%.0f%s"
+    return string.format(fmt, scaled, HUMAN_PREFIX[tier])
 end
 
 -- Compact duration: seconds -> "45s" / "12m" / "3h20m" / "2d5h". Shows the two

@@ -8,7 +8,8 @@
 -- State contract (all fields optional-safe):
 --   dryRun        boolean
 --   paused        boolean          -- user halt; pumps off and allocation frozen
---   cycle         integer          -- cycle counter
+--   cycle         integer          -- control-cycle counter
+--   tick          integer          -- repaint counter (drives the spinner)
 --   updated       string           -- "HH:MM:SS"
 --   pumps         { { tierName, address, parallels, active,
 --                     threads = { [threadIndex] = gasName | nil } }, ... }
@@ -182,7 +183,7 @@ local function drawTitle(state)
     else
         badge, badgeColor = " LIVE ", C.good
     end
-    local spin = SPIN[(state.cycle or 0) % #SPIN + 1]
+    local spin = SPIN[(state.tick or state.cycle or 0) % #SPIN + 1]
     local info = string.format("%s  cycle #%d  %s  ", spin, state.cycle or 0, state.updated or "--:--:--")
     local rightX = W - 1 - #badge - #info
     text(rightX, 1, info, C.dim, C.titleBg)

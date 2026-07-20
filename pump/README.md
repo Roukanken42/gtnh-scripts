@@ -88,6 +88,12 @@ thread is pumping, and a scrolling log. It runs headless with plain text logging
 if there is no screen or `cfg.ui = false`. The display is pure render — all state
 comes from `main.lua`, so the controller logic is unaffected.
 
+The dashboard repaint is **decoupled** from the control cycle: it refreshes every
+`cfg.uiRefresh` seconds (default `1`), re-polling AE2 stock so the fill bars,
+clock, and log stay live, while pumps are only reallocated every `cfg.sleep`
+(default `30`). Lower `cfg.uiRefresh` = smoother display at the cost of more
+frequent AE2 reads.
+
 ## Files
 
 | File | Role |

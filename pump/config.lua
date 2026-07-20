@@ -100,4 +100,10 @@ cfg.dryRun = true
 -- no GPU/screen is present.
 cfg.ui = true
 
+-- Dashboard refresh rate in seconds, decoupled from the control cycle above:
+-- the screen (clock, spinner, fill bars) repaints this often while pumps are
+-- only reallocated every cfg.sleep. Each refresh re-polls AE2 stock, so lower =
+-- smoother/live but more frequent AE2 reads. Ignored when running headless.
+cfg.uiRefresh = 1
+
 return cfg

@@ -40,6 +40,9 @@ local satisfied = {} -- gas name -> boolean (hysteresis latch)
 local paused = false -- user-toggled halt: all pumps off, allocation frozen (SPACE/P)
 local lowWater = cfg.lowWater or 0.9
 local interval = cfg.sleep or 30
+-- How often the dashboard repaints (and re-polls AE2 stock for live fill bars),
+-- independent of the control cycle above. Floored so a misconfig cannot busy-loop.
+local uiRefresh = math.max(cfg.uiRefresh or 1, 0.1)
 local criticalWeight = cfg.criticalWeight or 4
 
 -- Flatten pumps into individual thread "slots" (built once; slot.name carries
@@ -337,46 +340,69 @@ local function haltPumps()
     for _, p in ipairs(pumpList) do p:setEnabled(false) end
 end
 
-local cycle = 0
-local lastToggle = -1 -- debounce against key-repeat while a key is held
+local cycle = 0        -- control-cycle counter (shown as "cycle #N")
+local tick = 0         -- repaint counter, drives the title spinner animation
+local lastToggle = -1  -- debounce against key-repeat while a key is held
+-- Latest results from the most recent control cycle. The UI refresh repaints
+-- these with freshly-polled stock between cycles, so fill levels stay live even
+-- though the allocation decision only changes on the (slower) control cadence.
+local lastStock, lastNeedy, lastNewName = {}, {}, {}
+
+-- One control cycle: read stock, (re)decide the allocation, and drive the
+-- hardware. This mutates the hysteresis latch and touches pumps, so it runs only
+-- on the control cadence -- never from a plain UI refresh.
+local function runCycle()
+    cycle = cycle + 1
+    local stock, err = ae2.getStock(gases)
+    if not stock then
+        log("AE2 error: " .. tostring(err))
+        lastNeedy, lastNewName = {}, {}
+        stock = {}
+    else
+        lastNeedy = computeNeedy(stock)
+        lastNewName = allocate(lastNeedy)
+        if not cfg.dryRun then
+            if paused then haltPumps() else applyAllocation(lastNewName) end
+        end
+    end
+    lastStock = stock
+    if not uiActive then logAllocation(lastNeedy) end
+end
+
+-- Repaint the dashboard from the last cycle's allocation, re-polling AE2 so the
+-- fill bars reflect the current stock. Pure display: no allocation, no hardware.
+-- A no-op when headless (there is no screen to refresh).
+local function refresh()
+    if not uiActive then return end
+    lastStock = ae2.getStock(gases) or lastStock
+    tick = tick + 1
+    local state = buildState(lastStock, lastNeedy, lastNewName, cycle)
+    state.tick = tick
+    ui.render(state)
+end
+
 local function loop()
+    local nextCycle = computer.uptime()   -- both due immediately on first pass
+    local nextRefresh = computer.uptime()
     while true do
-        cycle = cycle + 1
-        local stock, err = ae2.getStock(gases)
-        local needy, newName = {}, {}
-        if not stock then
-            log("AE2 error: " .. tostring(err))
-            stock = {}
-        else
-            needy = computeNeedy(stock)
-            newName = allocate(needy)
-            if not cfg.dryRun then
-                if paused then
-                    haltPumps()
-                else
-                    applyAllocation(newName)
-                end
-            end
+        local t = computer.uptime()
+        if t >= nextCycle then
+            runCycle()
+            nextCycle = computer.uptime() + interval
+            refresh()                       -- repaint right after a decision
+            nextRefresh = computer.uptime() + uiRefresh
+        elseif uiActive and t >= nextRefresh then
+            refresh()
+            nextRefresh = computer.uptime() + uiRefresh
         end
 
-        -- Push the current snapshot to the dashboard (or text log when headless).
-        local function show()
-            if uiActive then
-                ui.render(buildState(stock, needy, newName, cycle))
-            else
-                logAllocation(needy)
-            end
-        end
-        show()
-
-        -- Wait out the cycle interval, but stay responsive to the pause key.
-        -- Pausing takes effect at once (pumps off + redraw); resuming breaks the
-        -- wait so a fresh cycle re-applies the allocation immediately.
-        local deadline = computer.uptime() + interval
-        while true do
-            local remaining = deadline - computer.uptime()
-            if remaining <= 0 then break end
-            local _, _, _, code = event.pull(remaining, "key_down")
+        -- Sleep until the sooner of the two cadences, staying responsive to the
+        -- pause key. (When headless there is nothing to refresh, so we wait for
+        -- the control cycle alone.)
+        local wake = uiActive and math.min(nextCycle, nextRefresh) or nextCycle
+        local timeout = wake - computer.uptime()
+        if timeout > 0 then
+            local _, _, _, code = event.pull(timeout, "key_down")
             if code and PAUSE_KEYS[code] then
                 local now = computer.uptime()
                 if now - lastToggle >= 0.3 then
@@ -385,11 +411,11 @@ local function loop()
                     if paused then
                         log("PAUSED by user -- all pumps halted. Press SPACE to resume.")
                         if not cfg.dryRun then haltPumps() end
-                        show()
                     else
                         log("RESUMED by user.")
-                        break
+                        nextCycle = computer.uptime()  -- re-decide + apply at once
                     end
+                    refresh()  -- reflect the new status immediately
                 end
             end
         end

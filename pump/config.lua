@@ -10,7 +10,8 @@ local cfg = {}
 -- Demand: for each gas you want kept in stock,
 --   target         = amount (mB) to maintain in the AE2 network (0 = do not pump it)
 --   priority       = base importance; higher wins when threads are scarce
---   criticalWeight = (optional) per-gas override of cfg.criticalWeight below
+--   criticalWeight = per-gas override of cfg.criticalWeight below (pre-filled at
+--                    the default; raise it for a gas that must not run dry)
 -- Threads are assigned by a score that boosts priority as a tank empties:
 --   score = priority * (1 + (criticalWeight - 1) * missingFraction^2)
 -- so a nearly-empty low-priority gas can outrank a well-stocked high-priority one
@@ -20,58 +21,58 @@ local cfg = {}
 -- like. Grouped by planet to match gases.lua.
 cfg.demand = {
     -- Planet 2
-    ["Chlorobenzene"]     = { target = 0, priority = 0 },
+    ["Chlorobenzene"]     = { target = 0, priority = 0, criticalWeight = 4 },
 
     -- Planet 3
-    ["Ender Goo"]         = { target = 0, priority = 0 },
-    ["Very Heavy Oil"]    = { target = 0, priority = 0 },
-    ["Lava"]              = { target = 0, priority = 0 },
-    ["Natural Gas"]       = { target = 0, priority = 0 },
+    ["Ender Goo"]         = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Very Heavy Oil"]    = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Lava"]              = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Natural Gas"]       = { target = 0, priority = 0, criticalWeight = 4 },
 
     -- Planet 4
-    ["Sulfuric Acid"]     = { target = 0, priority = 0 },
-    ["Molten Iron"]       = { target = 0, priority = 0 },
-    ["Oil"]               = { target = 0, priority = 0 },
-    ["Heavy Oil"]         = { target = 0, priority = 0 },
-    ["Molten Lead"]       = { target = 0, priority = 0 },
-    ["Raw Oil"]           = { target = 0, priority = 0 },
-    ["Light Oil"]         = { target = 0, priority = 0 },
-    ["Carbon Dioxide"]    = { target = 0, priority = 0 },
+    ["Sulfuric Acid"]     = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Molten Iron"]       = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Oil"]               = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Heavy Oil"]         = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Molten Lead"]       = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Raw Oil"]           = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Light Oil"]         = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Carbon Dioxide"]    = { target = 0, priority = 0, criticalWeight = 4 },
 
     -- Planet 5
-    ["Carbon Monoxide"]   = { target = 0, priority = 0 },
-    ["Helium-3"]          = { target = 0, priority = 0 },
-    ["Salt Water"]        = { target = 0, priority = 0 },
-    ["Helium"]            = { target = 0, priority = 0 },
-    ["Liquid Oxygen"]     = { target = 0, priority = 0 },
-    ["Neon"]              = { target = 0, priority = 0 },
-    ["Argon"]             = { target = 0, priority = 0 },
-    ["Krypton"]           = { target = 0, priority = 0 },
-    ["Methane"]           = { target = 0, priority = 0 },
-    ["Hydrogen Sulfide"]  = { target = 0, priority = 0 },
-    ["Ethane"]            = { target = 0, priority = 0 },
+    ["Carbon Monoxide"]   = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Helium-3"]          = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Salt Water"]        = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Helium"]            = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Liquid Oxygen"]     = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Neon"]              = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Argon"]             = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Krypton"]           = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Methane"]           = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Hydrogen Sulfide"]  = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Ethane"]            = { target = 0, priority = 0, criticalWeight = 4 },
 
     -- Planet 6
-    ["Deuterium"]         = { target = 0, priority = 0 },
-    ["Tritium"]           = { target = 0, priority = 0 },
-    ["Ammonia"]           = { target = 0, priority = 0 },
-    ["Xenon"]             = { target = 0, priority = 0 },
-    ["Ethylene"]          = { target = 0, priority = 0 },
+    ["Deuterium"]         = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Tritium"]           = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Ammonia"]           = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Xenon"]             = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Ethylene"]          = { target = 0, priority = 0, criticalWeight = 4 },
 
     -- Planet 7
-    ["Hydrofluoric Acid"] = { target = 0, priority = 0 },
-    ["Fluorine"]          = { target = 0, priority = 0 },
-    ["Nitrogen"]          = { target = 0, priority = 0 },
-    ["Oxygen"]            = { target = 0, priority = 0 },
+    ["Hydrofluoric Acid"] = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Fluorine"]          = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Nitrogen"]          = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Oxygen"]            = { target = 0, priority = 0, criticalWeight = 4 },
 
     -- Planet 8
-    ["Hydrogen"]          = { target = 0, priority = 0 },
-    ["Liquid Air"]        = { target = 0, priority = 0 },
-    ["Molten Copper"]     = { target = 0, priority = 0 },
-    ["Unknown Liquid"]    = { target = 0, priority = 0 },
-    ["Distilled Water"]   = { target = 0, priority = 0 },
-    ["Radon"]             = { target = 0, priority = 0 },
-    ["Molten Tin"]        = { target = 0, priority = 0 },
+    ["Hydrogen"]          = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Liquid Air"]        = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Molten Copper"]     = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Unknown Liquid"]    = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Distilled Water"]   = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Radon"]             = { target = 0, priority = 0, criticalWeight = 4 },
+    ["Molten Tin"]        = { target = 0, priority = 0, criticalWeight = 4 },
 }
 
 -- Seconds between control cycles. Also the window used to estimate how much a

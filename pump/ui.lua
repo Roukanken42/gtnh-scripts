@@ -163,8 +163,10 @@ function ui.init()
     -- Each frame is drawn there and blitted to the display in one operation, so
     -- periodic refreshes no longer flicker. Falls back to drawing straight to the
     -- screen when the GPU can't provide a buffer (older tiers / low VRAM).
+    -- Note: component proxy methods are callable tables, not "function", so test
+    -- for presence (~= nil) rather than type -- pcall guards the actual call.
     buffer = nil
-    if type(gpu.allocateBuffer) == "function" then
+    if gpu.allocateBuffer ~= nil then
         local ok, idx = pcall(gpu.allocateBuffer, W, H)
         if ok and idx then buffer = idx end
     end

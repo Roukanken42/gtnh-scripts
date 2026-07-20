@@ -7,6 +7,7 @@
 --
 -- State contract (all fields optional-safe):
 --   dryRun        boolean
+--   paused        boolean          -- user halt; pumps off and allocation frozen
 --   cycle         integer          -- cycle counter
 --   updated       string           -- "HH:MM:SS"
 --   pumps         { { tierName, address, parallels, active,
@@ -169,10 +170,18 @@ end
 -- ---- sections ------------------------------------------------------------
 local function drawTitle(state)
     rect(1, 1, W, 1, C.titleBg)
-    text(2, 1, " SPACE ELEVATOR " .. EMDASH .. " PUMP CONTROLLER", C.accent, C.titleBg)
+    local titleStr = " SPACE ELEVATOR " .. EMDASH .. " PUMP CONTROLLER"
+    text(2, 1, titleStr, C.accent, C.titleBg)
+    text(2 + #titleStr + 2, 1, "[SPACE] pause/resume", C.faint, C.titleBg)
 
-    local badge = state.dryRun and " DRY RUN " or " LIVE "
-    local badgeColor = state.dryRun and C.warn or C.good
+    local badge, badgeColor
+    if state.paused then
+        badge, badgeColor = " PAUSED ", C.crit
+    elseif state.dryRun then
+        badge, badgeColor = " DRY RUN ", C.warn
+    else
+        badge, badgeColor = " LIVE ", C.good
+    end
     local spin = SPIN[(state.cycle or 0) % #SPIN + 1]
     local info = string.format("%s  cycle #%d  %s  ", spin, state.cycle or 0, state.updated or "--:--:--")
     local rightX = W - 1 - #badge - #info
@@ -201,8 +210,15 @@ local function drawKPIs(state, y)
     x = x + w + gap
     kpiCard(x, y, w, "POWER DRAW", human(t.euPerTick or 0) .. " EU/t", C.warn)
     x = x + w + gap
-    local st = state.dryRun and "DRY RUN" or "LIVE"
-    kpiCard(x, y, w, "STATUS", st, state.dryRun and C.warn or C.good)
+    local st, stColor
+    if state.paused then
+        st, stColor = "PAUSED", C.crit
+    elseif state.dryRun then
+        st, stColor = "DRY RUN", C.warn
+    else
+        st, stColor = "LIVE", C.good
+    end
+    kpiCard(x, y, w, "STATUS", st, stColor)
 end
 
 -- Draws one fluid entry inside the fluids panel.
@@ -265,7 +281,9 @@ local function drawFluids(state, x, y, w, h)
 end
 
 local function drawPumps(state, x, y, w, h)
-    panel(x, y, w, h, "PUMPS " .. MIDDOT .. " THREADS")
+    local title = "PUMPS " .. MIDDOT .. " THREADS"
+    if state.paused then title = title .. "  " .. EMDASH .. " HALTED" end
+    panel(x, y, w, h, title)
     local innerX = x + 2
     local row = y + 1
     local bottom = y + h - 2

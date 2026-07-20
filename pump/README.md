@@ -67,6 +67,17 @@ need (a thread makes `gas.amount × parallels` mB/s). Threads already serving a 
 are reused for it (sticky) to avoid reconfiguration; unused threads are idled
 (parallels 0) and fully-idle pumps disabled.
 
+## Pausing
+
+Press **SPACE** (or **P**) at any time to pause the regulator: every pump is
+disabled immediately and allocation is frozen, so nothing is pumped until you
+resume. Press the key again to resume — a fresh cycle runs at once and re-applies
+the allocation. The pause takes effect mid-cycle (you do not have to wait for the
+next tick), and the dashboard shows a red **PAUSED** badge and status while
+halted. Pausing is respected in dry-run mode too (there it only freezes the
+logged plan, since no pump is ever touched). This needs a keyboard on the
+controller; a headless machine with no keyboard simply runs uninterrupted.
+
 ## Dashboard
 
 With a GPU + screen, `main` shows a live full-screen dashboard (`ui.lua`, toggle

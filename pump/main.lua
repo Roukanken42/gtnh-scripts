@@ -13,6 +13,9 @@ local pumps = require("pumps")
 local gases = require("gases")
 local cfg = require("config")
 local ui = require("ui")
+local event = require("event")
+local computer = require("computer")
+local keyboard = require("keyboard")
 
 -- Recent log lines. Shown in the UI's log panel; also printed to the console
 -- when the UI is not active.
@@ -34,6 +37,7 @@ end
 
 local pumpList = pumps.discover()
 local satisfied = {} -- gas name -> boolean (hysteresis latch)
+local paused = false -- user-toggled halt: all pumps off, allocation frozen (SPACE/P)
 local lowWater = cfg.lowWater or 0.9
 local interval = cfg.sleep or 30
 local criticalWeight = cfg.criticalWeight or 4
@@ -277,7 +281,7 @@ local function buildState(stock, needy, newName, cycle)
     for _, pv in ipairs(pumpView) do threadsUsed = threadsUsed + pv.active end
 
     return {
-        dryRun = cfg.dryRun, cycle = cycle, updated = os.date("%H:%M:%S"),
+        dryRun = cfg.dryRun, paused = paused, cycle = cycle, updated = os.date("%H:%M:%S"),
         pumps = pumpView, tierSummary = tierSummary, gases = gasView,
         totals = {
             pumps = #pumpList, threadsUsed = threadsUsed, threadsTotal = #slots,
@@ -317,12 +321,24 @@ if #pumpList == 0 then
 end
 log(string.format("Pump regulator started -- %d pump(s), %d thread(s), %ds cycle%s",
     #pumpList, #slots, interval, cfg.dryRun and " [DRY RUN]" or ""))
+log("Press SPACE (or P) to pause/resume all pumps.")
 for _, p in ipairs(pumpList) do
     log(string.format("  %s  %s (%d thread(s), %d parallels)",
         p.address, p.tierName or "?", p.threads or 0, p.parallels or 0))
 end
 
+-- Keys that toggle the manual pause: SPACE or P.
+local PAUSE_KEYS = { [keyboard.keys.space] = true, [keyboard.keys.p] = true }
+
+-- Halts every pump right now. Used when the user pauses so the freeze takes
+-- effect immediately rather than at the next cycle, and re-asserted each paused
+-- cycle so the pumps stay off even if something else re-enables them.
+local function haltPumps()
+    for _, p in ipairs(pumpList) do p:setEnabled(false) end
+end
+
 local cycle = 0
+local lastToggle = -1 -- debounce against key-repeat while a key is held
 local function loop()
     while true do
         cycle = cycle + 1
@@ -335,16 +351,48 @@ local function loop()
             needy = computeNeedy(stock)
             newName = allocate(needy)
             if not cfg.dryRun then
-                applyAllocation(newName)
+                if paused then
+                    haltPumps()
+                else
+                    applyAllocation(newName)
+                end
             end
         end
 
-        if uiActive then
-            ui.render(buildState(stock, needy, newName, cycle))
-        else
-            logAllocation(needy)
+        -- Push the current snapshot to the dashboard (or text log when headless).
+        local function show()
+            if uiActive then
+                ui.render(buildState(stock, needy, newName, cycle))
+            else
+                logAllocation(needy)
+            end
         end
-        os.sleep(interval)
+        show()
+
+        -- Wait out the cycle interval, but stay responsive to the pause key.
+        -- Pausing takes effect at once (pumps off + redraw); resuming breaks the
+        -- wait so a fresh cycle re-applies the allocation immediately.
+        local deadline = computer.uptime() + interval
+        while true do
+            local remaining = deadline - computer.uptime()
+            if remaining <= 0 then break end
+            local _, _, _, code = event.pull(remaining, "key_down")
+            if code and PAUSE_KEYS[code] then
+                local now = computer.uptime()
+                if now - lastToggle >= 0.3 then
+                    lastToggle = now
+                    paused = not paused
+                    if paused then
+                        log("PAUSED by user -- all pumps halted. Press SPACE to resume.")
+                        if not cfg.dryRun then haltPumps() end
+                        show()
+                    else
+                        log("RESUMED by user.")
+                        break
+                    end
+                end
+            end
+        end
     end
 end
 

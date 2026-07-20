@@ -92,7 +92,9 @@ The dashboard repaint is **decoupled** from the control cycle: it refreshes ever
 `cfg.uiRefresh` seconds (default `1`), re-polling AE2 stock so the fill bars,
 clock, and log stay live, while pumps are only reallocated every `cfg.sleep`
 (default `30`). Lower `cfg.uiRefresh` = smoother display at the cost of more
-frequent AE2 reads.
+frequent AE2 reads. Each frame is **double-buffered** (drawn off-screen and
+blitted in one operation) so refreshes don't flicker; it falls back to direct
+drawing on GPUs that can't allocate a buffer.
 
 ## Files
 

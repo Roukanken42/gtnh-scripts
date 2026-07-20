@@ -5,6 +5,10 @@
 -- controller still runs headless. Designed for a tier-3 GPU (up to 160x50, 8-bit
 -- colour) but lays out relative to the actual resolution.
 --
+-- Frames are double-buffered: each render is drawn to an off-screen VRAM buffer
+-- and blitted to the screen in one operation, so the periodic UI refresh does not
+-- flicker. Degrades to direct-to-screen drawing if the GPU can't allocate one.
+--
 -- State contract (all fields optional-safe):
 --   dryRun        boolean
 --   paused        boolean          -- user halt; pumps off and allocation frozen
@@ -26,6 +30,7 @@ local ui = { active = false }
 local gpu
 local W, H
 local origW, origH, origDepth
+local buffer -- off-screen VRAM buffer index for double-buffering (nil = draw direct)
 
 -- ---- palette (approximated to the 8-bit palette by the GPU) --------------
 local C = {
@@ -153,13 +158,31 @@ function ui.init()
     H = math.min(mh, 50)
     pcall(gpu.setDepth, gpu.maxDepth())
     gpu.setResolution(W, H)
+
+    -- Double-buffering: allocate an off-screen buffer the size of the screen.
+    -- Each frame is drawn there and blitted to the display in one operation, so
+    -- periodic refreshes no longer flicker. Falls back to drawing straight to the
+    -- screen when the GPU can't provide a buffer (older tiers / low VRAM).
+    buffer = nil
+    if type(gpu.allocateBuffer) == "function" then
+        local ok, idx = pcall(gpu.allocateBuffer, W, H)
+        if ok and idx then buffer = idx end
+    end
+
+    if buffer then gpu.setActiveBuffer(buffer) end
     rect(1, 1, W, H, C.bg)
+    if buffer then gpu.bitblt(0, 1, 1, W, H, buffer, 1, 1) end
     ui.active = true
     return true
 end
 
 function ui.shutdown()
     if not ui.active then return end
+    if buffer then
+        pcall(gpu.setActiveBuffer, 0)
+        pcall(gpu.freeBuffer, buffer)
+        buffer = nil
+    end
     setbg(C.black); setfg(C.white)
     pcall(gpu.setResolution, origW, origH)
     pcall(gpu.setDepth, origDepth)
@@ -324,6 +347,8 @@ end
 
 function ui.render(state)
     if not ui.active then return end
+    -- Draw the frame off-screen (buffer stays the active target between renders).
+    if buffer then gpu.setActiveBuffer(buffer) end
 
     drawTitle(state)
     local kpiY = 3
@@ -341,6 +366,9 @@ function ui.render(state)
     drawFluids(state, 2, contentY, leftW, contentH)
     drawPumps(state, rightX, contentY, rightW, contentH)
     drawLog(state, 2, logY, W - 2, logH)
+
+    -- Present the finished frame to the screen in a single blit (no flicker).
+    if buffer then gpu.bitblt(0, 1, 1, W, H, buffer, 1, 1) end
 end
 
 return ui

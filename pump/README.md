@@ -59,13 +59,24 @@ critically-low fluid can outrank a well-stocked but higher-priority one; the
 square keeps the boost small until a tank is genuinely low. See `cfg.criticalWeight`
 (a gas can override it with a `criticalWeight` field in its demand entry).
 
-Threads are then assigned **breadth-first by score**: every served gas gets one
-thread before any gets a second, so with few threads and many gases only the top
-scorers are served (no thrashing across all 40). Any leftover threads are shared
-among the served gases in proportion to score, capped by each gas's estimated
-need (a thread makes `gas.amount × parallels` mB/s). Threads already serving a gas
-are reused for it (sticky) to avoid reconfiguration; unused threads are idled
-(parallels 0) and fully-idle pumps disabled.
+Threads are then assigned **score-weighted**: each thread goes to the gas with the
+highest `score / (threadsAssigned + 1)`, so a higher-priority or emptier gas pulls
+more threads while the diminishing `1/(threads + 1)` term still lets others in.
+Each gas is capped at its estimated need (a thread makes `gas.amount × parallels`
+mB/s), so no gas hoards threads it can't use this cycle.
+
+Before that weighting runs, a **coverage floor** (`cfg.coverageFloor`, default 1)
+guarantees the top-N scoring gases one thread each, so pure priority can't starve
+them. Tune it to trade concentration against spread:
+
+- `0` — pure priority: a dominant gas takes as many threads as its deficit needs
+  before anything else is served.
+- `1` — guarantee the single most-critical gas a thread, then weight the rest.
+- large (≥ number of demanded gases) — spread one thread across as many gases as
+  possible first (the previous breadth-first behaviour).
+
+Threads already serving a gas are reused for it (sticky) to avoid reconfiguration;
+unused threads are idled (parallels 0) and fully-idle pumps disabled.
 
 ## Pausing
 

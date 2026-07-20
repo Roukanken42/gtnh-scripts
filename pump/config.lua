@@ -91,6 +91,17 @@ cfg.lowWater = 0.9
 -- override this via a `criticalWeight` field in their demand entry above.
 cfg.criticalWeight = 4
 
+-- Coverage floor: how many of the top-scoring needy gases are guaranteed one
+-- thread each before the rest are handed out by score. Threads are otherwise
+-- allocated score-weighted (score / (threads + 1)), so higher-priority/emptier
+-- gases pull more threads.
+--   0 = pure priority: a dominant gas takes as many threads as its deficit needs
+--       before anything else is served (lower gases can be starved a cycle).
+--   1 = guarantee the single most-critical gas a thread, then weight the rest.
+--   big (>= number of demanded gases) = spread one thread across as many gases as
+--       possible first (the old breadth-first behaviour).
+cfg.coverageFloor = 1
+
 -- Safety: when true, the controller only LOGS the allocation it would make and
 -- never touches a pump. Flip to false once you have verified the plan in-game.
 cfg.dryRun = true

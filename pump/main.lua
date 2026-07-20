@@ -44,6 +44,11 @@ local interval = cfg.sleep or 30
 -- independent of the control cycle above. Floored so a misconfig cannot busy-loop.
 local uiRefresh = math.max(cfg.uiRefresh or 1, 0.1)
 local criticalWeight = cfg.criticalWeight or 4
+-- How many top-scoring needy gases are guaranteed one thread each before threads
+-- are concentrated by score. 0 = pure priority (a dominant gas can take every
+-- thread up to its deficit); large = spread one thread across as many gases as
+-- possible first. (0 is truthy in Lua, so an explicit 0 is honoured.)
+local coverageFloor = cfg.coverageFloor or 1
 
 -- Flatten pumps into individual thread "slots" (built once; slot.name carries
 -- the current gas assignment across cycles for sticky reallocation).
@@ -120,10 +125,13 @@ local function computeNeedy(stock)
 end
 
 -- Assigns threads to needy gases and returns a map slot -> gas name (nil = idle).
--- Threads are scarce relative to demand, so allocation is breadth-first by score:
--- every served gas gets one thread before any gets a second. When threads are
--- plentiful, the surplus is shared among the served gases in proportion to score.
--- Sticky: a thread already serving a gas is reused for it to avoid reconfiguring.
+-- Allocation is score-weighted: each thread goes to the gas with the highest
+-- score / (threadsAssigned + 1), so high-priority/critical gases accumulate more
+-- threads while the diminishing 1/(threads+1) term still lets others in. A
+-- coverage floor (cfg.coverageFloor) first guarantees the top-N needy gases one
+-- thread each so pure weighting can't starve them; the per-gas deficit cap stops
+-- any gas hoarding threads it can't use this cycle. Sticky: a thread already
+-- serving a gas is reused for it to avoid reconfiguring.
 local function allocate(needy)
     -- Single pool of all threads, biggest (most parallels) first.
     local free = {}
@@ -159,19 +167,20 @@ local function allocate(needy)
         return true
     end
 
-    -- Breadth: one thread to each needy gas in score order until threads run out.
-    -- With few threads and many gases this picks the top-scoring working set.
-    local served = {}
-    for _, n in ipairs(needy) do
-        if not assign(n) then break end
-        served[#served + 1] = n
+    -- Coverage floor: guarantee the top `coverageFloor` needy gases (needy is
+    -- pre-sorted by score) one thread each, so the score-weighting below can't
+    -- starve them entirely. Stops early if threads run out.
+    for i = 1, math.min(coverageFloor, #needy) do
+        if not assign(needy[i]) then break end
     end
 
-    -- Depth: hand any remaining threads to served gases by highest-averages on
-    -- score (score / (threads+1)), skipping gases already covered this cycle.
+    -- Score-weighted: hand every remaining thread to the needy gas with the
+    -- highest score / (threadsAssigned + 1) that still needs production this
+    -- cycle. Considers all needy gases (including any not covered above), so a
+    -- lower-ranked gas can still earn a thread when it out-averages the leaders.
     while true do
         local best, bestVal
-        for _, n in ipairs(served) do
+        for _, n in ipairs(needy) do
             if n.estProduction < n.deficit then
                 local val = n.score / (n.threadsAssigned + 1)
                 if not bestVal or val > bestVal then best, bestVal = n, val end

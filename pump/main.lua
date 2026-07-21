@@ -198,13 +198,17 @@ end
 -- rest (parallels 0), and enables pumps with any active thread / disables idle
 -- ones. Also updates slot.name for next cycle's stickiness.
 local function applyAllocation(newName)
-    local active = {}
+    local active, restart = {}, {}
     for _, s in ipairs(slots) do
         if newName[s] then active[s.pump] = true end
     end
 
     for _, s in ipairs(slots) do
         local name = newName[s]
+        -- A thread whose gas changed needs its multiblock restarted: TecTech
+        -- latches thread parameters at recipe start, so writing a new gas to a
+        -- running machine is ignored until it stops and starts again.
+        if name ~= s.name then restart[s.pump] = true end
         if name then
             local g = gasByName[name]
             local ok, err = s.pump:setThread(s.thread, g.planet, g.gas, s.parallels)
@@ -216,6 +220,16 @@ local function applyAllocation(newName)
         end
         s.name = name
     end
+
+    -- Stop the reconfigured machines and let them tick a beat, so the stop
+    -- actually registers before we re-enable (a same-pass off->on collapses to
+    -- "stayed on" -- the machine never ticks in between and keeps the old gas).
+    local bounced = false
+    for _, p in ipairs(pumpList) do
+        if restart[p] and p:isActive() then p:setEnabled(false); bounced = true end
+    end
+    -- ponytail: 0.1s = 2 game ticks; bump to a cfg knob only if a stop is missed.
+    if bounced then os.sleep(0.1) end
 
     for _, p in ipairs(pumpList) do
         p:setEnabled(active[p] == true)

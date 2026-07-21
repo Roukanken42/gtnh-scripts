@@ -27,6 +27,7 @@ local component = require("component")
 
 local PUMP_TYPE = "gt_machine"   -- component type the pump's Adapter exposes
 local PARAM_SET = "setParameters"
+local PARAM_GET = "getParameters"
 
 -- Pumps are identified by getName() == "projectmodulepumptN", where N is the
 -- tier. Each tier has fixed stats (stored on the Pump for later multi-thread /
@@ -76,6 +77,14 @@ local function writeParam(proxy, slot, value)
     return pcall(setter, slot.hatch, slot.id, value)
 end
 
+local function readParam(proxy, slot)
+    local getter = proxy[PARAM_GET]
+    if getter == nil then return nil end
+    local ok, v = pcall(getter, slot.hatch, slot.id)
+    if not ok then return nil end
+    return v
+end
+
 -- Configures one thread to pump (planet, gas) at the given parallels count.
 -- Returns true, or false + error.
 function Pump:setThread(thread, planet, gas, parallels)
@@ -92,6 +101,18 @@ function Pump:setThread(thread, planet, gas, parallels)
 
     self.threadConfig[thread] = { planet = planet, gas = gas, parallels = parallels }
     return true
+end
+
+-- Reads a thread's currently-applied (planet, gas, parallels) straight from the
+-- hardware via getParameters -- the ground truth of what the pump is pumping,
+-- independent of what we last tried to write. Any field is nil if unreadable.
+function Pump:getThread(thread)
+    local slots = layout(thread)
+    return {
+        planet    = readParam(self.proxy, slots.planet),
+        gas       = readParam(self.proxy, slots.gas),
+        parallels = readParam(self.proxy, slots.parallels),
+    }
 end
 
 -- Idles one thread by setting its parallels to 0 (produces nothing) without

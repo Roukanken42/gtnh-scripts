@@ -198,34 +198,56 @@ end
 -- rest (parallels 0), and enables pumps with any active thread / disables idle
 -- ones. Also updates slot.name for next cycle's stickiness.
 local function applyAllocation(newName)
-    local active, restart = {}, {}
+    local active, restart, stale = {}, {}, {}
     for _, s in ipairs(slots) do
-        if newName[s] then active[s.pump] = true end
-        -- TecTech rejects parameter writes while the machine is running, so a
-        -- thread whose gas changed needs its pump stopped BEFORE we write.
-        if newName[s] ~= s.name then restart[s.pump] = true end
+        local name = newName[s]
+        if name then active[s.pump] = true end
+        -- Compare the pump's ACTUAL applied params (getParameters) with what we
+        -- want. A mismatch needs a (re)write, which TecTech only accepts while the
+        -- machine is stopped; reading hardware rather than our own record also
+        -- self-heals a write that was silently rejected while the pump ran.
+        local g = name and gasByName[name]
+        local cur = s.pump:getThread(s.thread)
+        if g then
+            stale[s] = cur.planet ~= g.planet or cur.gas ~= g.gas or cur.parallels ~= s.parallels
+        else
+            stale[s] = cur.parallels ~= 0
+        end
+        if stale[s] then restart[s.pump] = true end
     end
 
-    -- Stop the reconfigured pumps and let them tick a beat so the halt actually
-    -- registers (a same-pass off->write collapses: the machine hasn't ticked, is
-    -- still "running", and swallows the write). Then params are writable.
-    local bounced = false
+    -- Stop the pumps we must rewrite, then wait until they actually report
+    -- stopped: setWorkAllowed is async and a machine can take up to ~0.5s to
+    -- halt, and params are only writable once it has. Poll isMachineActive
+    -- rather than guessing a delay.
+    local bounced = {}
     for _, p in ipairs(pumpList) do
-        if restart[p] and p:isActive() then p:setEnabled(false); bounced = true end
+        if restart[p] and p:isActive() then p:setEnabled(false); bounced[#bounced + 1] = p end
     end
-    -- ponytail: 0.1s = 2 game ticks; bump to a cfg knob only if a write is missed.
-    if bounced then os.sleep(0.1) end
+    if #bounced > 0 then
+        -- ponytail: 2s cap is a stuck-machine backstop, not the expected wait.
+        local deadline = computer.uptime() + 2
+        repeat
+            os.sleep(0.1)
+            local stopped = true
+            for _, p in ipairs(bounced) do
+                if p:isActive() then stopped = false; break end
+            end
+        until stopped or computer.uptime() >= deadline
+    end
 
     for _, s in ipairs(slots) do
         local name = newName[s]
-        if name then
-            local g = gasByName[name]
-            local ok, err = s.pump:setThread(s.thread, g.planet, g.gas, s.parallels)
-            if not ok then
-                log("ERROR " .. s.pump.address .. " thread " .. s.thread .. ": " .. tostring(err))
+        if stale[s] then   -- only touch threads whose hardware disagrees with us
+            if name then
+                local g = gasByName[name]
+                local ok, err = s.pump:setThread(s.thread, g.planet, g.gas, s.parallels)
+                if not ok then
+                    log("ERROR " .. s.pump.address .. " thread " .. s.thread .. ": " .. tostring(err))
+                end
+            else
+                s.pump:idleThread(s.thread)
             end
-        else
-            s.pump:idleThread(s.thread)
         end
         s.name = name
     end

@@ -277,7 +277,7 @@ end
 local function drawKPIs(state, y)
     local lsc = state.lsc or {}
     local t = state.totals or {}
-    local n = 6
+    local n = 7
     local gap = 1
     local w = math.floor((W - 2 - (n - 1) * gap) / n)
     local x = 2
@@ -305,7 +305,18 @@ local function drawKPIs(state, y)
         timeSub == "to EMPTY" and C.crit or C.faint); x = x + w + gap
 
     kpiCard(x, y, w, "GEN ONLINE", (t.online or 0) .. " / " .. (t.total or 0), C.accent2,
-        human(t.onlineEU or 0) .. "/t")
+        human(t.onlineEU or 0) .. "/t"); x = x + w + gap
+
+    -- Wireless sustained-output cap (threshold / 5min); "--" when not applicable.
+    local wireless = (state.source or ""):find("WIRELESS", 1, true) ~= nil
+    local cap = lsc.outputCap
+    if wireless and cap then
+        local exceed = (lsc.euOut or 0) > cap
+        kpiCard(x, y, w, "WL OUT CAP", human(cap) .. "/t", exceed and C.crit or C.good,
+            exceed and "OVER CAP" or "ok", exceed and C.crit or C.faint)
+    else
+        kpiCard(x, y, w, "WL OUT CAP", "--", C.faint, "wireless off")
+    end
 end
 
 -- One energy bar: LSC alone, or LSC + wireless pool when wireless is on. Also

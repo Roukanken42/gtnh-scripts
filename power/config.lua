@@ -50,13 +50,17 @@ cfg.generators = {
 --   "wireless" always LSC + wireless pool.
 cfg.source = "auto"
 
--- Wireless "full" reference. The wireless EU network has no real capacity (it is
--- effectively infinite and will exceed 2^64). When wireless counts toward the
--- level, the bar is (LSC stored + wireless pool) / (LSC capacity + this max), so
--- `max` is the pool amount you consider "full". EU string with an SI suffix:
--- "500T", "1E" (=1e18), "10E", ... The per-generator onBelow/offAbove fractions
--- then apply to that combined level.
-cfg.wireless = { max = "1E" }
+-- Energy "full" reference for the level/bar (100%), which the generator
+-- onBelow/offAbove fractions apply to. One value for whatever the level is made
+-- of (per cfg.source above):
+--   wireless off -> stored / max
+--   wireless on  -> (LSC stored + wireless pool) / max
+-- Leave nil to use the LSC's real capacity (100% = physically full battery). Set
+-- an EU string with an SI suffix ("500T", "1E" =1e18, "10E") to treat a smaller
+-- amount as "full" -- handy when the real capacity is so large the true % is
+-- always tiny, and effectively required when wireless is on (the pool has no
+-- real capacity to fall back on).
+cfg.max = nil
 
 -- ===========================================================================
 -- TIMING & SAFETY

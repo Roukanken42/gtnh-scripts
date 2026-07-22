@@ -57,23 +57,29 @@ local function wirelessActive(s)
     return (mode == "wireless") or (mode == "auto" and s.wirelessEnabled == true)
 end
 
+local function clamp01(x) return math.max(0, math.min(1, x)) end
+
 -- The energy the controller acts on, as ONE 0..1 level plus its composition and
 -- the stored / max digit strings behind it (for the display bar). When wireless
--- is on the pool is added to the LSC (it fills/drains the LSC), scaled against
--- LSC capacity + the configured wireless ceiling; otherwise it is the local LSC
--- fill %. All big-integer maths goes through bignum (values exceed 2^64).
+-- is on the pool is added to the LSC (it fills/drains the LSC). A single
+-- cfg.max is the "full" reference for whatever the level is made of; nil means
+-- the LSC's real capacity. All big-integer maths goes through bignum (values
+-- exceed 2^64).
 local function computeEnergy(s)
+    local maxS = cfg.max ~= nil and bignum.expandSI(cfg.max) or (s.capacityEU or "0")
     if wirelessActive(s) then
-        local maxWL = bignum.expandSI((cfg.wireless and cfg.wireless.max) or "0")
-        if maxWL == "0" then
-            warnOnce("wl-max", "cfg.wireless.max is 0/unset; the energy bar will read full.")
+        if cfg.max == nil then
+            warnOnce("nomax", "wireless is on but cfg.max is nil; using LSC capacity as the ceiling. Set cfg.max.")
         end
         local stored = bignum.add(s.storedEU or "0", s.wirelessEU or "0")
-        local maxTot = bignum.add(s.capacityEU or "0", maxWL)
-        local level = math.max(0, math.min(1, bignum.ratio(stored, maxTot)))
-        return level, "LSC + WIRELESS", stored, maxTot
+        return clamp01(bignum.ratio(stored, maxS)), "LSC + WIRELESS", stored, maxS
     end
-    return math.max(0, math.min(1, s.fill or 0)), "LSC", s.storedEU or "0", s.capacityEU or "0"
+    -- Wireless off. With no configured max, use the game's own fill % (robust to
+    -- the capacity-getter clamp); with one, scale stored against it.
+    if cfg.max ~= nil then
+        return clamp01(bignum.ratio(s.storedEU or "0", maxS)), "LSC", s.storedEU or "0", maxS
+    end
+    return clamp01(s.fill or 0), "LSC", s.storedEU or "0", s.capacityEU or "0"
 end
 
 -- Staged-threshold hysteresis for one generator. on when level <= onBelow, off

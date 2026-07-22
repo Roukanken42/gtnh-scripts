@@ -76,10 +76,13 @@ never through a clamping 64-bit int.
 - `"lsc"` — always the local LSC only.
 - `"wireless"` — always LSC + wireless pool.
 
-The wireless pool has no real capacity, so when it counts the level is
-`(LSC stored + pool) / (LSC capacity + cfg.wireless.max)`, where `max` (an
-absolute-EU string, e.g. `"1E"`) is the pool amount you consider "full". The same
-fractional `onBelow`/`offAbove` thresholds apply either way.
+A single `cfg.max` is the "full" reference (100%) for whatever the level is made
+of: `stored / cfg.max` with wireless off, or `(LSC stored + pool) / cfg.max` with
+it on. Leave it `nil` to use the LSC's real capacity — handy default with wireless
+off; set an EU string (e.g. `"500T"`, `"1E"`) to treat a smaller amount as full,
+which is useful when the real capacity is so large the true fill % is always tiny,
+and effectively required when wireless is on (the pool has no real capacity to
+fall back on). The same fractional `onBelow`/`offAbove` thresholds apply either way.
 
 ## Pausing
 

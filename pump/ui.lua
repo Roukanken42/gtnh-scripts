@@ -168,10 +168,41 @@ local function bar(x, y, w, frac, cFill, cEmpty)
     end
 end
 
+-- Split a 0xRRGGBB colour into components (bit-op free for Lua 5.2 / 5.3).
+local function rgb(c)
+    return math.floor(c / 65536) % 256, math.floor(c / 256) % 256, c % 256
+end
+
+-- Linear blend between two 0xRRGGBB colours; t in 0..1.
+local function lerpColor(a, b, t)
+    t = t < 0 and 0 or t > 1 and 1 or t
+    local ar, ag, ab = rgb(a)
+    local br, bg, bb = rgb(b)
+    local r = math.floor(ar + (br - ar) * t + 0.5)
+    local g = math.floor(ag + (bg - ag) * t + 0.5)
+    local bl = math.floor(ab + (bb - ab) * t + 0.5)
+    return r * 65536 + g * 256 + bl
+end
+
+-- Fill-level colour ramp: a smooth red -> orange -> amber -> lime -> green
+-- gradient so bars read as a continuum of shades rather than three flat bands.
+-- The endpoints match the old crit/warn/good thresholds; the extra anchors just
+-- fill in the shades between. Anchors are evenly spaced across 0..1.
+local FILL_RAMP = {
+    C.crit,   -- 0.00  red
+    0xFF8A5C, -- 0.25  orange
+    C.warn,   -- 0.50  amber
+    0xB6D94C, -- 0.75  lime
+    C.good,   -- 1.00  green
+}
+
 local function fillColor(frac)
-    if frac < 0.25 then return C.crit
-    elseif frac < 0.60 then return C.warn
-    else return C.good end
+    frac = frac < 0 and 0 or frac > 1 and 1 or frac
+    local n = #FILL_RAMP
+    local pos = frac * (n - 1)
+    local i = math.floor(pos)
+    if i >= n - 1 then return FILL_RAMP[n] end
+    return lerpColor(FILL_RAMP[i + 1], FILL_RAMP[i + 2], pos - i)
 end
 
 local STATUS_COLOR = { PUMP = C.pump, CRIT = C.crit, WAIT = C.warn, OK = C.good }

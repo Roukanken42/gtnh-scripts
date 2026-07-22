@@ -10,6 +10,7 @@
 local lsc = require("lsc")
 local generators = require("generators")
 local bignum = require("bignum")
+local util = require("util")
 local cfg = require("config")
 local ui = require("ui")
 local event = require("event")
@@ -43,6 +44,7 @@ local gens = generators.build(cfg, log, computer.uptime())
 
 local paused = false
 local showLog = false
+local exceedLogged = false -- whether the "output exceeds wireless cap" warning is active
 
 -- Latest snapshot + derived control values (repainted between control cycles).
 local lastState = { present = false }
@@ -119,6 +121,19 @@ local function runCycle()
     end
     local level, source, stored, maxTot = computeEnergy(s)
     lastLevel, lastSource, lastStored, lastMax = level, source, stored, maxTot
+
+    -- Wireless output cap: sustained output can't exceed threshold / 5min. Warn
+    -- (once per crossing) when the 5-min average output is over it.
+    if wirelessActive(s) and s.outputCap and (s.euOut or 0) > s.outputCap then
+        if not exceedLogged then
+            log(string.format("WARNING: output %s EU/t exceeds the wireless cap %s EU/t -- the network can't sustain this.",
+                util.human(s.euOut), util.human(s.outputCap)))
+            exceedLogged = true
+        end
+    else
+        exceedLogged = false
+    end
+
     if paused then
         haltGenerators()
         return

@@ -21,6 +21,26 @@ function util.parseNum(v)
     return n * ((suf ~= "" and SI[suf]) or 1)
 end
 
+-- SI-style magnitude of a Lua number (<= ~5 chars): 1234 -> "1.23k", 5e12 ->
+-- "5.00T". For log lines; the UI has its own copy for rendering.
+local HUMAN_PREFIX = { "k", "M", "G", "T", "P", "E", "Z", "Y", "R", "Q" }
+function util.human(n)
+    n = n or 0
+    local a = math.abs(n)
+    if a < 1e3 then return string.format("%.0f", n) end
+    local div, tier = 1e3, 1
+    while tier < #HUMAN_PREFIX and a >= div * 1e3 do
+        div = div * 1e3; tier = tier + 1
+    end
+    local scaled = n / div
+    if math.abs(scaled) >= 999.5 and tier < #HUMAN_PREFIX then
+        tier = tier + 1; scaled = n / (div * 1e3)
+    end
+    local mag = math.abs(scaled)
+    local fmt = (mag < 10 and "%.2f%s") or (mag < 100 and "%.1f%s") or "%.0f%s"
+    return string.format(fmt, scaled, HUMAN_PREFIX[tier])
+end
+
 -- Strip Minecraft formatting codes. The section sign is UTF-8 0xC2 0xA7 followed
 -- by one code char; also handle a bare 0xA7 just in case.
 function util.stripColor(s)

@@ -21,6 +21,16 @@ LSC.__index = LSC
 local MACHINE_TYPE = "gt_machine"
 local NAME_MATCH = "supercapacitor" -- getName() is "multimachine.supercapacitor"
 
+-- Wireless mode balances the LSC's stored EU toward a "wireless threshold" every
+-- 5 minutes (from both above and below). The threshold is the sum of each
+-- high-tier capacitor's contribution, so it caps sustained wireless output at
+-- threshold / 5min. Per-capacitor contributions (EU):
+local CAP_ORDER = { "UHV", "UEV", "UIV", "UMV" }
+local CAP_SI = { UHV = "60T", UEV = "6P", UIV = "600P", UMV = "60E" }
+local CAP_EU = {}
+for _, t in ipairs(CAP_ORDER) do CAP_EU[t] = bignum.expandSI(CAP_SI[t]) end
+local BALANCE_TICKS = 5 * 60 * 20 -- 5 minutes, in ticks (20/s)
+
 function LSC.new(address, proxy)
     local self = setmetatable({}, LSC)
     self.address = address
@@ -114,6 +124,24 @@ function LSC:read()
     s.active = call(proxy, "isMachineActive") == true
     s.maintenance = sensorValue(lines, "Maintenance Status:")
     s.timeToFullText = sensorValue(lines, "Time to Full:")
+
+    -- Wireless threshold from the high-tier capacitor counts (lines like
+    -- "UHV Capacitors detected: 1", colour-stripped above). The threshold can
+    -- exceed 2^64 (UMV contributes 60E each), so it stays a bignum string.
+    -- Sustained wireless output cannot exceed threshold / 5min -> outputCap EU/t.
+    local caps, threshold = {}, "0"
+    for _, tier in ipairs(CAP_ORDER) do
+        local n = 0
+        for _, line in ipairs(lines) do
+            local m = line:match("^" .. tier .. "%s+[Cc]apacitors?%s+detected:%s*(%d+)")
+            if m then n = tonumber(m); break end
+        end
+        caps[tier] = n
+        if n > 0 then threshold = bignum.add(threshold, bignum.mulSmall(CAP_EU[tier], n)) end
+    end
+    s.capacitors = caps
+    s.wirelessThreshold = threshold
+    s.outputCap = threshold ~= "0" and (bignum.approx(threshold) / BALANCE_TICKS) or nil
 
     -- ETA in seconds (20 ticks/s), from approximate magnitudes (display only).
     local perSec = s.net * 20

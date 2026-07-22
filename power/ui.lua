@@ -16,6 +16,7 @@
 --   lsc = { present, fill (0..1), storedEU, capacityEU (digit strings),
 --           euIn, euOut, passiveLoss, net (EU/t numbers, 5-min averaged),
 --           wirelessEnabled, wirelessEU (digit string),
+--           outputCap (EU/t number|nil), capacitors, wirelessThreshold,
 --           timeToFull, timeToEmpty (seconds|nil), maintenance, active }
 --   generators = { { name, output (num), prio, onBelow, offAbove,
 --                    on (bool|nil), status "ON"|"OFF"|"HOLD", sinceSec }, ... }
@@ -307,11 +308,21 @@ local function drawKPIs(state, y)
         human(t.onlineEU or 0) .. "/t")
 end
 
--- One energy bar: LSC alone, or LSC + wireless pool when wireless is on.
+-- One energy bar: LSC alone, or LSC + wireless pool when wireless is on. Also
+-- shows the wireless sustained-output cap (threshold / 5min) and warns if the
+-- average output is exceeding it.
 local function drawPower(state, x, y, w, h)
     local src = state.source or "LSC"
-    panel(x, y, w, h, "ENERGY  " .. EMDASH .. "  " .. src, C.accent)
     local lsc = state.lsc or {}
+    local wireless = src:find("WIRELESS", 1, true) ~= nil
+    local cap = lsc.outputCap
+    local out = lsc.euOut or 0
+    local exceed = wireless and cap and out > cap
+
+    local title = "ENERGY  " .. EMDASH .. "  " .. src
+    if exceed then title = title .. "   !! OUTPUT EXCEEDS WIRELESS CAP" end
+    panel(x, y, w, h, title, exceed and C.crit or C.accent)
+
     local innerX = x + 2
     local level = state.level or 0
     local labelW = 8
@@ -330,6 +341,12 @@ local function drawPower(state, x, y, w, h)
     if lsc.maintenance and not lsc.maintenance:find("perfect", 1, true) then
         local mtext = "  " .. MIDDOT .. "  " .. lsc.maintenance
         text(innerX + #info + 3 + #mode, y + 4, trunc(mtext, w - 4 - #info - 3 - #mode), C.warn, C.panel)
+    end
+
+    -- Wireless sustained-output cap line (only meaningful when wireless is on).
+    if wireless and cap then
+        local capText = string.format("Wireless output cap %s EU/t   (avg out %s/t)", human(cap), human(out))
+        text(innerX, y + 5, trunc(capText, w - 4), exceed and C.crit or C.dim, C.panel)
     end
 end
 
@@ -391,7 +408,7 @@ function ui.render(state)
     drawKPIs(state, kpiY)
 
     local contentY = kpiY + 5
-    local powerH = 7
+    local powerH = 8
     local logH = state.showLog and 8 or 0
     local logY = H - logH + 1
     local genY = contentY + powerH + 1

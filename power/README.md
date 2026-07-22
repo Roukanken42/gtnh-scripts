@@ -84,6 +84,17 @@ which is useful when the real capacity is so large the true fill % is always tin
 and effectively required when wireless is on (the pool has no real capacity to
 fall back on). The same fractional `onBelow`/`offAbove` thresholds apply either way.
 
+### Wireless output cap
+
+With wireless on, the LSC's stored energy is balanced toward a **wireless
+threshold** every 5 minutes (from both above and below), so sustained wireless
+output cannot exceed `threshold / 5 min`. The threshold is summed from the
+high-tier capacitors in the multiblock — UHV 60T, UEV 6P, UIV 600P, UMV 60E each
+— read from the sensor's "Capacitors detected" lines (values past 2^64, handled
+as bignum strings). The dashboard shows this cap in EU/t and flags a red warning
+(and logs one) when the 5-minute average output exceeds it — a sign the network
+can't sustain the base's draw.
+
 ## Pausing
 
 Press **SPACE** (or **P**) to pause: every generator is switched **off**

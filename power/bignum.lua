@@ -80,6 +80,24 @@ function bignum.add(a, b)
     return bignum.norm(table.concat(out):reverse())
 end
 
+-- Multiply a big integer by a small non-negative Lua integer (schoolbook). Used
+-- to scale a per-capacitor wireless-threshold contribution by its count.
+function bignum.mulSmall(a, n)
+    a = bignum.norm(a)
+    if a == "0" or n == 0 then return "0" end
+    local carry, out = 0, {}
+    for i = #a, 1, -1 do
+        local prod = tonumber(a:sub(i, i)) * n + carry
+        out[#out + 1] = tostring(prod % 10)
+        carry = math.floor(prod / 10)
+    end
+    while carry > 0 do
+        out[#out + 1] = tostring(carry % 10)
+        carry = math.floor(carry / 10)
+    end
+    return bignum.norm(table.concat(out):reverse())
+end
+
 -- SI multipliers (k .. Q) as powers of ten. Used for the wireless band, whose
 -- values (e.g. "1E" = 1e18 EU) exceed what a Lua number can hold exactly.
 local SI = { k = 3, K = 3, M = 6, G = 9, T = 12, P = 15, E = 18, Z = 21, Y = 24, R = 27, Q = 30 }

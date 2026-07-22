@@ -44,7 +44,12 @@ local gens = generators.build(cfg, log, computer.uptime())
 
 local paused = false
 local showLog = false
-local exceedLogged = false -- whether the "output exceeds wireless cap" warning is active
+local showGraph = false     -- swap the generators table for the history graph (G)
+local exceedLogged = false  -- whether the "output exceeds wireless cap" warning is active
+
+-- Rolling history for the graph view, one sample per control cycle.
+local history = {}
+local MAX_HISTORY = 300
 
 -- Latest snapshot + derived control values (repainted between control cycles).
 local lastState = { present = false }
@@ -134,6 +139,13 @@ local function runCycle()
         exceedLogged = false
     end
 
+    -- Record a history sample (kept even while paused, for the graph).
+    local online = 0
+    for _, g in ipairs(gens) do if g.on then online = online + 1 end end
+    history[#history + 1] = { level = level, net = s.net or 0,
+        euIn = s.euIn or 0, euOut = s.euOut or 0, online = online }
+    if #history > MAX_HISTORY then table.remove(history, 1) end
+
     if paused then
         haltGenerators()
         return
@@ -175,13 +187,14 @@ local function buildState()
     end
 
     return {
-        dryRun = cfg.dryRun, paused = paused, showLog = showLog,
+        dryRun = cfg.dryRun, paused = paused, showLog = showLog, showGraph = showGraph,
         cycle = cycle, updated = os.date("%H:%M:%S"),
         source = lastSource, level = lastLevel,
         energyStored = lastStored, energyMax = lastMax,
         lsc = s,
         generators = gview,
         totals = { online = online, total = #gens, onlineEU = onlineEU },
+        history = history, historyStep = interval,
         messages = messages,
     }
 end
@@ -196,7 +209,7 @@ else
 end
 log(string.format("Power controller started -- %d generator(s), source=%s, %ds cycle%s",
     #gens, cfg.source or "auto", interval, cfg.dryRun and "  [DRY RUN]" or ""))
-log("Press SPACE (or P) to pause/resume (all generators off); L to toggle the log panel.")
+log("Keys: SPACE/P pause (all generators off), G graph, L log panel.")
 for _, g in ipairs(gens) do
     log(string.format("  %s  side=%d%s  %s EU/t  p%d  on<=%d%% off>=%d%%",
         g.name, g.side, g.color and (" color=" .. g.color) or "",
@@ -253,6 +266,10 @@ local function loop()
                         log("RESUMED by user.")
                         nextCycle = computer.uptime() -- re-decide immediately
                     end
+                    refresh()
+                elseif code == keyboard.keys.g then
+                    lastToggle = computer.uptime()
+                    showGraph = not showGraph
                     refresh()
                 elseif code == keyboard.keys.l then
                     lastToggle = computer.uptime()

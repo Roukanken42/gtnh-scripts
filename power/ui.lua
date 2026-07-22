@@ -7,9 +7,11 @@
 -- lifecycle) mirrors pump/ui.lua; humanBig() is added for EU values past 2^64.
 --
 -- State contract (all fields optional-safe):
---   dryRun, paused, showLog  booleans
+--   dryRun, paused, showLog, showGraph  booleans
 --   cycle, tick              integers   (tick drives the spinner)
 --   updated                  string     "HH:MM:SS"
+--   history = { { level (0..1), net (EU/t) }, ... }  -- oldest first
+--   historyStep              seconds between history samples
 --   source                   "LSC" | "LSC + WIRELESS"   -- energy composition
 --   level                    0..1       -- effective control level (the bar)
 --   energyStored, energyMax  digit strings behind the bar (LSC, +wireless if on)
@@ -61,9 +63,15 @@ local EIGHTHS = {
     "\xE2\x96\x8F", "\xE2\x96\x8E", "\xE2\x96\x8D", "\xE2\x96\x8C",
     "\xE2\x96\x8B", "\xE2\x96\x8A", "\xE2\x96\x89",
 }
+-- Vertical (lower) eighth blocks for column/area charts: one-eighth .. full.
+local VBLOCK = {
+    "\xE2\x96\x81", "\xE2\x96\x82", "\xE2\x96\x83", "\xE2\x96\x84",
+    "\xE2\x96\x85", "\xE2\x96\x86", "\xE2\x96\x87", "\xE2\x96\x88",
+}
 local ARROW = "\xE2\x96\xB8"
 local MIDDOT = "\xC2\xB7"
 local EMDASH = "\xE2\x80\x94"
+local DOT = "\xE2\x96\xAA"           -- small filled square (net-flow marker)
 local SPIN = { "|", "/", "-", "\\" }
 
 -- ---- low-level drawing ---------------------------------------------------
@@ -89,6 +97,7 @@ local function trunc(s, w)
 end
 local function padR(s, w) s = trunc(s, w); return s .. string.rep(" ", w - #s) end
 local function padL(s, w) s = trunc(s, w); return string.rep(" ", w - #s) .. s end
+local function clamp01(v) return v < 0 and 0 or v > 1 and 1 or v end
 
 local HUMAN_PREFIX = { "k", "M", "G", "T", "P", "E", "Z", "Y", "R", "Q" }
 
@@ -250,7 +259,7 @@ local function drawTitle(state)
     rect(1, 1, W, 1, C.titleBg)
     local titleStr = " POWER CONTROLLER"
     text(2, 1, titleStr, C.accent, C.titleBg)
-    text(2 + #titleStr + 2, 1, "[SPACE] pause  [L] log", C.faint, C.titleBg)
+    text(2 + #titleStr + 2, 1, "[SPACE] pause  [G] graph  [L] log", C.faint, C.titleBg)
 
     local badge, badgeColor
     if state.paused then
@@ -397,6 +406,88 @@ local function drawGenerators(state, x, y, w, h)
     end
 end
 
+-- Historical view (toggle: G). Two stacked bands sharing the time axis -- energy
+-- level % as an area (height = magnitude), and net flow as diverging dots around
+-- a zero baseline (position = charge/drain sign). Two scales, so two charts, not
+-- a dual axis. Position is the primary channel in both, so colour is secondary.
+local function drawGraph(state, x, y, w, h)
+    local hist = state.history or {}
+    panel(x, y, w, h, "HISTORY  " .. EMDASH .. "  ENERGY %  " .. MIDDOT .. "  NET EU/t", C.accent)
+    local innerX = x + 2
+    local top = y + 1
+    local axisRow = y + h - 2
+
+    if #hist < 2 then
+        text(innerX, top + 1, "Collecting history...", C.faint, C.panel)
+        return
+    end
+
+    local labW = 7
+    local plotX = innerX + labW
+    local plotW = (w - 4) - labW
+    if plotW < 4 or (axisRow - top) < 4 then
+        text(innerX, top + 1, "Window too small for the graph.", C.faint, C.panel)
+        return
+    end
+
+    -- Most recent `shown` samples, newest aligned to the right edge.
+    local shown = math.min(#hist, plotW)
+    local first = #hist - shown + 1
+    local function colX(i) return plotX + plotW - shown + (i - first) end
+
+    -- Split the height: energy band (top), a gap row, net band, x-axis row.
+    local avail = axisRow - top
+    local eH = math.max(3, math.floor(avail * 0.55))
+    local nH = avail - eH - 1
+    if nH < 3 then eH = avail; nH = 0 end
+    local eBase = top + eH - 1
+    local eMid = math.floor((top + eBase) / 2)
+
+    -- ENERGY area.
+    text(innerX, top, padL("100%", labW - 1), C.faint, C.panel)
+    text(innerX, eMid, padL("50%", labW - 1), C.faint, C.panel)
+    text(innerX, eBase, padL("0%", labW - 1), C.faint, C.panel)
+    for i = first, #hist do
+        local lvl = clamp01(hist[i].level or 0)
+        local eighths = math.floor(lvl * eH * 8 + 0.5)
+        local full = math.floor(eighths / 8)
+        local part = eighths % 8
+        local col = fillColor(lvl)
+        local cx = colX(i)
+        for r = 0, full - 1 do text(cx, eBase - r, VBLOCK[8], col, C.panel) end
+        if part > 0 and full < eH then text(cx, eBase - full, VBLOCK[part], col, C.panel) end
+    end
+
+    -- NET flow: diverging dots around a zero baseline, peak-scaled.
+    if nH > 0 then
+        local nTop = eBase + 2
+        local nBase = nTop + nH - 1
+        local nMid = math.floor((nTop + nBase) / 2)
+        local half = math.max(1, nMid - nTop)
+        local peak = 1
+        for i = first, #hist do
+            local a = math.abs(hist[i].net or 0)
+            if a > peak then peak = a end
+        end
+        for cx = plotX, plotX + plotW - 1 do text(cx, nMid, BOX.h, C.faint, C.panel) end
+        text(innerX, nTop, padL("+" .. human(peak), labW - 1), C.good, C.panel)
+        text(innerX, nMid, padL("0", labW - 1), C.faint, C.panel)
+        text(innerX, nBase, padL("-" .. human(peak), labW - 1), C.crit, C.panel)
+        for i = first, #hist do
+            local v = hist[i].net or 0
+            local frac = math.max(-1, math.min(1, v / peak))
+            local row = nMid - math.floor(frac * half + 0.5)
+            if row < nTop then row = nTop elseif row > nBase then row = nBase end
+            text(colX(i), row, DOT, v >= 0 and C.good or C.crit, C.panel)
+        end
+    end
+
+    -- X-axis: time span from oldest shown sample to now.
+    local span = (shown - 1) * (state.historyStep or 0)
+    text(plotX, axisRow, "-" .. dur(span), C.faint, C.panel)
+    text(plotX + plotW - 3, axisRow, "now", C.faint, C.panel)
+end
+
 local function drawLog(state, x, y, w, h)
     panel(x, y, w, h, "LOG")
     local msgs = state.messages or {}
@@ -427,7 +518,11 @@ function ui.render(state)
     local genH = genBottom - genY + 1
 
     drawPower(state, 2, contentY, W - 2, powerH)
-    drawGenerators(state, 2, genY, W - 2, genH)
+    if state.showGraph then
+        drawGraph(state, 2, genY, W - 2, genH)
+    else
+        drawGenerators(state, 2, genY, W - 2, genH)
+    end
     if state.showLog then drawLog(state, 2, logY, W - 2, logH) end
 
     if buffer then gpu.bitblt(0, 1, 1, W, H, buffer, 1, 1) end

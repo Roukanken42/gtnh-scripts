@@ -118,6 +118,14 @@ length-based SI formatter so they stay readable past 2^64. It runs headless with
 screen or `cfg.ui = false`. Repaints are decoupled from the control cycle
 (`cfg.uiRefresh`, default 1 s) and double-buffered so they don't flicker.
 
+Press **G** to swap the generators table for a **history** view: two stacked
+charts sharing the time axis — the **energy level %** as an area (its height is
+the reading; the fill-gradient colour is secondary) and the **net flow** as
+diverging dots around a zero baseline (green above = charging, red below =
+draining, peak-scaled). One sample is recorded per control cycle, so the window
+spans roughly `graph width × cfg.sleep`. Two different scales, so two charts
+rather than a dual axis.
+
 ## Files
 
 | File | Role |

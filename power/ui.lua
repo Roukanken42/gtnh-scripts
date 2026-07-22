@@ -129,7 +129,8 @@ local function humanBig(s)
     return intPart .. "." .. digits:sub(intLen + 1, 3) .. suffix
 end
 
--- Compact duration: 45s / 12m / 3h20m / 2d5h. "--" for non-finite.
+-- Compact duration, two largest units: 45s / 12m / 3h20m / 2d5h / 41y33d.
+-- "--" for non-finite. Goes up to years so huge fill/drain ETAs stay readable.
 local function dur(s)
     s = s or 0
     if s ~= s or s == math.huge or s < 0 then return "--" end
@@ -139,8 +140,10 @@ local function dur(s)
     if m < 60 then local r = s % 60; return r > 0 and (m .. "m" .. r .. "s") or (m .. "m") end
     local h = math.floor(m / 60)
     if h < 24 then local r = m % 60; return r > 0 and (h .. "h" .. r .. "m") or (h .. "h") end
-    local d = math.floor(h / 24); local r = h % 24
-    return r > 0 and (d .. "d" .. r .. "h") or (d .. "d")
+    local d = math.floor(h / 24)
+    if d < 365 then local r = h % 24; return r > 0 and (d .. "d" .. r .. "h") or (d .. "d") end
+    local y = math.floor(d / 365); local r = d % 365
+    return r > 0 and (y .. "y" .. r .. "d") or (y .. "y")
 end
 
 local function box(x, y, w, h, borderColor, fillColor)

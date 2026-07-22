@@ -38,11 +38,13 @@ local function call(proxy, name)
 end
 
 -- Value after a "Label:" prefix, from the first stripped sensor line that starts
--- with `prefix` and is NOT the scientific ("x10^") duplicate. Returns nil if no
--- such line exists.
-local function sensorValue(lines, prefix)
+-- with `prefix`, is NOT the scientific ("x10^") duplicate, and (if `contains` is
+-- given) also contains that substring -- used to pick a specific averaging window
+-- among the several "Avg EU IN:" lines. Returns nil if no such line exists.
+local function sensorValue(lines, prefix, contains)
     for _, line in ipairs(lines) do
-        if line:sub(1, #prefix) == prefix and not line:find("10^", 1, true) then
+        if line:sub(1, #prefix) == prefix and not line:find("10^", 1, true)
+            and (not contains or line:find(contains, 1, true)) then
             return (line:sub(#prefix + 1):gsub("^%s+", ""):gsub("%s+$", ""))
         end
     end
@@ -96,14 +98,18 @@ function LSC:read()
         and not mode:lower():find("disabled", 1, true)
     s.wirelessEU = util.parseGrouped(sensorValue(lines, "Total wireless EU:") or "0")
 
-    -- Small live rates (numbers). Per-tick figures come from the sensor; the
-    -- getters back them up.
-    s.euInPerTick = util.parseDecimal(sensorValue(lines, "EU IN:") or "")
+    -- Flow rates (EU/t numbers). Big lasers transport power in huge bursts, so
+    -- the instantaneous / 5-second figures are far too spiky to control on -- use
+    -- the 5-MINUTE averages for net flow and the fill/drain ETA. The per-tick
+    -- line and the getter are only fallbacks if the 5-minute line is missing.
+    s.euIn = util.parseDecimal(sensorValue(lines, "Avg EU IN:", "5 minute") or "")
+        or util.parseDecimal(sensorValue(lines, "EU IN:") or "")
         or call(proxy, "getEUInputAverage") or 0
-    s.euOutPerTick = util.parseDecimal(sensorValue(lines, "EU OUT:") or "")
+    s.euOut = util.parseDecimal(sensorValue(lines, "Avg EU OUT:", "5 minute") or "")
+        or util.parseDecimal(sensorValue(lines, "EU OUT:") or "")
         or call(proxy, "getEUOutputAverage") or 0
     s.passiveLoss = util.parseDecimal(sensorValue(lines, "Passive Loss:") or "") or 0
-    s.net = s.euInPerTick - s.euOutPerTick - s.passiveLoss
+    s.net = s.euIn - s.euOut - s.passiveLoss
 
     s.active = call(proxy, "isMachineActive") == true
     s.maintenance = sensorValue(lines, "Maintenance Status:")

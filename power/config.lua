@@ -42,23 +42,21 @@ cfg.generators = {
 -- ===========================================================================
 -- CONTROL SOURCE
 -- ===========================================================================
--- What the controller thresholds against:
---   "auto"     follow the LSC's wireless mode: use the wireless network pool when
---              the LSC has wireless ENABLED (it then fills/drains the LSC), else
---              the local LSC fill %. (Recommended.)
---   "lsc"      always the local LSC fill %.
---   "wireless" always the wireless network pool.
--- Either way the dashboard shows BOTH the LSC fill and the wireless pool.
+-- What the single energy level (and the dashboard bar) is made of:
+--   "auto"     follow the LSC's wireless mode: when wireless is ENABLED the pool
+--              fills/drains the LSC, so the level is LSC stored + wireless pool;
+--              otherwise it is the local LSC alone. (Recommended.)
+--   "lsc"      always the local LSC only.
+--   "wireless" always LSC + wireless pool.
 cfg.source = "auto"
 
--- Wireless operating band. The wireless EU network has no real capacity (it is
--- effectively infinite and will exceed 2^64), so when it is the control source
--- its level is scaled between these two absolute-EU references:
---   min = the pool amount treated as "0%"  (usually 0)
---   max = the pool amount treated as "100%" -- YOUR chosen "full" target.
--- Written as EU strings with SI suffixes: "500T", "1E" (=1e18), "10E", ...
--- The per-generator onBelow/offAbove fractions above then apply to this band.
-cfg.wireless = { min = "0", max = "1E" }
+-- Wireless "full" reference. The wireless EU network has no real capacity (it is
+-- effectively infinite and will exceed 2^64). When wireless counts toward the
+-- level, the bar is (LSC stored + wireless pool) / (LSC capacity + this max), so
+-- `max` is the pool amount you consider "full". EU string with an SI suffix:
+-- "500T", "1E" (=1e18), "10E", ... The per-generator onBelow/offAbove fractions
+-- then apply to that combined level.
+cfg.wireless = { max = "1E" }
 
 -- ===========================================================================
 -- TIMING & SAFETY

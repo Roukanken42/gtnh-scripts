@@ -54,6 +54,11 @@ Because each generator has its own band and they are sorted by `prio`, generatio
 ramps up and sheds in priority order automatically — no central "how many
 generators" decision, just independent staged bands.
 
+Flow rates (EU in/out, net, and the fill/drain ETA) are read from the LSC's
+**5-minute average**, not the instantaneous per-tick figure: power transported by
+large lasers arrives in big bursts, so the per-tick / 5-second readings are far
+too spiky to control or estimate on.
+
 ### Control source (LSC vs wireless)
 
 The LSC's stored EU exceeds 64-bit integers at high fill, and the **wireless EU
@@ -63,19 +68,18 @@ values are read as **strings** — from the `getStoredEUString()` /
 wireless pool total has no getter) — and handled by `bignum.lua` as digit strings,
 never through a clamping 64-bit int.
 
-`cfg.source` chooses what the `level` is derived from:
+`cfg.source` chooses what the `level` (and the single energy bar) is made of:
 
 - `"auto"` (default) — follow the LSC's wireless mode: when wireless is **enabled**
-  (the network then fills/drains the LSC, so it is the real reservoir) the level is
-  the **wireless pool**; otherwise it is the **local LSC fill %**.
-- `"lsc"` — always the local LSC fill %.
-- `"wireless"` — always the wireless pool.
+  (the network fills/drains the LSC) the level is **LSC stored + wireless pool**;
+  otherwise it is the **local LSC alone**.
+- `"lsc"` — always the local LSC only.
+- `"wireless"` — always LSC + wireless pool.
 
-The wireless pool has no real capacity, so its level is scaled between
-`cfg.wireless.min` and `cfg.wireless.max` (absolute-EU strings, e.g. `"1E"`), your
-chosen operating band. The same fractional `onBelow`/`offAbove` thresholds then
-apply in either mode. The dashboard always shows **both** the LSC fill and the
-wireless pool, marking which one is the active control source.
+The wireless pool has no real capacity, so when it counts the level is
+`(LSC stored + pool) / (LSC capacity + cfg.wireless.max)`, where `max` (an
+absolute-EU string, e.g. `"1E"`) is the pool amount you consider "full". The same
+fractional `onBelow`/`offAbove` thresholds apply either way.
 
 ## Pausing
 
@@ -92,11 +96,11 @@ them off.
 ## Dashboard
 
 With a GPU + screen, `main` shows a live dashboard (`ui.lua`, toggle with
-`cfg.ui`): a KPI strip (battery %, EU in/out, net flow, time-to-full/empty,
-generators online + total EU/t), two fill bars (LSC and wireless pool, active
-source starred), and a generators table (output / priority / on–off band / status
-/ time-in-state). Huge EU values render via a length-based SI formatter so they
-stay readable past 2^64. It runs headless with plain text logging if there is no
+`cfg.ui`): a KPI strip (energy %, EU in/out over 5 min, net flow,
+time-to-full/empty, generators online + total EU/t), one energy fill bar (LSC, or
+LSC + wireless pool when wireless is on), and a generators table (output /
+priority / on–off band / status / time-in-state). Huge EU values render via a
+length-based SI formatter so they stay readable past 2^64. It runs headless with plain text logging if there is no
 screen or `cfg.ui = false`. Repaints are decoupled from the control cycle
 (`cfg.uiRefresh`, default 1 s) and double-buffered so they don't flicker.
 

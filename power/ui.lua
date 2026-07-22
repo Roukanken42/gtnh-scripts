@@ -10,13 +10,13 @@
 --   dryRun, paused, showLog  booleans
 --   cycle, tick              integers   (tick drives the spinner)
 --   updated                  string     "HH:MM:SS"
---   source                   "LSC" | "WIRELESS"   -- active control source
---   level                    0..1       -- effective control level
+--   source                   "LSC" | "LSC + WIRELESS"   -- energy composition
+--   level                    0..1       -- effective control level (the bar)
+--   energyStored, energyMax  digit strings behind the bar (LSC, +wireless if on)
 --   lsc = { present, fill (0..1), storedEU, capacityEU (digit strings),
---           euInPerTick, euOutPerTick, passiveLoss, net (EU/t numbers),
+--           euIn, euOut, passiveLoss, net (EU/t numbers, 5-min averaged),
 --           wirelessEnabled, wirelessEU (digit string),
 --           timeToFull, timeToEmpty (seconds|nil), maintenance, active }
---   wireless = { level (0..1), poolEU, min, max (digit strings) }
 --   generators = { { name, output (num), prio, onBelow, offAbove,
 --                    on (bool|nil), status "ON"|"OFF"|"HOLD", sinceSec }, ... }
 --   totals = { online, total, onlineEU }
@@ -278,11 +278,11 @@ local function drawKPIs(state, y)
     local w = math.floor((W - 2 - (n - 1) * gap) / n)
     local x = 2
 
-    local fill = lsc.fill or 0
-    kpiCard(x, y, w, "BATTERY (LSC)", string.format("%.1f%%", fill * 100), fillColor(fill),
-        humanBig(lsc.storedEU) .. " EU"); x = x + w + gap
-    kpiCard(x, y, w, "EU IN", human(lsc.euInPerTick or 0) .. "/t", C.good); x = x + w + gap
-    kpiCard(x, y, w, "EU OUT", human(lsc.euOutPerTick or 0) .. "/t", C.pump); x = x + w + gap
+    local level = state.level or 0
+    kpiCard(x, y, w, "ENERGY", string.format("%.1f%%", level * 100), fillColor(level),
+        humanBig(state.energyStored) .. " EU"); x = x + w + gap
+    kpiCard(x, y, w, "EU IN 5m", human(lsc.euIn or 0) .. "/t", C.good); x = x + w + gap
+    kpiCard(x, y, w, "EU OUT 5m", human(lsc.euOut or 0) .. "/t", C.pump); x = x + w + gap
 
     local net = lsc.net or 0
     kpiCard(x, y, w, "NET FLOW",
@@ -304,38 +304,29 @@ local function drawKPIs(state, y)
         human(t.onlineEU or 0) .. "/t")
 end
 
--- Two stacked source bars (LSC + wireless); the active control source is starred.
+-- One energy bar: LSC alone, or LSC + wireless pool when wireless is on.
 local function drawPower(state, x, y, w, h)
     local src = state.source or "LSC"
-    panel(x, y, w, h, "POWER  " .. EMDASH .. "  CONTROL: " .. src, C.accent)
+    panel(x, y, w, h, "ENERGY  " .. EMDASH .. "  " .. src, C.accent)
     local lsc = state.lsc or {}
-    local wl = state.wireless or {}
     local innerX = x + 2
-    local labelW = 10
-    local pctW = 7
-    local infoW = 26
-    local barW = math.max(w - 4 - labelW - pctW - infoW - 3, 10)
+    local level = state.level or 0
+    local labelW = 8
+    local pctW = 8
     local barX = innerX + labelW
+    local barW = math.max(w - 4 - labelW - pctW - 1, 10)
 
-    local function row(ry, name, active, frac, pctStr, info, infoColor)
-        local nameColor = active and C.accent or C.dim
-        text(innerX, ry, padR((active and (ARROW .. " ") or "  ") .. name, labelW), nameColor, C.panel)
-        bar(barX, ry, barW, frac, fillColor(frac), C.panelHi)
-        text(barX + barW + 1, ry, padL(pctStr, pctW), fillColor(frac), C.panel)
-        text(barX + barW + 1 + pctW + 1, ry, padR(info, infoW), infoColor or C.dim, C.panel)
-    end
+    text(innerX, y + 2, padR("LEVEL", labelW), C.dim, C.panel)
+    bar(barX, y + 2, barW, level, fillColor(level), C.panelHi)
+    text(barX + barW + 1, y + 2, padL(string.format("%.1f%%", level * 100), pctW), fillColor(level), C.panel)
 
-    local fill = lsc.fill or 0
-    row(y + 2, "LSC", src == "LSC", fill, string.format("%.1f%%", fill * 100),
-        humanBig(lsc.storedEU) .. " / " .. humanBig(lsc.capacityEU) .. " EU")
-
-    local wlFrac = wl.level or 0
-    local mode = lsc.wirelessEnabled and "on" or "off"
-    row(y + 4, "WIRELESS", src == "WIRELESS", wlFrac, string.format("%.1f%%", wlFrac * 100),
-        humanBig(wl.poolEU) .. " EU  [" .. mode .. "]")
-
+    local info = humanBig(state.energyStored) .. " / " .. humanBig(state.energyMax) .. " EU"
+    local mode = lsc.wirelessEnabled and "wireless ON" or "wireless off"
+    text(innerX, y + 4, info, C.text, C.panel)
+    text(innerX + #info + 3, y + 4, mode, lsc.wirelessEnabled and C.good or C.faint, C.panel)
     if lsc.maintenance and not lsc.maintenance:find("perfect", 1, true) then
-        text(innerX, y + 5, trunc("Maintenance: " .. lsc.maintenance, w - 4), C.warn, C.panel)
+        local mtext = "  " .. MIDDOT .. "  " .. lsc.maintenance
+        text(innerX + #info + 3 + #mode, y + 4, trunc(mtext, w - 4 - #info - 3 - #mode), C.warn, C.panel)
     end
 end
 

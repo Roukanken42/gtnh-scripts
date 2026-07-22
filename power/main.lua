@@ -47,37 +47,33 @@ local showLog = false
 -- Latest snapshot + derived control values (repainted between control cycles).
 local lastState = { present = false }
 local lastLevel, lastSource = 0, "LSC"
+local lastStored, lastMax = "0", "0"
 
 -- ---- control logic -------------------------------------------------------
 
--- Wireless pool level, scaled to 0..1 against the configured operating band.
--- All big-integer maths goes through bignum (the pool exceeds 2^64). Returns
--- level plus the resolved min/max digit strings (for display).
-local function wirelessLevel(s)
-    local minS = bignum.expandSI((cfg.wireless and cfg.wireless.min) or "0")
-    local maxS = bignum.expandSI((cfg.wireless and cfg.wireless.max) or "0")
-    if bignum.cmp(maxS, minS) <= 0 then return 0, minS, maxS end
-    local rMax = bignum.ratio(s.wirelessEU or "0", maxS) -- pool / max
-    local rMin = bignum.ratio(minS, maxS)                -- min  / max
-    local level = (rMax - rMin) / (1 - rMin)
-    return math.max(0, math.min(1, level)), minS, maxS
+-- Whether the wireless network counts as part of the energy pool this cycle.
+local function wirelessActive(s)
+    local mode = cfg.source or "auto"
+    return (mode == "wireless") or (mode == "auto" and s.wirelessEnabled == true)
 end
 
--- The single 0..1 level the controller thresholds against, plus which source it
--- came from. Auto follows the LSC's wireless mode.
-local function computeLevel(s)
-    local mode = cfg.source or "auto"
-    local useWireless = (mode == "wireless") or (mode == "auto" and s.wirelessEnabled == true)
-    if useWireless then
-        local minS = bignum.expandSI((cfg.wireless and cfg.wireless.min) or "0")
-        local maxS = bignum.expandSI((cfg.wireless and cfg.wireless.max) or "0")
-        if bignum.cmp(maxS, minS) <= 0 then
-            warnOnce("wl-band", "cfg.wireless max <= min; controlling on LSC fill % instead.")
-            return s.fill or 0, "LSC"
+-- The energy the controller acts on, as ONE 0..1 level plus its composition and
+-- the stored / max digit strings behind it (for the display bar). When wireless
+-- is on the pool is added to the LSC (it fills/drains the LSC), scaled against
+-- LSC capacity + the configured wireless ceiling; otherwise it is the local LSC
+-- fill %. All big-integer maths goes through bignum (values exceed 2^64).
+local function computeEnergy(s)
+    if wirelessActive(s) then
+        local maxWL = bignum.expandSI((cfg.wireless and cfg.wireless.max) or "0")
+        if maxWL == "0" then
+            warnOnce("wl-max", "cfg.wireless.max is 0/unset; the energy bar will read full.")
         end
-        return (wirelessLevel(s)), "WIRELESS"
+        local stored = bignum.add(s.storedEU or "0", s.wirelessEU or "0")
+        local maxTot = bignum.add(s.capacityEU or "0", maxWL)
+        local level = math.max(0, math.min(1, bignum.ratio(stored, maxTot)))
+        return level, "LSC + WIRELESS", stored, maxTot
     end
-    return s.fill or 0, "LSC"
+    return math.max(0, math.min(1, s.fill or 0)), "LSC", s.storedEU or "0", s.capacityEU or "0"
 end
 
 -- Staged-threshold hysteresis for one generator. on when level <= onBelow, off
@@ -115,8 +111,8 @@ local function runCycle()
         log("LSC read failed this cycle.")
         return
     end
-    local level, source = computeLevel(s)
-    lastLevel, lastSource = level, source
+    local level, source, stored, maxTot = computeEnergy(s)
+    lastLevel, lastSource, lastStored, lastMax = level, source, stored, maxTot
     if paused then
         haltGenerators()
         return
@@ -145,7 +141,6 @@ end
 local function buildState()
     local s = lastState or { present = false }
     local now = computer.uptime()
-    local wl, minS, maxS = wirelessLevel(s)
 
     local gview, online, onlineEU = {}, 0, 0
     for _, g in ipairs(gens) do
@@ -162,8 +157,8 @@ local function buildState()
         dryRun = cfg.dryRun, paused = paused, showLog = showLog,
         cycle = cycle, updated = os.date("%H:%M:%S"),
         source = lastSource, level = lastLevel,
+        energyStored = lastStored, energyMax = lastMax,
         lsc = s,
-        wireless = { level = wl, poolEU = s.wirelessEU, min = minS, max = maxS },
         generators = gview,
         totals = { online = online, total = #gens, onlineEU = onlineEU },
         messages = messages,
@@ -197,7 +192,9 @@ local function refresh()
     if not uiActive then return end
     if lscDev then
         lastState = lscDev:read()
-        if lastState.present then lastLevel, lastSource = computeLevel(lastState) end
+        if lastState.present then
+            lastLevel, lastSource, lastStored, lastMax = computeEnergy(lastState)
+        end
     end
     tick = tick + 1
     local st = buildState()

@@ -62,6 +62,24 @@ function bignum.approx(a)
     return bignum.ratio(a, "1")
 end
 
+-- Exact addition of two big integers (schoolbook, on digit strings). Used to
+-- combine LSC stored/capacity with the wireless pool for the energy level/bar.
+function bignum.add(a, b)
+    a = bignum.norm(a)
+    b = bignum.norm(b)
+    local i, j, carry = #a, #b, 0
+    local out = {}
+    while i > 0 or j > 0 or carry > 0 do
+        local da = i > 0 and tonumber(a:sub(i, i)) or 0
+        local db = j > 0 and tonumber(b:sub(j, j)) or 0
+        local sum = da + db + carry
+        out[#out + 1] = tostring(sum % 10)
+        carry = math.floor(sum / 10)
+        i, j = i - 1, j - 1
+    end
+    return bignum.norm(table.concat(out):reverse())
+end
+
 -- SI multipliers (k .. Q) as powers of ten. Used for the wireless band, whose
 -- values (e.g. "1E" = 1e18 EU) exceed what a Lua number can hold exactly.
 local SI = { k = 3, K = 3, M = 6, G = 9, T = 12, P = 15, E = 18, Z = 21, Y = 24, R = 27, Q = 30 }

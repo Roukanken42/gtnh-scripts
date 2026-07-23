@@ -121,10 +121,11 @@ screen or `cfg.ui = false`. Repaints are decoupled from the control cycle
 Press **G** to swap the generators table for a **history** view: two stacked
 charts sharing the time axis — the **energy level %** as an area (its height is
 the reading; the fill-gradient colour is secondary) and the **net flow** as
-diverging dots around a zero baseline (green above = charging, red below =
-draining, peak-scaled). One sample is recorded per control cycle, so the window
-spans roughly `graph width × cfg.sleep`. Two different scales, so two charts
-rather than a dual axis.
+points around a zero baseline (green above = charging, red below = draining,
+peak-scaled). Both are drawn with **braille** characters (a 2×4 dot matrix per
+cell), for 2× horizontal / 4× vertical sub-cell precision. One sample is recorded
+per control cycle, so the window spans roughly `2 × graph width × cfg.sleep`. Two
+different scales, so two charts rather than a dual axis.
 
 ## Files
 

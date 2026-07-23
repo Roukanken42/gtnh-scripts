@@ -63,15 +63,9 @@ local EIGHTHS = {
     "\xE2\x96\x8F", "\xE2\x96\x8E", "\xE2\x96\x8D", "\xE2\x96\x8C",
     "\xE2\x96\x8B", "\xE2\x96\x8A", "\xE2\x96\x89",
 }
--- Vertical (lower) eighth blocks for column/area charts: one-eighth .. full.
-local VBLOCK = {
-    "\xE2\x96\x81", "\xE2\x96\x82", "\xE2\x96\x83", "\xE2\x96\x84",
-    "\xE2\x96\x85", "\xE2\x96\x86", "\xE2\x96\x87", "\xE2\x96\x88",
-}
 local ARROW = "\xE2\x96\xB8"
 local MIDDOT = "\xC2\xB7"
 local EMDASH = "\xE2\x80\x94"
-local DOT = "\xE2\x96\xAA"           -- small filled square (net-flow marker)
 local SPIN = { "|", "/", "-", "\\" }
 
 -- ---- low-level drawing ---------------------------------------------------
@@ -406,10 +400,42 @@ local function drawGenerators(state, x, y, w, h)
     end
 end
 
+-- Braille canvas: each character cell is a 2x4 dot matrix, so a plot gets 2x the
+-- horizontal and 4x the vertical resolution of the cell grid. Sub-pixel origin is
+-- top-left. One colour per cell (last writer wins).
+local BR = { [0] = { [0] = 0x01, [1] = 0x02, [2] = 0x04, [3] = 0x40 },
+             [1] = { [0] = 0x08, [1] = 0x10, [2] = 0x20, [3] = 0x80 } }
+local function canvasNew(cols, rows) return { cols = cols, rows = rows, mask = {}, col = {} } end
+local function canvasSet(cvs, px, py, color)
+    if px < 0 or py < 0 then return end
+    local cc, cr = math.floor(px / 2), math.floor(py / 4)
+    if cc >= cvs.cols or cr >= cvs.rows then return end
+    local bit = BR[px % 2][py % 4]
+    local idx = cr * cvs.cols + cc
+    local m = cvs.mask[idx] or 0
+    if math.floor(m / bit) % 2 == 0 then cvs.mask[idx] = m + bit end
+    cvs.col[idx] = color
+end
+local function canvasBlit(cvs, x0, y0)
+    for cr = 0, cvs.rows - 1 do
+        for cc = 0, cvs.cols - 1 do
+            local idx = cr * cvs.cols + cc
+            local m = cvs.mask[idx]
+            if m and m > 0 then
+                -- U+2800 + mask, encoded as 3-byte UTF-8.
+                text(x0 + cc, y0 + cr,
+                    string.char(0xE2, 0xA0 + math.floor(m / 64), 0x80 + m % 64),
+                    cvs.col[idx] or C.text, C.panel)
+            end
+        end
+    end
+end
+
 -- Historical view (toggle: G). Two stacked bands sharing the time axis -- energy
--- level % as an area (height = magnitude), and net flow as diverging dots around
--- a zero baseline (position = charge/drain sign). Two scales, so two charts, not
--- a dual axis. Position is the primary channel in both, so colour is secondary.
+-- level % as a filled area, and net flow as points around a zero baseline
+-- (position = charge/drain sign). Two scales, so two charts, not a dual axis;
+-- position is the primary channel in both, so colour is secondary. Both are drawn
+-- on braille canvases for sub-cell precision.
 local function drawGraph(state, x, y, w, h)
     local hist = state.history or {}
     panel(x, y, w, h, "HISTORY  " .. EMDASH .. "  ENERGY %  " .. MIDDOT .. "  NET EU/t", C.accent)
@@ -430,10 +456,11 @@ local function drawGraph(state, x, y, w, h)
         return
     end
 
-    -- Most recent `shown` samples, newest aligned to the right edge.
-    local shown = math.min(#hist, plotW)
+    -- 2 sub-columns per cell -> twice as many datapoints across the width.
+    local subCols = plotW * 2
+    local shown = math.min(#hist, subCols)
     local first = #hist - shown + 1
-    local function colX(i) return plotX + plotW - shown + (i - first) end
+    local function subX(i) return subCols - shown + (i - first) end -- newest at right
 
     -- Split the height: energy band (top), a gap row, net band, x-axis row.
     local avail = axisRow - top
@@ -443,43 +470,46 @@ local function drawGraph(state, x, y, w, h)
     local eBase = top + eH - 1
     local eMid = math.floor((top + eBase) / 2)
 
-    -- ENERGY area.
+    -- ENERGY: filled area (fill from the bottom up to level * height).
     text(innerX, top, padL("100%", labW - 1), C.faint, C.panel)
     text(innerX, eMid, padL("50%", labW - 1), C.faint, C.panel)
     text(innerX, eBase, padL("0%", labW - 1), C.faint, C.panel)
+    local eRows = eH * 4
+    local eCanvas = canvasNew(plotW, eH)
     for i = first, #hist do
         local lvl = clamp01(hist[i].level or 0)
-        local eighths = math.floor(lvl * eH * 8 + 0.5)
-        local full = math.floor(eighths / 8)
-        local part = eighths % 8
+        local fillPx = math.floor(lvl * eRows + 0.5)
         local col = fillColor(lvl)
-        local cx = colX(i)
-        for r = 0, full - 1 do text(cx, eBase - r, VBLOCK[8], col, C.panel) end
-        if part > 0 and full < eH then text(cx, eBase - full, VBLOCK[part], col, C.panel) end
+        local px = subX(i)
+        for p = 0, fillPx - 1 do canvasSet(eCanvas, px, eRows - 1 - p, col) end
     end
+    canvasBlit(eCanvas, plotX, top)
 
-    -- NET flow: diverging dots around a zero baseline, peak-scaled.
+    -- NET: points around a zero baseline, peak-scaled, green up / red down.
     if nH > 0 then
         local nTop = eBase + 2
         local nBase = nTop + nH - 1
-        local nMid = math.floor((nTop + nBase) / 2)
-        local half = math.max(1, nMid - nTop)
+        local nRows = nH * 4
+        local nMidPx = math.floor(nRows / 2)
+        local midCell = nTop + math.floor(nMidPx / 4)
         local peak = 1
         for i = first, #hist do
             local a = math.abs(hist[i].net or 0)
             if a > peak then peak = a end
         end
-        for cx = plotX, plotX + plotW - 1 do text(cx, nMid, BOX.h, C.faint, C.panel) end
+        for cx = plotX, plotX + plotW - 1 do text(cx, midCell, BOX.h, C.faint, C.panel) end
         text(innerX, nTop, padL("+" .. human(peak), labW - 1), C.good, C.panel)
-        text(innerX, nMid, padL("0", labW - 1), C.faint, C.panel)
+        text(innerX, midCell, padL("0", labW - 1), C.faint, C.panel)
         text(innerX, nBase, padL("-" .. human(peak), labW - 1), C.crit, C.panel)
+        local nCanvas = canvasNew(plotW, nH)
         for i = first, #hist do
             local v = hist[i].net or 0
             local frac = math.max(-1, math.min(1, v / peak))
-            local row = nMid - math.floor(frac * half + 0.5)
-            if row < nTop then row = nTop elseif row > nBase then row = nBase end
-            text(colX(i), row, DOT, v >= 0 and C.good or C.crit, C.panel)
+            local py = nMidPx - math.floor(frac * nMidPx + 0.5)
+            if py < 0 then py = 0 elseif py > nRows - 1 then py = nRows - 1 end
+            canvasSet(nCanvas, subX(i), py, v >= 0 and C.good or C.crit)
         end
+        canvasBlit(nCanvas, plotX, nTop)
     end
 
     -- X-axis: time span from oldest shown sample to now.

@@ -37,7 +37,6 @@ local function warnOnce(key, msg)
 end
 
 local interval = cfg.sleep or 5
-local uiRefresh = math.max(cfg.uiRefresh or 1, 0.1)
 
 local lscDev = select(1, lsc.discover())
 local gens = generators.build(cfg, log, computer.uptime())
@@ -222,61 +221,53 @@ local PAUSE_KEYS = { [keyboard.keys.space] = true, [keyboard.keys.p] = true }
 local tick = 0
 local lastToggle = -1
 
-local function refresh()
+-- Repaint from the cached snapshot -- no hardware reads (those happen only on the
+-- control cycle, since getSensorInformation() is expensive). A no-op when headless.
+local function draw()
     if not uiActive then return end
-    if lscDev then
-        lastState = lscDev:read()
-        if lastState.present then
-            lastLevel, lastSource, lastStored, lastMax = computeEnergy(lastState)
-        end
-    end
     tick = tick + 1
     local st = buildState()
     st.tick = tick
     ui.render(st)
 end
 
+-- Single cadence: read + decide + repaint once per control cycle, and repaint
+-- immediately on a key press. event.pull wakes on either the next cycle deadline
+-- or a keypress, so the UI stays responsive without a separate draw timer.
 local function loop()
-    local nextCycle = computer.uptime()
-    local nextRefresh = computer.uptime()
+    runCycle()
+    draw()
+    local nextCycle = computer.uptime() + interval
     while true do
-        local t = computer.uptime()
-        if t >= nextCycle then
-            runCycle()
-            nextCycle = computer.uptime() + interval
-            refresh()
-            nextRefresh = computer.uptime() + uiRefresh
-        elseif uiActive and t >= nextRefresh then
-            refresh()
-            nextRefresh = computer.uptime() + uiRefresh
-        end
-
-        local wake = uiActive and math.min(nextCycle, nextRefresh) or nextCycle
-        local timeout = wake - computer.uptime()
-        if timeout > 0 then
-            local _, _, _, code = event.pull(timeout, "key_down")
-            if code and computer.uptime() - lastToggle >= 0.3 then
-                if PAUSE_KEYS[code] then
-                    lastToggle = computer.uptime()
-                    paused = not paused
-                    if paused then
-                        log("PAUSED by user -- all generators off. Press SPACE to resume.")
-                        haltGenerators()
-                    else
-                        log("RESUMED by user.")
-                        nextCycle = computer.uptime() -- re-decide immediately
-                    end
-                    refresh()
-                elseif code == keyboard.keys.g then
-                    lastToggle = computer.uptime()
-                    showGraph = not showGraph
-                    refresh()
-                elseif code == keyboard.keys.l then
-                    lastToggle = computer.uptime()
-                    showLog = not showLog
-                    refresh()
+        local timeout = nextCycle - computer.uptime()
+        if timeout < 0 then timeout = 0 end
+        local _, _, _, code = event.pull(timeout, "key_down")
+        if code and computer.uptime() - lastToggle >= 0.3 then
+            if PAUSE_KEYS[code] then
+                lastToggle = computer.uptime()
+                paused = not paused
+                if paused then
+                    log("PAUSED by user -- all generators off. Press SPACE to resume.")
+                    haltGenerators()
+                else
+                    log("RESUMED by user.")
+                    nextCycle = computer.uptime() -- re-decide immediately
                 end
+                draw()
+            elseif code == keyboard.keys.g then
+                lastToggle = computer.uptime()
+                showGraph = not showGraph
+                draw()
+            elseif code == keyboard.keys.l then
+                lastToggle = computer.uptime()
+                showLog = not showLog
+                draw()
             end
+        end
+        if computer.uptime() >= nextCycle then
+            runCycle()
+            draw()
+            nextCycle = computer.uptime() + interval
         end
     end
 end

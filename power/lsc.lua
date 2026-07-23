@@ -4,10 +4,11 @@
 -- text layout lives here.
 --
 -- Large EU values are kept as bignum DIGIT STRINGS, never int64 (see bignum.lua
--- for why). They are sourced by preference:
---   storedEU   <- getStoredEUString()  (fallback: "EU Stored:" sensor line)
---   capacityEU <- getEUCapacityString()(fallback: "Total Capacity:" sensor line)
---   fillPct    <- "Used Capacity:" sensor line (robust to the capacity clamp)
+-- for why). Everything comes from a SINGLE getSensorInformation() call so the
+-- read stays cheap; the *String getters are only a fallback if a line is missing:
+--   storedEU   <- "EU Stored:" sensor line   (fallback: getStoredEUString())
+--   capacityEU <- "Total Capacity:" sensor line (fallback: getEUCapacityString())
+--   fill       <- "Used Capacity:" sensor line (robust to the capacity clamp)
 --   wirelessEU <- "Total wireless EU:" sensor line (ONLY source -- no getter)
 -- Small live rates (EU IN/OUT per tick, averages, passive loss) stay numbers.
 
@@ -77,20 +78,22 @@ function LSC:read()
     end
     s.sensor = lines
 
-    -- Stored EU: dedicated string getter first, sensor line as fallback.
-    local storedStr = call(proxy, "getStoredEUString")
-    if storedStr ~= nil then
-        s.storedEU = bignum.norm(storedStr)
+    -- Stored EU / capacity: parse from the sensor lines already fetched above;
+    -- only fall back to the (extra) string getters if a line is missing. This
+    -- keeps the whole read to a single getSensorInformation() call.
+    local storedLine = sensorValue(lines, "EU Stored:")
+    if storedLine then
+        s.storedEU = util.parseGrouped(storedLine)
     else
-        s.storedEU = util.parseGrouped(sensorValue(lines, "EU Stored:") or "0")
+        local g = call(proxy, "getStoredEUString")
+        s.storedEU = g and bignum.norm(g) or "0"
     end
-
-    -- Capacity: dedicated string getter first, sensor line as fallback.
-    local capStr = call(proxy, "getEUCapacityString")
-    if capStr ~= nil then
-        s.capacityEU = bignum.norm(capStr)
+    local capLine = sensorValue(lines, "Total Capacity:")
+    if capLine then
+        s.capacityEU = util.parseGrouped(capLine)
     else
-        s.capacityEU = util.parseGrouped(sensorValue(lines, "Total Capacity:") or "0")
+        local g = call(proxy, "getEUCapacityString")
+        s.capacityEU = g and bignum.norm(g) or "0"
     end
 
     -- Fill fraction: prefer the game's own "Used Capacity %" (sidesteps the
@@ -121,9 +124,7 @@ function LSC:read()
     s.passiveLoss = util.parseDecimal(sensorValue(lines, "Passive Loss:") or "") or 0
     s.net = s.euIn - s.euOut - s.passiveLoss
 
-    s.active = call(proxy, "isMachineActive") == true
     s.maintenance = sensorValue(lines, "Maintenance Status:")
-    s.timeToFullText = sensorValue(lines, "Time to Full:")
 
     -- Wireless threshold from the high-tier capacitor counts (lines like
     -- "UHV Capacitors detected: 1", colour-stripped above). The threshold can
@@ -134,7 +135,7 @@ function LSC:read()
         local n = 0
         for _, line in ipairs(lines) do
             local m = line:match("^" .. tier .. "%s+[Cc]apacitors?%s+detected:%s*(%d+)")
-            if m then n = tonumber(m); break end
+            if m then n = math.floor(tonumber(m) or 0); break end
         end
         caps[tier] = n
         if n > 0 then threshold = bignum.add(threshold, bignum.mulSmall(CAP_EU[tier], n)) end

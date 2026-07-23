@@ -65,13 +65,11 @@ cfg.max = nil
 -- ===========================================================================
 -- TIMING & SAFETY
 -- ===========================================================================
--- Seconds between control cycles (how often generators are re-evaluated).
+-- Seconds between control cycles. The LSC is read (one getSensorInformation()
+-- call) and the dashboard repainted once per cycle, so this also sets how often
+-- the display updates. Reading the sensor is expensive, so keep this at a few
+-- seconds; the values shown (5-min flow averages, level) change slowly anyway.
 cfg.sleep = 5
-
--- Dashboard repaint rate in seconds, decoupled from the control cycle: the
--- screen (bars, clock, live EU flow) refreshes this often while switching
--- decisions are only made every cfg.sleep. Floored internally so it can't busy-loop.
-cfg.uiRefresh = 1
 
 -- Safety: when true, the controller only LOGS the switches it WOULD make and
 -- never touches redstone. Flip to false once you have verified the plan in-game.

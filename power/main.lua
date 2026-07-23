@@ -37,6 +37,7 @@ local function warnOnce(key, msg)
 end
 
 local interval = cfg.sleep or 5
+local uiRefresh = math.max(cfg.uiRefresh or 1, 0.1)
 
 local lscDev = select(1, lsc.discover())
 local gens = generators.build(cfg, log, computer.uptime())
@@ -221,67 +222,66 @@ local PAUSE_KEYS = { [keyboard.keys.space] = true, [keyboard.keys.p] = true }
 local tick = 0
 local lastToggle = -1
 
--- Repaint from the cached snapshot -- no hardware reads (those happen only on the
--- control cycle, since getSensorInformation() is expensive). A no-op when headless.
-local function draw()
+-- Repaint the dashboard, re-reading the LSC so values stay live between control
+-- cycles. The read is now a single getSensorInformation() call. A no-op headless.
+local function refresh()
     if not uiActive then return end
+    if lscDev then
+        lastState = lscDev:read()
+        if lastState.present then
+            lastLevel, lastSource, lastStored, lastMax = computeEnergy(lastState)
+        end
+    end
     tick = tick + 1
     local st = buildState()
     st.tick = tick
     ui.render(st)
 end
 
--- Read + decide + repaint, timed. If any phase blocks for more than a second
--- (the freezes we're chasing), log which one so we can find the culprit.
-local function cycle()
-    local t0 = computer.uptime()
-    runCycle()
-    local t1 = computer.uptime()
-    draw()
-    local t2 = computer.uptime()
-    if t2 - t0 > 1 then
-        log(string.format("SLOW cycle: read %.1fs, draw %.1fs", t1 - t0, t2 - t1))
-    end
-end
-
--- Single cadence: cycle once per control interval, and repaint immediately on a
--- key press. event.pull wakes on either the next cycle deadline or a keypress,
--- so the UI stays responsive without a separate draw timer.
+-- Dual cadence: re-decide + drive hardware every cfg.sleep (control cycle), while
+-- the dashboard repaints every cfg.uiRefresh so it stays live. A single
+-- event.pull sleeps until the sooner deadline and also handles hotkeys.
 local function loop()
-    cycle()
-    local nextCycle = computer.uptime() + interval
+    local nextCycle = computer.uptime()
+    local nextRefresh = computer.uptime()
     while true do
-        local timeout = nextCycle - computer.uptime()
-        if timeout < 0 then timeout = 0 end
-        local w0 = computer.uptime()
-        local _, _, _, code = event.pull(timeout, "key_down")
-        local over = (computer.uptime() - w0) - timeout
-        if over > 1 then log(string.format("SLOW wait: event.pull overran by %.1fs", over)) end
-        if code and computer.uptime() - lastToggle >= 0.3 then
-            if PAUSE_KEYS[code] then
-                lastToggle = computer.uptime()
-                paused = not paused
-                if paused then
-                    log("PAUSED by user -- all generators off. Press SPACE to resume.")
-                    haltGenerators()
-                else
-                    log("RESUMED by user.")
-                    nextCycle = computer.uptime() -- re-decide immediately
-                end
-                draw()
-            elseif code == keyboard.keys.g then
-                lastToggle = computer.uptime()
-                showGraph = not showGraph
-                draw()
-            elseif code == keyboard.keys.l then
-                lastToggle = computer.uptime()
-                showLog = not showLog
-                draw()
-            end
-        end
-        if computer.uptime() >= nextCycle then
-            cycle()
+        local t = computer.uptime()
+        if t >= nextCycle then
+            runCycle()
             nextCycle = computer.uptime() + interval
+            refresh()
+            nextRefresh = computer.uptime() + uiRefresh
+        elseif uiActive and t >= nextRefresh then
+            refresh()
+            nextRefresh = computer.uptime() + uiRefresh
+        end
+
+        local wake = uiActive and math.min(nextCycle, nextRefresh) or nextCycle
+        local timeout = wake - computer.uptime()
+        if timeout > 0 then
+            local _, _, _, code = event.pull(timeout, "key_down")
+            if code and computer.uptime() - lastToggle >= 0.3 then
+                if PAUSE_KEYS[code] then
+                    lastToggle = computer.uptime()
+                    paused = not paused
+                    if paused then
+                        log("PAUSED by user -- all generators off. Press SPACE to resume.")
+                        haltGenerators()
+                    else
+                        log("RESUMED by user.")
+                        nextCycle = computer.uptime() -- re-decide immediately
+                    end
+                    refresh()
+                elseif code == keyboard.keys.g then
+                    lastToggle = computer.uptime()
+                    showGraph = not showGraph
+                    refresh()
+                elseif code == keyboard.keys.l then
+                    lastToggle = computer.uptime()
+                    showLog = not showLog
+                    refresh()
+                end
+            end
         end
     end
 end

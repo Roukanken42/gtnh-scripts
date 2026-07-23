@@ -115,10 +115,9 @@ time-to-full/empty, generators online + total EU/t), one energy fill bar (LSC, o
 LSC + wireless pool when wireless is on), and a generators table (output /
 priority / on–off band / status / time-in-state). Huge EU values render via a
 length-based SI formatter so they stay readable past 2^64. It runs headless with plain text logging if there is no
-screen or `cfg.ui = false`. The LSC is read (one `getSensorInformation()` call)
-and the screen repainted once per control cycle — plus immediately on a key press
-— so the expensive sensor read isn't repeated between cycles; frames are
-double-buffered so they don't flicker.
+screen or `cfg.ui = false`. The dashboard repaints (and re-reads the LSC via a
+single `getSensorInformation()` call) every `cfg.uiRefresh`, decoupled from the
+control cycle; frames are double-buffered so they don't flicker.
 
 Press **G** to swap the generators table for a **history** view: two stacked
 charts sharing the time axis — the **energy level %** as an area (its height is

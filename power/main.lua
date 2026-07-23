@@ -231,17 +231,32 @@ local function draw()
     ui.render(st)
 end
 
--- Single cadence: read + decide + repaint once per control cycle, and repaint
--- immediately on a key press. event.pull wakes on either the next cycle deadline
--- or a keypress, so the UI stays responsive without a separate draw timer.
-local function loop()
+-- Read + decide + repaint, timed. If any phase blocks for more than a second
+-- (the freezes we're chasing), log which one so we can find the culprit.
+local function cycle()
+    local t0 = computer.uptime()
     runCycle()
+    local t1 = computer.uptime()
     draw()
+    local t2 = computer.uptime()
+    if t2 - t0 > 1 then
+        log(string.format("SLOW cycle: read %.1fs, draw %.1fs", t1 - t0, t2 - t1))
+    end
+end
+
+-- Single cadence: cycle once per control interval, and repaint immediately on a
+-- key press. event.pull wakes on either the next cycle deadline or a keypress,
+-- so the UI stays responsive without a separate draw timer.
+local function loop()
+    cycle()
     local nextCycle = computer.uptime() + interval
     while true do
         local timeout = nextCycle - computer.uptime()
         if timeout < 0 then timeout = 0 end
+        local w0 = computer.uptime()
         local _, _, _, code = event.pull(timeout, "key_down")
+        local over = (computer.uptime() - w0) - timeout
+        if over > 1 then log(string.format("SLOW wait: event.pull overran by %.1fs", over)) end
         if code and computer.uptime() - lastToggle >= 0.3 then
             if PAUSE_KEYS[code] then
                 lastToggle = computer.uptime()
@@ -265,8 +280,7 @@ local function loop()
             end
         end
         if computer.uptime() >= nextCycle then
-            runCycle()
-            draw()
+            cycle()
             nextCycle = computer.uptime() + interval
         end
     end

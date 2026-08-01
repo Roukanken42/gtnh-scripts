@@ -105,33 +105,44 @@ local function sideSig(tp, side)
     return table.concat(parts, ",")
 end
 
--- True if a me_interface currently has anything configured to stock (any slot).
--- Slots are probed from 0 to cover both 0- and 1-based indexing, and empty slots
--- are ignored properly -- a blank slot can come back as a table with an
--- empty-string name/label (which Lua counts as truthy), so we require a positive
--- size or a genuinely non-empty name/label.
-local function interfaceHasConfig(compAddr)
-    local ok, p = pcall(component.proxy, compAddr)
-    if not ok or not p or p.getInterfaceConfiguration == nil then return false end
-    for slot = 0, 8 do
-        local ok2, cfg = pcall(p.getInterfaceConfiguration, slot)
-        if ok2 and type(cfg) == "table" then
-            local sized = type(cfg.size) == "number" and cfg.size > 0
-            local named = type(cfg.name) == "string" and cfg.name ~= ""
-            local labeled = type(cfg.label) == "string" and cfg.label ~= ""
-            if sized or named or labeled then return true end
+-- Deterministic, order-independent signature of a table's scalar fields. Used so
+-- we don't have to know the exact shape getInterfaceConfiguration returns.
+local function tableSig(t)
+    if type(t) ~= "table" then return "" end
+    local kv = {}
+    for k, v in pairs(t) do
+        local tv = type(v)
+        if tv == "string" or tv == "number" or tv == "boolean" then
+            kv[#kv + 1] = tostring(k) .. "=" .. tostring(v)
         end
     end
-    return false
+    table.sort(kv)
+    return table.concat(kv, ",")
 end
 
--- Clears every stock config slot on a me_interface (slots 0..8 to cover both
--- indexings). Used to tidy up the marker item after identification.
+-- Signature of a me_interface's full stock configuration (slots 1..9, 1-based).
+-- We only compare this before/after the user drops a marker into one slot: the
+-- interface whose signature CHANGES is the one they configured. Diffing sidesteps
+-- guessing which fields a configured slot exposes -- any slot going from empty to
+-- set flips the signature.
+local function interfaceConfigSig(compAddr)
+    local ok, p = pcall(component.proxy, compAddr)
+    if not ok or not p or p.getInterfaceConfiguration == nil then return "" end
+    local parts = {}
+    for slot = 1, 9 do
+        local ok2, cfg = pcall(p.getInterfaceConfiguration, slot)
+        parts[#parts + 1] = (ok2 and tableSig(cfg)) or ""
+    end
+    return table.concat(parts, "|")
+end
+
+-- Clears every stock config slot on a me_interface (slots 1..9). Used to tidy up
+-- the marker item after identification.
 local function clearInterfaceConfig(compAddr)
     if not compAddr then return end
     local ok, p = pcall(component.proxy, compAddr)
     if not ok or not p or p.setInterfaceConfiguration == nil then return end
-    for slot = 0, 8 do pcall(p.setInterfaceConfiguration, slot) end
+    for slot = 1, 9 do pcall(p.setInterfaceConfiguration, slot) end
 end
 
 -- Classify all six sides of a transposer by inventory name.
@@ -241,16 +252,16 @@ local function resolveInterface(tp, info, interfaceComps)
     local sideBefore = {}
     for _, s in ipairs(sideCands) do sideBefore[s] = sideSig(tp, s) end
     local compBefore = {}
-    for _, c in ipairs(interfaceComps) do compBefore[c] = interfaceHasConfig(c) end
+    for _, c in ipairs(interfaceComps) do compBefore[c] = interfaceConfigSig(c) end
 
     -- Poll until the marker reveals the component (and/or the side), or we time
-    -- out. The interface the user just configured is the newly-stocked one.
+    -- out. The interface whose stock config changes is the one the user set.
     local needComp = (#interfaceComps > 0)
     local deadline = computer.uptime() + IDENTIFY_TIMEOUT
     while true do
         if not comp then
             for _, c in ipairs(interfaceComps) do
-                if not compBefore[c] and interfaceHasConfig(c) then comp = c; break end
+                if interfaceConfigSig(c) ~= compBefore[c] then comp = c; break end
             end
         end
         if not side then
@@ -413,8 +424,8 @@ do
             local n = (nextSlot[st.interface] or 0) + 1
             nextSlot[st.interface] = n
             st.interfaceSlot = n
-            if n > 8 then
-                print(string.format("WARNING: %d stations share interface %s.. (only 8 slots)"
+            if n > 9 then
+                print(string.format("WARNING: %d stations share interface %s.. (only 9 slots)"
                     .. " -- concurrent loads may collide.", n, st.interface:sub(1, 8)))
             end
         else

@@ -3,6 +3,7 @@
 
 inspect/main.lua
 install.lua
+mining/miners.lua
 power/bignum.lua
 ? power/config.lua
 power/generators.lua

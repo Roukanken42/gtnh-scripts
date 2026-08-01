@@ -5,12 +5,14 @@
 -- a mining module is driven lives here. That keeps the TecTech parameter layout
 -- in one spot and leaves room for a future remote-transport layer.
 --
--- This is PART 1: auto-discovery + per-tier stats + the generic machine
--- controls. The mining-specific parameter layout (what a thread mines, how
--- parallels are set, etc.) is deliberately NOT here yet -- it differs from
--- pumping and will be reverse-engineered and wired up in a following part.
+-- So far: auto-discovery + per-tier stats + the generic machine controls, plus
+-- the first real operation -- setDrone (loads the drone the module mines with,
+-- via transport.lua). The mining-specific TecTech parameter layout (what a
+-- thread mines, how parallels are set) is still to come in a following part.
 
 local component = require("component")
+local transport = require("transport")
+local drones = require("drones")
 
 -- =====================================================================
 -- Mining module identity + per-tier stats.
@@ -79,7 +81,81 @@ function Miner:isActive()
     return false
 end
 
+-- Drone loading ------------------------------------------------------------
+
+-- Attaches the item-transport station (transposer + ME interface + input bus)
+-- this module uses to receive drones. Built from config.stations and passed in
+-- by the controller; without it setDrone has no way to move items.
+--   station: a transport.Station handle (see transport.new)
+function Miner:setStation(station)
+    self.station = station
+end
+
+-- Loads the tier-`tier` mining drone (1..13) into this module's input bus,
+-- returning any wrong/old drone to the ME network first. Needs a station (see
+-- Miner:setStation). `count` defaults to 1. Returns true, or false + error.
+function Miner:setDrone(tier, count)
+    if not self.station then
+        return false, "no transposer station configured for miner " .. self.address
+    end
+    local drone = drones.get(tier)
+    if not drone then
+        return false, "invalid drone tier " .. tostring(tier) .. " (expected 1..13)"
+    end
+    return self.station:setDrone(drone, count)
+end
+
 local miners = {}
+
+-- Builds a transport.Station for a miner from its config entry and attaches it.
+-- `spec` is a config.stations[...] table (transposer/interface/sides); `shared`
+-- carries the cross-station defaults (database address, dryRun, timeouts, log).
+-- Returns true, or false + error (the miner is left station-less on failure).
+function miners.attachStation(miner, spec, shared)
+    shared = shared or {}
+    local station, err = transport.new({
+        label = spec.label or miner.tierName .. " " .. miner.address:sub(1, 8),
+        transposer = spec.transposer,
+        interface = spec.interface,
+        database = spec.database or shared.database,
+        interfaceSide = spec.interfaceSide,
+        inputBusSide = spec.inputBusSide,
+        interfaceSlot = spec.interfaceSlot or shared.interfaceSlot,
+        stockTimeout = spec.stockTimeout or shared.stockTimeout,
+        dryRun = shared.dryRun,
+        log = shared.log,
+    })
+    if not station then return false, err end
+    miner:setStation(station)
+    return true
+end
+
+-- Loads drones into many miners AT ONCE (concurrently), which is much faster
+-- than one-by-one because every module's ME interface stocks in parallel.
+-- `requests` is a list of { miner = <Miner>, tier = <1..13>, count = <n>|nil }.
+-- Returns a list of { miner, ok, err, note, drone } in the same order. Miners
+-- with no station or an invalid tier are reported as errors (not attempted).
+function miners.setDrones(requests, pollInterval)
+    local results, transportReqs, indexOf = {}, {}, {}
+    for i, r in ipairs(requests) do
+        local drone = drones.get(r.tier)
+        if not r.miner.station then
+            results[i] = { miner = r.miner, ok = false, err = "no station configured for " .. r.miner.address }
+        elseif not drone then
+            results[i] = { miner = r.miner, ok = false, err = "invalid drone tier " .. tostring(r.tier) }
+        else
+            transportReqs[#transportReqs + 1] = { station = r.miner.station, drone = drone, count = r.count }
+            indexOf[#transportReqs] = i
+        end
+    end
+
+    local tRes = transport.loadDrones(transportReqs, pollInterval)
+    for j, res in ipairs(tRes) do
+        local i = indexOf[j]
+        results[i] = { miner = requests[i].miner, ok = res.ok, err = res.err, note = res.note, drone = res.drone }
+    end
+    return results
+end
 
 -- Autodiscovers mining multiblocks on the network. Every gt_machine whose
 -- getName() is "projectmoduleminertN" (N = a known tier) becomes a Miner

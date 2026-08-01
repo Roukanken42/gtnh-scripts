@@ -3,7 +3,12 @@
 
 inspect/main.lua
 install.lua
+? mining/config.lua
+mining/drone.lua
+mining/drones.lua
 mining/miners.lua
+mining/setup.lua
+mining/transport.lua
 power/bignum.lua
 ? power/config.lua
 power/generators.lua

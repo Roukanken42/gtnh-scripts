@@ -5,10 +5,10 @@
 -- a mining module is driven lives here. That keeps the TecTech parameter layout
 -- in one spot and leaves room for a future remote-transport layer.
 --
--- So far: auto-discovery + per-tier stats + the generic machine controls, plus
--- the first real operation -- setDrone (loads the drone the module mines with,
--- via transport.lua). The mining-specific TecTech parameter layout (what a
--- thread mines, how parallels are set) is still to come in a following part.
+-- So far: auto-discovery + per-tier stats, the generic machine controls,
+-- setDrone (loads the drone the module mines with, via transport.lua), and the
+-- TecTech parameter controls (distance / overdrive / max parallels / mode).
+-- Unlike the pumps, mining modules have no threads -- just parallels.
 
 local component = require("component")
 local transport = require("transport")
@@ -38,6 +38,34 @@ local TIERS = {
     [2] = { name = "T2", parallels = 4, voltName = "UHV", voltage = 2097152 },
     [3] = { name = "T3", parallels = 8, voltName = "UEV", voltage = 8388608 },
 }
+
+-- TecTech parameters, addressed by (hatch, id). Same access as the pumps:
+-- setParameters(hatch, id, value) writes an input parameter, getParameters(hatch,
+-- id) reads it back. The OC API only exposes the INPUT parameters (hatch 0..9,
+-- id 0..1), so we can only read what we set -- the module's OUTPUT parameters
+-- (e.g. the applied distance, which lags) are NOT reachable. Mining modules have
+-- no threads (unlike the pumps), just parallels, so these are plain machine-wide
+-- settings.
+local PARAM = {
+    DISTANCE      = { hatch = 0, id = 0 },  -- target distance            (0:0:I)
+    MAX_PARALLELS = { hatch = 0, id = 1 },  -- max parallels              (0:1:I)
+    OVERDRIVE     = { hatch = 1, id = 0 },  -- overdrive 0..2             (1:0:I)
+    MODE          = { hatch = 2, id = 0 },  -- distance mode; 0 = static  (2:0:I)
+}
+
+local function writeParam(proxy, slot, value)
+    local setter = proxy[PARAM_SET]
+    if setter == nil then return false, PARAM_SET .. " not available" end
+    return pcall(setter, slot.hatch, slot.id, value)
+end
+
+local function readParam(proxy, slot)
+    local getter = proxy[PARAM_GET]
+    if getter == nil then return nil end
+    local ok, v = pcall(getter, slot.hatch, slot.id)
+    if not ok then return nil end
+    return v
+end
 -- =====================================================================
 
 local Miner = {}
@@ -55,10 +83,6 @@ function Miner.new(address, tier, proxy)
     self.parallels = stats.parallels
     self.voltName = stats.voltName
     self.voltage = stats.voltage
-
-    -- Per-thread hardware config last applied by us (thread index -> table).
-    -- The layout that fills this is TBD (see the module header).
-    self.threadConfig = {}
     return self
 end
 
@@ -79,6 +103,44 @@ function Miner:isActive()
         return ok and v == true
     end
     return false
+end
+
+-- TecTech parameters -------------------------------------------------------
+
+-- Sets the target mining distance. The module's applied distance lags this and
+-- isn't readable via OC, so we only ever know what we requested. Returns true,
+-- or false + error.
+function Miner:setDistance(distance)
+    return writeParam(self.proxy, PARAM.DISTANCE, distance)
+end
+
+-- Reads back the target distance we set (its input parameter) -- not necessarily
+-- the live applied value, which the OC API doesn't expose. nil if unreadable.
+function Miner:getDistance()
+    return readParam(self.proxy, PARAM.DISTANCE)
+end
+
+-- Caps how many parallels the module may run (its ceiling is the tier's
+-- parallels: T1=2, T2=4, T3=8). Returns true, or false + error.
+function Miner:setMaxParallels(n)
+    return writeParam(self.proxy, PARAM.MAX_PARALLELS, n)
+end
+
+-- Sets the overdrive parameter (0..2; higher = faster but less size bonus, see
+-- meteors.lua). Returns true, or false + error.
+function Miner:setOverdrive(overdrive)
+    return writeParam(self.proxy, PARAM.OVERDRIVE, overdrive)
+end
+
+-- Sets the distance mode. 0 = static (OC drives the distance); non-zero lets the
+-- module auto-switch distance, which we do NOT want. Returns true, or false+err.
+function Miner:setMode(mode)
+    return writeParam(self.proxy, PARAM.MODE, mode)
+end
+
+-- Convenience: keep the module in static distance mode (0) so OC owns distance.
+function Miner:setStatic()
+    return self:setMode(0)
 end
 
 -- Drone loading ------------------------------------------------------------

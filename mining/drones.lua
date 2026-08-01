@@ -35,6 +35,10 @@ drones.PREFIX = "Mining Drone MK-"
 drones.MIN_TIER = 1
 drones.MAX_TIER = #ROMAN   -- 13
 
+-- The item id every mining drone shares (only the label differs per tier), used
+-- to find drones in the ME network.
+drones.ITEM_NAME = "gtnhintergalactic:item.MiningDrone"
+
 -- Build the per-tier descriptors once: { tier, roman, name, material }.
 -- `name` is the exact item label used to pull the drone from ME.
 local byTier = {}

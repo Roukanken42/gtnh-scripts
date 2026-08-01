@@ -353,6 +353,42 @@ function meteors.estimate(m, droneTier, plasma, overdrive)
     }
 end
 
+-- ---- meteor availability -------------------------------------------------
+-- Which meteors a module can find depends on the DISTANCE it is set to (a TecTech
+-- parameter -- write 0:0:I, read back 0:1:O since it lags), the DRONE tier, and
+-- the MODULE tier. A meteor is in the pool when the distance falls in its range,
+-- the module is at least its required tier, and the drone tier is within its
+-- range (higher drones just add the size bonus, they don't gate availability).
+-- Within the pool, each meteor appears with weight / (sum of pool weights).
+--
+-- Note: conditional meteors are included -- they only register when their mod is
+-- loaded, which (mysteriousCrystal->HEE, draconicCoreRuin->DE) is true in 2.8.4.
+
+-- True if meteor `m` can be found at `distance` with the given drone/module tier.
+function meteors.canFind(m, distance, droneTier, moduleTier)
+    return distance >= m.distance[1] and distance <= m.distance[2]
+        and moduleTier >= m.module
+        and droneTier >= m.drones[1] and droneTier <= m.drones[2]
+end
+
+-- The meteors findable at `distance` with `droneTier` / `moduleTier`, each with
+-- its appearance chance (weight / total pool weight). Returns a list of
+-- { meteor, weight, chance } sorted by chance (desc), and the total pool weight.
+function meteors.available(distance, droneTier, moduleTier)
+    local pool, total = {}, 0
+    for _, m in ipairs(meteors.list) do
+        if meteors.canFind(m, distance, droneTier, moduleTier) then
+            total = total + m.weight
+            pool[#pool + 1] = { meteor = m, weight = m.weight }
+        end
+    end
+    for _, h in ipairs(pool) do
+        h.chance = total > 0 and h.weight / total or 0
+    end
+    table.sort(pool, function(a, b) return a.weight > b.weight end)
+    return pool, total
+end
+
 -- Lookup by asteroid name.
 meteors.byName = {}
 for _, m in ipairs(meteors.list) do meteors.byName[m.name] = m end

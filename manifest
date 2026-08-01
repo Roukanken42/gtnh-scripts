@@ -9,6 +9,7 @@ mining/drones.lua
 mining/localnet.lua
 mining/meteors.lua
 mining/miners.lua
+mining/plasmas.lua
 mining/setup.lua
 mining/transport.lua
 power/bignum.lua

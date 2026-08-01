@@ -270,13 +270,15 @@ end
 
 -- ---- yield estimation ----------------------------------------------------
 -- On top of the drone-tier scaling, actual yield depends on the selected PLASMA
--- (a base time discount and a size multiplier) and the machine's OVERDRIVE
--- parameter (0..2). Overdrive trades size for speed:
---   real time  = baseTime * (1 - timeDiscount) / overdrive     (discount <= 50%)
---   size bonus = sizeMultiplier * (2 - overdrive)              (bonus <= 75%)
+-- (a base time discount and a size multiplier -- see plasmas.lua) and the
+-- machine's OVERDRIVE parameter (0..2). Overdrive trades size for speed:
+--   real time  = baseTime * max((1 - timeDiscount) / overdrive, 0.5)  (>= 50% base)
+--   size bonus = min(sizeMultiplier * (2 - overdrive), 0.75)
 -- The size bonus is the chance of extra stacks above the minimum, so the average
 -- run yields  size.min + sizeBonus * (size.max - size.min)  stacks, split among
--- the ores by their chance weights.
+-- the ores by their chance weights. Pass a plasmas.lua entry as `plasma`. Both
+-- caps are enforced by the formulas, so overdrive is used as-is (not clamped);
+-- plasmas.lua's minOD/maxOD just mark where each cap is reached.
 
 -- Items in one output stack (the recipes emit getOre(64)); special item-only
 -- meteors differ, so treat `items` for those as informative only.
@@ -287,13 +289,13 @@ local function clamp(x, lo, hi)
     return x
 end
 
--- Real mining time (ticks). `timeDiscount` is the plasma's base discount (capped
--- at 0.5); `overdrive` is the machine parameter (0..2, higher = faster). An
--- overdrive of 0 can't run (returns math.huge).
+-- Real mining time (ticks) = baseTime * max((1 - timeDiscount) / overdrive, 0.5).
+-- The total time reduction is capped at 50% of base (the in-game floor).
+-- `overdrive` is the machine parameter (0..2, higher = faster); 0 can't run.
 function meteors.mineTime(baseTime, timeDiscount, overdrive)
     overdrive = overdrive or 1
     if overdrive <= 0 then return math.huge end
-    return baseTime * (1 - clamp(timeDiscount or 0, 0, 0.5)) / overdrive
+    return baseTime * math.max((1 - (timeDiscount or 0)) / overdrive, 0.5)
 end
 
 -- Size bonus (0..0.75): plasma sizeMultiplier * (2 - overdrive), capped at 0.75.
@@ -310,13 +312,16 @@ end
 -- plasma and overdrive.
 --   plasma = { timeDiscount = 0..0.5, sizeMultiplier = <number> }
 -- Returns nil if the drone tier can't mine `m`, otherwise:
---   { time,       -- real mine time, ticks
---     eut,        -- EU/t (drone-tier scaled)
---     size,       -- { min, max } scaled size range, in stacks
---     sizeBonus,  -- 0..0.75
---     stacks,     -- average total stacks produced
---     yield = {   -- average per output over one run
+--   { time,           -- real mine time, ticks
+--     eut,            -- EU/t (drone-tier scaled) -- per meteor; x parallels in-game
+--     size,           -- { min, max } scaled size range, in stacks
+--     sizeBonus,      -- 0..0.75
+--     stacks,         -- average total stacks produced (per meteor)
+--     plasmaConsumed, -- L (mB) of plasma per meteor (from plasma.consumed), or nil
+--     yield = {       -- average per output over one run
 --       { oredict, mat, item, chance, fraction, stacks, items }, ... } }
+-- Values are per meteor mined; the module runs up to its parallels meteors per
+-- operation, so multiply eut/plasmaConsumed/stacks by parallels for throughput.
 function meteors.estimate(m, droneTier, plasma, overdrive)
     local s = meteors.scale(m, droneTier)
     if not s then return nil end
@@ -343,6 +348,7 @@ function meteors.estimate(m, droneTier, plasma, overdrive)
         size = s.size,
         sizeBonus = sizeBonus,
         stacks = total,
+        plasmaConsumed = plasma.consumed,
         yield = yield,
     }
 end

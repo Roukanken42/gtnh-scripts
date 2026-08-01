@@ -12,8 +12,11 @@
 --       interface  -> "tile.appliedenergistics2.BlockInterface" / "tile.fluid_interface"
 --   * give stations that SHARE an ME interface distinct staging slots, so their
 --     drone loads can run concurrently without colliding
--- When two sides look alike it asks you to drop a marker item into the intended
--- inventory and watches which side changes.
+-- When it can't tell sides apart it asks you to poke the intended inventory and
+-- watches which side's contents change (any change -- nothing is running). For
+-- the ME interface, setting it to stock a marker item both reveals its side on
+-- the transposer AND identifies which me_interface component it is (that being
+-- the only one left with a stock config), so it never has to ask.
 --
 -- Run from this folder:  setup
 
@@ -65,21 +68,45 @@ end
 
 -- ---- transposer inspection -----------------------------------------------
 
--- Total item count on a transposer side (0 for empty / non-inventory).
-local function sideItemCount(tp, side)
+-- Reads a transposer side's stacks as a plain array (getAllStacks may return a
+-- StackSlot with getAll(), or the array directly).
+local function readSideStacks(tp, side)
     local ok, res = pcall(tp.getAllStacks, side)
-    if not ok or not res then return 0 end
-    local arr = res
+    if not ok or not res then return {} end
     if type(res) == "table" and res.getAll ~= nil then
         local okAll, a = pcall(res.getAll)
-        arr = okAll and a or {}
+        return (okAll and a) or {}
     end
-    local total = 0
+    return res
+end
+
+-- A slot-order-independent signature of a side's contents. Used only to tell
+-- whether ANYTHING changed after the user pokes an inventory -- nothing is
+-- running during setup, so any change (in any slot) is the user.
+local function sideSig(tp, side)
+    local parts = {}
+    local arr = readSideStacks(tp, side)
     for i = 1, #arr do
         local s = arr[i]
-        if s and s.size then total = total + s.size end
+        if s and (s.size or 0) > 0 and (s.name or s.label) then
+            parts[#parts + 1] = (s.name or s.label) .. "x" .. tostring(s.size)
+        end
     end
-    return total
+    table.sort(parts)
+    return table.concat(parts, ",")
+end
+
+-- True if a me_interface currently has anything configured to stock (any slot).
+local function interfaceHasConfig(compAddr)
+    local ok, p = pcall(component.proxy, compAddr)
+    if not ok or not p or p.getInterfaceConfiguration == nil then return false end
+    for slot = 1, 8 do
+        local ok2, cfg = pcall(p.getInterfaceConfiguration, slot)
+        if ok2 and type(cfg) == "table" and (cfg.name or cfg.label or (cfg.size and cfg.size > 0)) then
+            return true
+        end
+    end
+    return false
 end
 
 -- Classify all six sides of a transposer by inventory name.
@@ -97,21 +124,20 @@ local function scanSides(tp)
     return info
 end
 
--- Ask the user to drop an item into the intended inventory and detect which of
--- the candidate sides changed. Falls back to a manual pick.
+-- Ask the user to poke the intended inventory and detect which candidate side's
+-- contents changed (any change, any slot). Falls back to a manual pick.
 local function identifyByInsertion(tp, candidates, thing)
     print("  several sides could be the " .. thing .. ":")
     for _, s in ipairs(candidates) do
         print(string.format("     side %d (%s)", s, SIDE_LABEL[s] or "?"))
     end
-    print("  put ANY item into the " .. thing .. " to identify it.")
+    print("  put (or move) ANY item in the " .. thing .. " to identify it.")
     local before = {}
-    for _, s in ipairs(candidates) do before[s] = sideItemCount(tp, s) end
-    ask("  press Enter once the item is in place... ")
+    for _, s in ipairs(candidates) do before[s] = sideSig(tp, s) end
+    ask("  press Enter once you have done that... ")
     for _, s in ipairs(candidates) do
-        if sideItemCount(tp, s) > before[s] then
+        if sideSig(tp, s) ~= before[s] then
             print(string.format("  -> %s is side %d (%s)", thing, s, SIDE_LABEL[s] or "?"))
-            ask("  remove the marker item, then press Enter... ")
             return s
         end
     end
@@ -152,16 +178,77 @@ local function pickDatabase()
         function(a) return a end)
 end
 
-local function pickInterface(interfaceComps)
-    if #interfaceComps == 0 then
-        print("  ! no me_interface component found -- this interface needs an adapter")
-        print("    so we can call setInterfaceConfiguration/store on it.")
-        return nil
-    elseif #interfaceComps == 1 then
-        return interfaceComps[1]
+-- Identify the ME interface serving this transposer -- both which side faces it
+-- (when a transposer touches more than one interface) and which me_interface
+-- COMPONENT it is (when several exist). Both come from a single marker step: the
+-- user sets that interface to stock any item, which makes the item appear on the
+-- transposer's interface side AND leaves a stock config on exactly that
+-- component (the only one), so we detect it rather than asking. Anything
+-- unambiguous resolves with no marker at all.
+-- Returns interfaceSide, interfaceComponentAddress (either may be nil).
+local function resolveInterface(tp, info, interfaceComps)
+    local sideCands = {}
+    for side = 0, 5 do
+        if info[side].isInterface then sideCands[#sideCands + 1] = side end
     end
-    return choose("  which ME interface component does this transposer stock from?",
-        interfaceComps, function(a) return a end)
+    if #sideCands == 0 then
+        print("  ! no interface side on this transposer.")
+        return nil, nil
+    end
+    if #interfaceComps == 0 then
+        print("  ! no me_interface component found -- the interface needs an adapter")
+        print("    so we can call setInterfaceConfiguration/store on it.")
+    end
+
+    local side = (#sideCands == 1) and sideCands[1] or nil
+    local comp = (#interfaceComps == 1) and interfaceComps[1] or nil
+
+    -- Fully unambiguous (or no component to pick): no marker needed.
+    if side and (comp or #interfaceComps == 0) then
+        print(string.format("  ME interface: side %d (%s)%s", side, SIDE_LABEL[side] or "?",
+            comp and (", component " .. comp:sub(1, 8) .. "..") or ""))
+        return side, comp
+    end
+
+    print("  identify this transposer's ME interface: in-game, set that interface")
+    print("  to STOCK any one item (drop an item into one of its config slots),")
+    print("  then press Enter.")
+    local sideBefore = {}
+    for _, s in ipairs(sideCands) do sideBefore[s] = sideSig(tp, s) end
+    local compBefore = {}
+    for _, c in ipairs(interfaceComps) do compBefore[c] = interfaceHasConfig(c) end
+    ask("  press Enter once it is stocking the marker... ")
+
+    if not side then
+        for _, s in ipairs(sideCands) do
+            if sideSig(tp, s) ~= sideBefore[s] then side = s; break end
+        end
+    end
+    if not comp then
+        -- The interface the user just configured is the newly-stocked one.
+        for _, c in ipairs(interfaceComps) do
+            if interfaceHasConfig(c) and not compBefore[c] then comp = c; break end
+        end
+        if not comp then
+            for _, c in ipairs(interfaceComps) do
+                if interfaceHasConfig(c) then comp = c; break end
+            end
+        end
+    end
+
+    if not side then
+        side = choose("  which side is the interface?", sideCands,
+            function(s) return string.format("side %d (%s)", s, SIDE_LABEL[s] or "?") end)
+    end
+    if not comp and #interfaceComps > 0 then
+        print("  could not auto-detect the interface component.")
+        comp = choose("  which me_interface component?", interfaceComps, function(a) return a end)
+    end
+
+    if side then print(string.format("  -> interface side %d (%s)", side, SIDE_LABEL[side] or "?")) end
+    if comp then print(string.format("  -> interface component %s..", comp:sub(1, 8))) end
+    print("  (you can clear that interface's stock config now)")
+    return side, comp
 end
 
 local function pickMiner(minerList, used, stationLabel)
@@ -214,12 +301,11 @@ for _, tpAddr in ipairs(transposers) do
     end
 
     local busSide = resolveSide(tp, info, function(x) return x.isBus end, "input bus")
-    local itfSide = resolveSide(tp, info, function(x) return x.isInterface end, "ME interface")
+    local itfSide, itfComp = resolveInterface(tp, info, interfaceComps)
 
     if not busSide or not itfSide then
         print("  skipping: could not find both an input bus and an interface side.")
     else
-        local itfComp = pickInterface(interfaceComps)
         local miner = pickMiner(minerList, used, tpAddr:sub(1, 8) .. "..")
         if not miner then
             print("  no miner chosen; skipping this transposer.")

@@ -12,15 +12,19 @@
 --       interface  -> "tile.appliedenergistics2.BlockInterface" / "tile.fluid_interface"
 --   * give stations that SHARE an ME interface distinct staging slots, so their
 --     drone loads can run concurrently without colliding
--- When it can't tell sides apart it asks you to poke the intended inventory and
--- watches which side's contents change (any change -- nothing is running). For
--- the ME interface, setting it to stock a marker item both reveals its side on
--- the transposer AND identifies which me_interface component it is (that being
--- the only one left with a stock config), so it never has to ask.
+-- Disambiguation, when it can't tell things apart, is done by live polling --
+-- nothing is running during setup, so any change is you:
+--   * input bus side  -- put an item in the bus; the side whose contents change.
+--   * ME interface     -- set that interface to stock a marker item; it watches
+--                         for the new stock config (which also names the
+--                         me_interface component), then clears the marker.
+--   * which miner a transposer serves -- it disables every candidate miner, you
+--                         switch the right one on, then it restores their states.
 --
 -- Run from this folder:  setup
 
 local component = require("component")
+local computer = require("computer")
 local serialization = require("serialization")
 local filesystem = require("filesystem")
 local shell = require("shell")
@@ -35,6 +39,11 @@ local SIDE_LABEL = {
     [0] = "bottom", [1] = "top", [2] = "north/back",
     [3] = "south/front", [4] = "east/right", [5] = "west/left",
 }
+
+-- How long to watch for a marker (interface stock config, or a miner being
+-- switched on) before giving up and asking the user to pick manually.
+local IDENTIFY_TIMEOUT = 120
+local POLL_INTERVAL = 0.5
 
 -- ---- console helpers -----------------------------------------------------
 
@@ -97,16 +106,32 @@ local function sideSig(tp, side)
 end
 
 -- True if a me_interface currently has anything configured to stock (any slot).
+-- Slots are probed from 0 to cover both 0- and 1-based indexing, and empty slots
+-- are ignored properly -- a blank slot can come back as a table with an
+-- empty-string name/label (which Lua counts as truthy), so we require a positive
+-- size or a genuinely non-empty name/label.
 local function interfaceHasConfig(compAddr)
     local ok, p = pcall(component.proxy, compAddr)
     if not ok or not p or p.getInterfaceConfiguration == nil then return false end
-    for slot = 1, 8 do
+    for slot = 0, 8 do
         local ok2, cfg = pcall(p.getInterfaceConfiguration, slot)
-        if ok2 and type(cfg) == "table" and (cfg.name or cfg.label or (cfg.size and cfg.size > 0)) then
-            return true
+        if ok2 and type(cfg) == "table" then
+            local sized = type(cfg.size) == "number" and cfg.size > 0
+            local named = type(cfg.name) == "string" and cfg.name ~= ""
+            local labeled = type(cfg.label) == "string" and cfg.label ~= ""
+            if sized or named or labeled then return true end
         end
     end
     return false
+end
+
+-- Clears every stock config slot on a me_interface (slots 0..8 to cover both
+-- indexings). Used to tidy up the marker item after identification.
+local function clearInterfaceConfig(compAddr)
+    if not compAddr then return end
+    local ok, p = pcall(component.proxy, compAddr)
+    if not ok or not p or p.setInterfaceConfiguration == nil then return end
+    for slot = 0, 8 do pcall(p.setInterfaceConfiguration, slot) end
 end
 
 -- Classify all six sides of a transposer by inventory name.
@@ -211,61 +236,110 @@ local function resolveInterface(tp, info, interfaceComps)
     end
 
     print("  identify this transposer's ME interface: in-game, set that interface")
-    print("  to STOCK any one item (drop an item into one of its config slots),")
-    print("  then press Enter.")
+    print("  to STOCK any one item (drop an item into one of its config slots).")
+    print("  watching for it...")
     local sideBefore = {}
     for _, s in ipairs(sideCands) do sideBefore[s] = sideSig(tp, s) end
     local compBefore = {}
     for _, c in ipairs(interfaceComps) do compBefore[c] = interfaceHasConfig(c) end
-    ask("  press Enter once it is stocking the marker... ")
 
-    if not side then
-        for _, s in ipairs(sideCands) do
-            if sideSig(tp, s) ~= sideBefore[s] then side = s; break end
-        end
-    end
-    if not comp then
-        -- The interface the user just configured is the newly-stocked one.
-        for _, c in ipairs(interfaceComps) do
-            if interfaceHasConfig(c) and not compBefore[c] then comp = c; break end
-        end
+    -- Poll until the marker reveals the component (and/or the side), or we time
+    -- out. The interface the user just configured is the newly-stocked one.
+    local needComp = (#interfaceComps > 0)
+    local deadline = computer.uptime() + IDENTIFY_TIMEOUT
+    while true do
         if not comp then
             for _, c in ipairs(interfaceComps) do
-                if interfaceHasConfig(c) then comp = c; break end
+                if not compBefore[c] and interfaceHasConfig(c) then comp = c; break end
             end
         end
+        if not side then
+            for _, s in ipairs(sideCands) do
+                if sideSig(tp, s) ~= sideBefore[s] then side = s; break end
+            end
+        end
+        if side and (comp or not needComp) then break end
+        if computer.uptime() >= deadline then break end
+        os.sleep(POLL_INTERVAL)
     end
 
+    -- Fall back to a manual pick for anything still unresolved.
     if not side then
-        side = choose("  which side is the interface?", sideCands,
+        side = choose("  timed out -- which side is the interface?", sideCands,
             function(s) return string.format("side %d (%s)", s, SIDE_LABEL[s] or "?") end)
     end
-    if not comp and #interfaceComps > 0 then
-        print("  could not auto-detect the interface component.")
-        comp = choose("  which me_interface component?", interfaceComps, function(a) return a end)
+    if not comp and needComp then
+        comp = choose("  timed out -- which me_interface component?", interfaceComps,
+            function(a) return a end)
+    end
+
+    -- Auto-clear the marker stock config so the user does not have to.
+    if comp then
+        clearInterfaceConfig(comp)
+        print("  cleared the marker config on " .. comp:sub(1, 8) .. "..")
     end
 
     if side then print(string.format("  -> interface side %d (%s)", side, SIDE_LABEL[side] or "?")) end
     if comp then print(string.format("  -> interface component %s..", comp:sub(1, 8))) end
-    print("  (you can clear that interface's stock config now)")
     return side, comp
 end
 
-local function pickMiner(minerList, used, stationLabel)
-    local avail = {}
+-- Reads whether a miner is currently allowed to work (its on/off state).
+local function minerOn(m)
+    local ok, v = pcall(m.proxy.isWorkAllowed)
+    return ok and v == true
+end
+
+-- Identify which discovered miner a transposer serves by having the user switch
+-- it on: disable every candidate, watch for one to be turned back on, then
+-- restore each miner's original state. Auto-picks when only one is unassigned;
+-- falls back to a manual list on timeout.
+local function identifyMiner(minerList, used)
+    local cands = {}
     for _, m in ipairs(minerList) do
-        if not used[m.address] then avail[#avail + 1] = m end
+        if not used[m.address] then cands[#cands + 1] = m end
     end
-    if #avail == 0 then avail = minerList end
+    if #cands == 0 then cands = minerList end
+
     local render = function(m)
         return string.format("%s..  %s, %d parallels @ %s",
             m.address:sub(1, 8), m.tierName or "?", m.parallels or 0, m.voltName or "?")
     end
-    if #avail == 1 then
-        print("  serves miner " .. render(avail[1]))
-        return avail[1]
+    if #cands == 1 then
+        print("  serves miner " .. render(cands[1]))
+        return cands[1]
     end
-    return choose("  which miner does " .. stationLabel .. " serve?", avail, render)
+
+    -- Snapshot each candidate's on/off state, then disable them all.
+    local wasOn = {}
+    for _, m in ipairs(cands) do
+        wasOn[m.address] = minerOn(m)
+        m:setEnabled(false)
+    end
+    os.sleep(POLL_INTERVAL)   -- let the disables register before we poll
+    print("  disabled all candidate miners. Now ENABLE (turn on) the one this")
+    print("  transposer serves. Watching...")
+
+    local found
+    local deadline = computer.uptime() + IDENTIFY_TIMEOUT
+    while not found and computer.uptime() < deadline do
+        for _, m in ipairs(cands) do
+            if minerOn(m) then found = m; break end
+        end
+        if not found then os.sleep(POLL_INTERVAL) end
+    end
+
+    -- Cleanup: restore every candidate to the state it had before we started.
+    for _, m in ipairs(cands) do
+        m:setEnabled(wasOn[m.address] == true)
+    end
+
+    if found then
+        print("  -> " .. render(found))
+        return found
+    end
+    print("  timed out; pick manually.")
+    return choose("  which miner does this transposer serve?", cands, render)
 end
 
 -- ---- main flow -----------------------------------------------------------
@@ -306,7 +380,7 @@ for _, tpAddr in ipairs(transposers) do
     if not busSide or not itfSide then
         print("  skipping: could not find both an input bus and an interface side.")
     else
-        local miner = pickMiner(minerList, used, tpAddr:sub(1, 8) .. "..")
+        local miner = identifyMiner(minerList, used)
         if not miner then
             print("  no miner chosen; skipping this transposer.")
         else

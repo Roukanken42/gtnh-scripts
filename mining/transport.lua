@@ -146,13 +146,13 @@ function Station:clearConfig()
 end
 
 -- Returns a list of { slot, label, name, size } for each occupied input-bus slot.
--- The transposer indexes inventories from 0, so we iterate every key (pairs
--- catches slot 0) and keep the 0-based index as the slot for transferItem.
+-- getAllStacks returns a 0-indexed array (pairs catches index 0), but transferItem
+-- takes 1-based slot numbers, so the slot is the array index + 1.
 function Station:busStacks()
     local out = {}
     for i, s in pairs(readStacks(self.transposer, self.inputBusSide)) do
         if type(s) == "table" and (s.size or 0) > 0 and (s.name or s.label) then
-            out[#out + 1] = { slot = i, label = s.label, name = s.name, size = s.size }
+            out[#out + 1] = { slot = i + 1, label = s.label, name = s.name, size = s.size }
         end
     end
     return out
@@ -243,16 +243,16 @@ end
 function Station:pollDrone(job)
     if job.phase ~= "stocking" then return job.phase end
 
-    -- setInterfaceConfiguration uses 1-based ME config slots, but the transposer
-    -- sees that same inventory 0-indexed, so the stocked item is at slot N-1.
-    local invSlot = self.interfaceSlot - 1
-    local ok, stack = pcall(self.transposer.getStackInSlot, self.interfaceSide, invSlot)
+    -- getStackInSlot / transferItem take 1-based slot numbers that match the ME
+    -- config slot, so the stocked item is at interfaceSlot (only getAllStacks
+    -- returns a 0-indexed array -- see busStacks).
+    local ok, stack = pcall(self.transposer.getStackInSlot, self.interfaceSide, self.interfaceSlot)
     local arrived = ok and type(stack) == "table"
         and stack.label == job.label and (stack.size or 0) >= job.count
 
     if arrived then
         local okT, moved = pcall(self.transposer.transferItem,
-            self.interfaceSide, self.inputBusSide, job.count, invSlot)
+            self.interfaceSide, self.inputBusSide, job.count, self.interfaceSlot)
         self:clearConfig()   -- also hands back any copy restocked mid-transfer
         moved = (okT and moved) or 0
         if moved >= job.count then

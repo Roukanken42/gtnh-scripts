@@ -5,6 +5,10 @@
 -- auto-detects everything it can and only asks when a choice is genuinely
 -- ambiguous. The result is written to stations.lua (loaded by config.lua).
 --
+-- It is INCREMENTAL: re-running loads the existing stations.lua, leaves already-
+-- configured transposers/miners untouched (keeping their interface slots), and
+-- only configures new ones -- so you can add modules a few at a time.
+--
 -- What it can do on its own:
 --   * find the database, transposers, ME interfaces and miners on the network
 --   * classify a transposer's sides by inventory name
@@ -86,6 +90,17 @@ local function listByType(t)
     return out
 end
 
+-- Loads an existing stations.lua (setup's own output) so a re-run is
+-- incremental. Returns { database=, stations= }, or nil if absent/unreadable.
+local function loadExisting(path)
+    if not filesystem.exists(path) then return nil end
+    local chunk = loadfile(path)
+    if not chunk then return nil end
+    local ok, data = pcall(chunk)
+    if ok and type(data) == "table" then return data end
+    return nil
+end
+
 -- ---- transposer inspection -----------------------------------------------
 
 -- Reads a transposer side's stacks as a plain array (getAllStacks may return a
@@ -102,13 +117,12 @@ end
 
 -- A slot-order-independent signature of a side's contents. Used only to tell
 -- whether ANYTHING changed after the user pokes an inventory -- nothing is
--- running during setup, so any change (in any slot) is the user.
+-- running during setup, so any change (in any slot) is the user. The transposer
+-- indexes inventories from 0, so we iterate with pairs (which catches slot 0).
 local function sideSig(tp, side)
     local parts = {}
-    local arr = readSideStacks(tp, side)
-    for i = 1, #arr do
-        local s = arr[i]
-        if s and (s.size or 0) > 0 and (s.name or s.label) then
+    for _, s in pairs(readSideStacks(tp, side)) do
+        if type(s) == "table" and (s.size or 0) > 0 and (s.name or s.label) then
             parts[#parts + 1] = (s.name or s.label) .. "x" .. tostring(s.size)
         end
     end
@@ -116,33 +130,23 @@ local function sideSig(tp, side)
     return table.concat(parts, ",")
 end
 
--- Deterministic, order-independent signature of a table's scalar fields. Used so
--- we don't have to know the exact shape getInterfaceConfiguration returns.
-local function tableSig(t)
-    if type(t) ~= "table" then return "" end
-    local kv = {}
-    for k, v in pairs(t) do
-        local tv = type(v)
-        if tv == "string" or tv == "number" or tv == "boolean" then
-            kv[#kv + 1] = tostring(k) .. "=" .. tostring(v)
-        end
-    end
-    table.sort(kv)
-    return table.concat(kv, ",")
-end
-
--- Signature of a me_interface's full stock configuration (slots 1..9, 1-based).
--- We only compare this before/after the user drops a marker into one slot: the
--- interface whose signature CHANGES is the one they configured. Diffing sidesteps
--- guessing which fields a configured slot exposes -- any slot going from empty to
--- set flips the signature.
+-- Signature of a me_interface's full stock configuration (config slots 1..9,
+-- 1-based on the interface). We compare it before/after the user drops a marker
+-- into one slot: the interface whose signature CHANGES is the one they
+-- configured. getInterfaceConfiguration returns a normal item stack, so we key
+-- on its label/name/size.
 local function interfaceConfigSig(compAddr)
     local ok, p = pcall(component.proxy, compAddr)
     if not ok or not p or p.getInterfaceConfiguration == nil then return "" end
     local parts = {}
     for slot = 1, 9 do
         local ok2, cfg = pcall(p.getInterfaceConfiguration, slot)
-        parts[#parts + 1] = (ok2 and tableSig(cfg)) or ""
+        if ok2 and type(cfg) == "table" then
+            parts[#parts + 1] = string.format("%s/%s/%s",
+                tostring(cfg.label), tostring(cfg.name), tostring(cfg.size))
+        else
+            parts[#parts + 1] = ""
+        end
     end
     return table.concat(parts, "|")
 end
@@ -444,9 +448,9 @@ end
 -- Running `setup` as a program still launches the interactive flow below.
 local M = {
     listByType = listByType,
+    loadExisting = loadExisting,
     readSideStacks = readSideStacks,
     sideSig = sideSig,
-    tableSig = tableSig,
     interfaceConfigSig = interfaceConfigSig,
     clearInterfaceConfig = clearInterfaceConfig,
     scanSides = scanSides,
@@ -477,23 +481,54 @@ end
 
 print("== Mining controller setup ==")
 
+-- Incremental: load any existing stations.lua and keep what's already there, so
+-- a re-run only configures new / not-yet-configured components.
+local path = filesystem.concat(shell.getWorkingDirectory(), "stations.lua")
+local existing = loadExisting(path)
+local stations = {}
+local used = {}              -- miner addresses already bound
+local usedTransposers = {}   -- transposer addresses already bound
+local dbAddr
+if existing then
+    dbAddr = existing.database
+    local n = 0
+    for addr, st in pairs(existing.stations or {}) do
+        stations[addr] = st
+        used[addr] = true
+        if st.transposer then usedTransposers[st.transposer] = true end
+        n = n + 1
+    end
+    print(string.format("Loaded %d existing station(s); leaving those as-is.", n))
+end
+
 local minerList = miners.discover()
 print(string.format("Discovered %d mining module(s).", #minerList))
 if #minerList == 0 then
     print("  (looking for gt_machine with getName 'projectmoduleminertN')")
 end
 
-local dbAddr = pickDatabase()
+if dbAddr then
+    print("Database (from existing config): " .. dbAddr:sub(1, 8) .. "..")
+else
+    dbAddr = pickDatabase()
+end
 
 local transposers = listByType("transposer")
 local interfaceComps = listByType("me_interface")
 print(string.format("Found %d transposer(s), %d ME interface(s).",
     #transposers, #interfaceComps))
 
-local stations = {}
-local used = {}
-
+-- Skip transposers already bound to a station on a previous run.
+local toConfigure = {}
 for _, tpAddr in ipairs(transposers) do
+    if usedTransposers[tpAddr] then
+        print("Transposer " .. tpAddr:sub(1, 8) .. ".. already configured; skipping.")
+    else
+        toConfigure[#toConfigure + 1] = tpAddr
+    end
+end
+
+for _, tpAddr in ipairs(toConfigure) do
     print("")
     print("Transposer " .. tpAddr:sub(1, 8) .. "..")
     local tp = component.proxy(tpAddr)
@@ -531,25 +566,39 @@ end
 -- ---- assign distinct interface slots -------------------------------------
 -- One ME interface can serve several transposers. Concurrent drone loads stage
 -- through the interface's config slots, so stations sharing an interface must
--- each use a DIFFERENT slot. Assign deterministically (sorted by miner address),
--- 1..8 per interface.
+-- each use a DIFFERENT slot. Existing stations keep the slot they were given;
+-- only newly-added ones get the next free slot on their interface.
 local orderedKeys = {}
 for addr in pairs(stations) do orderedKeys[#orderedKeys + 1] = addr end
 table.sort(orderedKeys)
 do
-    local nextSlot = {}
+    -- Record slots already taken on each interface (by existing stations).
+    local taken = {}
     for _, addr in ipairs(orderedKeys) do
         local st = stations[addr]
-        if st.interface then
-            local n = (nextSlot[st.interface] or 0) + 1
-            nextSlot[st.interface] = n
-            st.interfaceSlot = n
-            if n > 9 then
-                print(string.format("WARNING: %d stations share interface %s.. (only 9 slots)"
-                    .. " -- concurrent loads may collide.", n, st.interface:sub(1, 8)))
+        if st.interface and st.interfaceSlot then
+            taken[st.interface] = taken[st.interface] or {}
+            taken[st.interface][st.interfaceSlot] = true
+        end
+    end
+    -- Assign a free slot to each station that doesn't have one yet.
+    for _, addr in ipairs(orderedKeys) do
+        local st = stations[addr]
+        if not st.interfaceSlot then
+            if st.interface then
+                local set = taken[st.interface] or {}
+                taken[st.interface] = set
+                local n = 1
+                while set[n] do n = n + 1 end
+                set[n] = true
+                st.interfaceSlot = n
+                if n > 9 then
+                    print(string.format("WARNING: interface %s.. now has %d stations (>9 slots)"
+                        .. " -- concurrent loads may collide.", st.interface:sub(1, 8), n))
+                end
+            else
+                st.interfaceSlot = 1
             end
-        else
-            st.interfaceSlot = 1
         end
     end
 end
@@ -566,7 +615,6 @@ local text = table.concat({
     "",
 }, "\n")
 
-local path = filesystem.concat(shell.getWorkingDirectory(), "stations.lua")
 local f, err = io.open(path, "w")
 if not f then
     print("")

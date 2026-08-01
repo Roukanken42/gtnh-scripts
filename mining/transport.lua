@@ -146,12 +146,12 @@ function Station:clearConfig()
 end
 
 -- Returns a list of { slot, label, name, size } for each occupied input-bus slot.
+-- The transposer indexes inventories from 0, so we iterate every key (pairs
+-- catches slot 0) and keep the 0-based index as the slot for transferItem.
 function Station:busStacks()
     local out = {}
-    local arr = readStacks(self.transposer, self.inputBusSide)
-    for i = 1, #arr do
-        local s = arr[i]
-        if s and (s.size or 0) > 0 and (s.name or s.label) then
+    for i, s in pairs(readStacks(self.transposer, self.inputBusSide)) do
+        if type(s) == "table" and (s.size or 0) > 0 and (s.name or s.label) then
             out[#out + 1] = { slot = i, label = s.label, name = s.name, size = s.size }
         end
     end
@@ -243,14 +243,16 @@ end
 function Station:pollDrone(job)
     if job.phase ~= "stocking" then return job.phase end
 
-    local slot = self.interfaceSlot
-    local ok, stack = pcall(self.transposer.getStackInSlot, self.interfaceSide, slot)
+    -- setInterfaceConfiguration uses 1-based ME config slots, but the transposer
+    -- sees that same inventory 0-indexed, so the stocked item is at slot N-1.
+    local invSlot = self.interfaceSlot - 1
+    local ok, stack = pcall(self.transposer.getStackInSlot, self.interfaceSide, invSlot)
     local arrived = ok and type(stack) == "table"
         and stack.label == job.label and (stack.size or 0) >= job.count
 
     if arrived then
         local okT, moved = pcall(self.transposer.transferItem,
-            self.interfaceSide, self.inputBusSide, job.count, slot)
+            self.interfaceSide, self.inputBusSide, job.count, invSlot)
         self:clearConfig()   -- also hands back any copy restocked mid-transfer
         moved = (okT and moved) or 0
         if moved >= job.count then

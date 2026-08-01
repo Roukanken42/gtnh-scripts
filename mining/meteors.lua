@@ -268,6 +268,85 @@ function meteors.oredict(m, y)
     return (m.orePrefix or "") .. y.mat
 end
 
+-- ---- yield estimation ----------------------------------------------------
+-- On top of the drone-tier scaling, actual yield depends on the selected PLASMA
+-- (a base time discount and a size multiplier) and the machine's OVERDRIVE
+-- parameter (0..2). Overdrive trades size for speed:
+--   real time  = baseTime * (1 - timeDiscount) / overdrive     (discount <= 50%)
+--   size bonus = sizeMultiplier * (2 - overdrive)              (bonus <= 75%)
+-- The size bonus is the chance of extra stacks above the minimum, so the average
+-- run yields  size.min + sizeBonus * (size.max - size.min)  stacks, split among
+-- the ores by their chance weights.
+
+-- Items in one output stack (the recipes emit getOre(64)); special item-only
+-- meteors differ, so treat `items` for those as informative only.
+meteors.STACK = 64
+
+local function clamp(x, lo, hi)
+    if x < lo then return lo elseif x > hi then return hi end
+    return x
+end
+
+-- Real mining time (ticks). `timeDiscount` is the plasma's base discount (capped
+-- at 0.5); `overdrive` is the machine parameter (0..2, higher = faster). An
+-- overdrive of 0 can't run (returns math.huge).
+function meteors.mineTime(baseTime, timeDiscount, overdrive)
+    overdrive = overdrive or 1
+    if overdrive <= 0 then return math.huge end
+    return baseTime * (1 - clamp(timeDiscount or 0, 0, 0.5)) / overdrive
+end
+
+-- Size bonus (0..0.75): plasma sizeMultiplier * (2 - overdrive), capped at 0.75.
+function meteors.sizeBonus(sizeMultiplier, overdrive)
+    return clamp((sizeMultiplier or 0) * (2 - (overdrive or 1)), 0, 0.75)
+end
+
+-- Average total stacks: guaranteed minimum plus the size-bonus share of the span.
+function meteors.avgStacks(sizeMin, sizeMax, sizeBonus)
+    return sizeMin + sizeBonus * (sizeMax - sizeMin)
+end
+
+-- Full per-run estimate for meteor `m` at `droneTier` (1..13) with the given
+-- plasma and overdrive.
+--   plasma = { timeDiscount = 0..0.5, sizeMultiplier = <number> }
+-- Returns nil if the drone tier can't mine `m`, otherwise:
+--   { time,       -- real mine time, ticks
+--     eut,        -- EU/t (drone-tier scaled)
+--     size,       -- { min, max } scaled size range, in stacks
+--     sizeBonus,  -- 0..0.75
+--     stacks,     -- average total stacks produced
+--     yield = {   -- average per output over one run
+--       { oredict, mat, item, chance, fraction, stacks, items }, ... } }
+function meteors.estimate(m, droneTier, plasma, overdrive)
+    local s = meteors.scale(m, droneTier)
+    if not s then return nil end
+    plasma = plasma or {}
+    local sizeBonus = meteors.sizeBonus(plasma.sizeMultiplier, overdrive)
+    local total = meteors.avgStacks(s.size[1], s.size[2], sizeBonus)
+
+    local totalChance = 0
+    for _, y in ipairs(m.yield) do totalChance = totalChance + y.chance end
+
+    local yield = {}
+    for _, y in ipairs(m.yield) do
+        local fraction = totalChance > 0 and y.chance / totalChance or 0
+        local stacks = total * fraction
+        yield[#yield + 1] = {
+            oredict = meteors.oredict(m, y), mat = y.mat, item = y.item, chance = y.chance,
+            fraction = fraction, stacks = stacks, items = stacks * meteors.STACK,
+        }
+    end
+
+    return {
+        time = meteors.mineTime(s.duration, plasma.timeDiscount, overdrive),
+        eut = s.eut,
+        size = s.size,
+        sizeBonus = sizeBonus,
+        stacks = total,
+        yield = yield,
+    }
+end
+
 -- Lookup by asteroid name.
 meteors.byName = {}
 for _, m in ipairs(meteors.list) do meteors.byName[m.name] = m end

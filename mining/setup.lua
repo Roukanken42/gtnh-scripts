@@ -15,9 +15,11 @@
 -- Disambiguation, when it can't tell things apart, is done by live polling --
 -- nothing is running during setup, so any change is you:
 --   * input bus side  -- put an item in the bus; the side whose contents change.
---   * ME interface     -- set that interface to stock a marker item; it watches
---                         for the new stock config (which also names the
---                         me_interface component), then clears the marker.
+--   * ME interface     -- when the transposer has one interface side it AUTO-
+--                         probes: it stocks a probe item on each me_interface in
+--                         turn and watches that side, no action needed. Only if
+--                         the side itself is ambiguous (or probing is
+--                         inconclusive) does it ask you to stock a marker item.
 --   * which miner a transposer serves -- it disables every candidate miner, you
 --                         switch the right one on, then it restores their states.
 --
@@ -44,6 +46,15 @@ local SIDE_LABEL = {
 -- switched on) before giving up and asking the user to pick manually.
 local IDENTIFY_TIMEOUT = 120
 local POLL_INTERVAL = 0.5
+
+-- Interface auto-probe: to learn which me_interface a transposer feeds, we stock
+-- a probe item on each candidate in turn and watch the transposer's interface
+-- side. PROBE_TIMEOUT is how long to wait for one candidate to stock before
+-- ruling it out; PROBE_CFG_SLOT / PROBE_DB_SLOT are the interface config slot and
+-- database slot we borrow for the probe.
+local PROBE_TIMEOUT = 4
+local PROBE_CFG_SLOT = 9
+local PROBE_DB_SLOT = 1
 
 -- ---- console helpers -----------------------------------------------------
 
@@ -136,13 +147,17 @@ local function interfaceConfigSig(compAddr)
     return table.concat(parts, "|")
 end
 
--- Clears every stock config slot on a me_interface (slots 1..9). Used to tidy up
--- the marker item after identification.
-local function clearInterfaceConfig(compAddr)
+-- Clears stock config on a me_interface: one slot if `onlySlot` is given, else
+-- all slots (1..9). Used to tidy up markers/probes after identification.
+local function clearInterfaceConfig(compAddr, onlySlot)
     if not compAddr then return end
     local ok, p = pcall(component.proxy, compAddr)
     if not ok or not p or p.setInterfaceConfiguration == nil then return end
-    for slot = 1, 9 do pcall(p.setInterfaceConfiguration, slot) end
+    if onlySlot then
+        pcall(p.setInterfaceConfiguration, onlySlot)
+    else
+        for slot = 1, 9 do pcall(p.setInterfaceConfiguration, slot) end
+    end
 end
 
 -- Classify all six sides of a transposer by inventory name.
@@ -214,15 +229,68 @@ local function pickDatabase()
         function(a) return a end)
 end
 
+-- Stores any in-stock network item's metadata into PROBE_DB_SLOT for use as a
+-- probe. Returns the db slot on success, or nil. `refComp` is any me_interface.
+local function storeProbeItem(refComp, dbAddr)
+    local ok, p = pcall(component.proxy, refComp)
+    if not ok or not p or p.getItemsInNetwork == nil or p.store == nil then return nil end
+    local okDb, db = pcall(component.proxy, dbAddr)
+    if not okDb or not db or db.get == nil then return nil end
+    local okItems, items = pcall(p.getItemsInNetwork)
+    if not okItems or type(items) ~= "table" then return nil end
+    for _, it in ipairs(items) do
+        if it and it.label and (it.size or 0) > 0 then
+            pcall(db.clear, PROBE_DB_SLOT)
+            local okStore = pcall(p.store, { label = it.label }, dbAddr, PROBE_DB_SLOT, 1)
+            local okGet, st = pcall(db.get, PROBE_DB_SLOT)
+            if okStore and okGet and type(st) == "table" and (st.name or st.label) then
+                return PROBE_DB_SLOT
+            end
+        end
+    end
+    return nil
+end
+
+-- Identify which me_interface sits on the transposer's `interfaceSide`, with no
+-- user action: stock a probe item on each candidate in turn and watch that side
+-- -- the one whose stock shows up there is the adjacent interface. Needs the
+-- database and a network item. Returns the matched component address, or nil if
+-- inconclusive (caller then falls back to the manual marker).
+local function probeInterfaceComponent(tp, interfaceSide, interfaceComps, dbAddr)
+    if not dbAddr or #interfaceComps == 0 then return nil end
+    local dbSlot = storeProbeItem(interfaceComps[1], dbAddr)
+    if not dbSlot then return nil end
+
+    print("  auto-detecting interface (probing up to " .. #interfaceComps .. ")...")
+    local found
+    for _, c in ipairs(interfaceComps) do
+        local before = sideSig(tp, interfaceSide)
+        local ok, p = pcall(component.proxy, c)
+        if ok and p and p.setInterfaceConfiguration ~= nil then
+            pcall(p.setInterfaceConfiguration, PROBE_CFG_SLOT, dbAddr, dbSlot, 1)
+            local deadline = computer.uptime() + PROBE_TIMEOUT
+            while computer.uptime() < deadline do
+                if sideSig(tp, interfaceSide) ~= before then found = c; break end
+                os.sleep(POLL_INTERVAL)
+            end
+            clearInterfaceConfig(c, PROBE_CFG_SLOT)   -- clear just the probe slot
+        end
+        if found then break end
+    end
+
+    local okDb, db = pcall(component.proxy, dbAddr)   -- tidy the probe metadata
+    if okDb and db and db.clear then pcall(db.clear, PROBE_DB_SLOT) end
+    return found
+end
+
 -- Identify the ME interface serving this transposer -- both which side faces it
 -- (when a transposer touches more than one interface) and which me_interface
--- COMPONENT it is (when several exist). Both come from a single marker step: the
--- user sets that interface to stock any item, which makes the item appear on the
--- transposer's interface side AND leaves a stock config on exactly that
--- component (the only one), so we detect it rather than asking. Anything
--- unambiguous resolves with no marker at all.
+-- COMPONENT it is (when several exist). When the interface side is unambiguous we
+-- auto-probe the components (no user action); otherwise a single marker step (the
+-- user sets an interface to stock any item) reveals the side and the component.
+-- Anything unambiguous resolves with nothing to do.
 -- Returns interfaceSide, interfaceComponentAddress (either may be nil).
-local function resolveInterface(tp, info, interfaceComps)
+local function resolveInterface(tp, info, interfaceComps, dbAddr)
     local sideCands = {}
     for side = 0, 5 do
         if info[side].isInterface then sideCands[#sideCands + 1] = side end
@@ -244,6 +312,18 @@ local function resolveInterface(tp, info, interfaceComps)
         print(string.format("  ME interface: side %d (%s)%s", side, SIDE_LABEL[side] or "?",
             comp and (", component " .. comp:sub(1, 8) .. "..") or ""))
         return side, comp
+    end
+
+    -- One interface side, several components: find the adjacent one by probing --
+    -- no user action needed.
+    if side and not comp then
+        local probed = probeInterfaceComponent(tp, side, interfaceComps, dbAddr)
+        if probed then
+            print(string.format("  ME interface: side %d (%s), component %s.. (auto-detected)",
+                side, SIDE_LABEL[side] or "?", probed:sub(1, 8)))
+            return side, probed
+        end
+        print("  auto-detect inconclusive; falling back to the marker.")
     end
 
     print("  identify this transposer's ME interface: in-game, set that interface")
@@ -353,6 +433,46 @@ local function identifyMiner(minerList, used)
     return choose("  which miner does this transposer serve?", cands, render)
 end
 
+-- ---- module exports ------------------------------------------------------
+-- Returned when this file is require()'d, so the helpers can be called directly
+-- to debug detection -- e.g. from the OpenOS Lua prompt:
+--     S   = require("setup")               -- returns this table; runs nothing
+--     ifs = S.listByType("me_interface")
+--     tp  = require("component").proxy("<transposer-address>")
+--     S.interfaceConfigSig(ifs[1])
+--     S.probeInterfaceComponent(tp, <side>, ifs, "<database-address>")
+-- Running `setup` as a program still launches the interactive flow below.
+local M = {
+    listByType = listByType,
+    readSideStacks = readSideStacks,
+    sideSig = sideSig,
+    tableSig = tableSig,
+    interfaceConfigSig = interfaceConfigSig,
+    clearInterfaceConfig = clearInterfaceConfig,
+    scanSides = scanSides,
+    identifyByInsertion = identifyByInsertion,
+    resolveSide = resolveSide,
+    pickDatabase = pickDatabase,
+    storeProbeItem = storeProbeItem,
+    probeInterfaceComponent = probeInterfaceComponent,
+    resolveInterface = resolveInterface,
+    minerOn = minerOn,
+    identifyMiner = identifyMiner,
+    INTERFACE_NAMES = INTERFACE_NAMES,
+    INPUT_BUS_NAME = INPUT_BUS_NAME,
+    SIDE_LABEL = SIDE_LABEL,
+}
+
+-- When loaded via require (to poke the helpers) rather than run as the `setup`
+-- program, stop here -- don't run the interactive flow. The two are told apart
+-- by the running process's path.
+do
+    local ok, info = pcall(function() return require("process").info() end)
+    local asProgram = ok and info and type(info.path) == "string"
+        and info.path:find("setup%.lua$") ~= nil
+    if not asProgram then return M end
+end
+
 -- ---- main flow -----------------------------------------------------------
 
 print("== Mining controller setup ==")
@@ -386,7 +506,7 @@ for _, tpAddr in ipairs(transposers) do
     end
 
     local busSide = resolveSide(tp, info, function(x) return x.isBus end, "input bus")
-    local itfSide, itfComp = resolveInterface(tp, info, interfaceComps)
+    local itfSide, itfComp = resolveInterface(tp, info, interfaceComps, dbAddr)
 
     if not busSide or not itfSide then
         print("  skipping: could not find both an input bus and an interface side.")
@@ -469,3 +589,5 @@ if not dbAddr then
     print("WARNING: no database configured -- drone loading will not work until you add one.")
 end
 print("Keep cfg.dryRun = true until you've watched a drone move, then flip it.")
+
+return M

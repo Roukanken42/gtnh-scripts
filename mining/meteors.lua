@@ -268,6 +268,26 @@ function meteors.oredict(m, y)
     return (m.orePrefix or "") .. y.mat
 end
 
+-- A meteor's outputs as oredict -> share of the roll (its chance over the sum of
+-- all of them). The weights are static data, so this is built once per meteor and
+-- cached; both the estimator and the targeter want it. Entries that resolve to the
+-- same oredict are merged, so the shares always sum to 1.
+local fractionCache = {}
+
+function meteors.fractions(m)
+    local f = fractionCache[m]
+    if f then return f end
+    local total = 0
+    for _, y in ipairs(m.yield) do total = total + y.chance end
+    f = {}
+    for _, y in ipairs(m.yield) do
+        local key = meteors.oredict(m, y)
+        f[key] = (f[key] or 0) + (total > 0 and y.chance / total or 0)
+    end
+    fractionCache[m] = f
+    return f
+end
+
 -- ---- yield estimation ----------------------------------------------------
 -- On top of the drone-tier scaling, actual yield depends on the selected PLASMA
 -- (a base time discount and a size multiplier -- see plasmas.lua) and the
@@ -329,12 +349,10 @@ function meteors.estimate(m, droneTier, plasma, overdrive)
     local sizeBonus = meteors.sizeBonus(plasma.sizeMultiplier, overdrive)
     local total = meteors.avgStacks(s.size[1], s.size[2], sizeBonus)
 
-    local totalChance = 0
-    for _, y in ipairs(m.yield) do totalChance = totalChance + y.chance end
-
+    local frac = meteors.fractions(m)
     local yield = {}
     for _, y in ipairs(m.yield) do
-        local fraction = totalChance > 0 and y.chance / totalChance or 0
+        local fraction = frac[meteors.oredict(m, y)]
         local stacks = total * fraction
         yield[#yield + 1] = {
             oredict = meteors.oredict(m, y), mat = y.mat, item = y.item, chance = y.chance,

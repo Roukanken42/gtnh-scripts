@@ -10,8 +10,10 @@ mining/estimate.lua
 mining/localnet.lua
 mining/meteors.lua
 mining/miners.lua
+mining/plan.lua
 mining/plasmas.lua
 mining/setup.lua
+mining/target.lua
 mining/transport.lua
 power/bignum.lua
 ? power/config.lua

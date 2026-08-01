@@ -51,6 +51,9 @@ local DETECT_BUDGET = 30         -- s total to find a single transposer's interf
 local DETECT_LOCAL_HINT = 1.5    -- s: if no drone has left the local net by now, skip
 -- How long to wait for a miner to start mining once its bus has a drone.
 local MINER_TIMEOUT = 15
+-- How long to wait for already-running miners to actually stop after we switch
+-- them off (isMachineActive lags) before detection begins.
+local SETTLE_TIMEOUT = 60
 -- ME interface config slot we stage the probe drone through (1-based on the
 -- interface; the transposer sees it at slot-1). Config slot 1's item does not
 -- surface to the transposer, so use 2.
@@ -161,6 +164,45 @@ local function minerOn(m)      -- allowed to work (soft on/off)
     return ok and v == true
 end
 
+-- Clean slate before detection: clear any leftover mining-drone stock configs on
+-- the interfaces (so a pre-stocked drone can't fool detection), switch every
+-- miner off, and wait for in-progress mining to finish (isMachineActive lags
+-- after a miner is switched off). Only drone configs are cleared, so unrelated
+-- interfaces are left alone. Returns each miner's original on/off state.
+local function prepare(interfaceComps, minerList)
+    for _, c in ipairs(interfaceComps) do
+        local ok, p = pcall(component.proxy, c)
+        if ok and p and p.getInterfaceConfiguration ~= nil and p.setInterfaceConfiguration ~= nil then
+            for slot = 1, 9 do
+                local okc, cfg = pcall(p.getInterfaceConfiguration, slot)
+                if okc and type(cfg) == "table" and cfg.name == drones.ITEM_NAME then
+                    pcall(p.setInterfaceConfiguration, slot)
+                end
+            end
+        end
+    end
+
+    local wasOn = {}
+    for _, m in ipairs(minerList) do
+        wasOn[m.address] = minerOn(m)
+        m:setEnabled(false)
+    end
+
+    local settled, deadline = false, computer.uptime() + SETTLE_TIMEOUT
+    while computer.uptime() < deadline do
+        local anyActive = false
+        for _, m in ipairs(minerList) do
+            if minerActive(m) then anyActive = true; break end
+        end
+        if not anyActive then settled = true; break end
+        os.sleep(POLL_INTERVAL)
+    end
+    if not settled then
+        print("  WARNING: some miners are still finishing; detection may be off -- re-run if needed.")
+    end
+    return wasOn
+end
+
 -- Picks the database to stage probes through (first one found).
 local function pickDatabase()
     return listByType("database")[1]
@@ -178,6 +220,7 @@ local M = {
     detectInterface = detectInterface,
     minerActive = minerActive,
     minerOn = minerOn,
+    prepare = prepare,
     pickDatabase = pickDatabase,
     INTERFACE_NAMES = INTERFACE_NAMES,
     INPUT_BUS_NAME = INPUT_BUS_NAME,
@@ -222,6 +265,10 @@ local interfaceComps = listByType("me_interface")
 local minerList = miners.discover()
 print(string.format("Found %d transposer(s), %d interface(s), %d miner(s).",
     #transposers, #interfaceComps, #minerList))
+
+-- Clean slate: clear leftover drone configs, stop miners, wait for them to idle.
+print("Preparing (clearing drone configs, stopping miners, waiting for idle)...")
+local wasOn = prepare(interfaceComps, minerList)
 
 -- 3. Pair each transposer with its interface; collect its input buses.
 local feeds = {}   -- { transposer, interface, interfaceSide, inputBusSide }
@@ -271,11 +318,8 @@ for _, feed in ipairs(feeds) do
     if st then st:returnAll() end
 end
 
-local wasOn = {}
-for _, m in ipairs(minerList) do
-    wasOn[m.address] = minerOn(m)
-    m:setEnabled(true)
-end
+-- Miners are already off (prepare); enable them so the one with a drone runs.
+for _, m in ipairs(minerList) do m:setEnabled(true) end
 
 -- TODO(next part): a mining module needs more than a drone to actually produce
 -- (target/planet selection, output filters, ...). Once we know that API, capture

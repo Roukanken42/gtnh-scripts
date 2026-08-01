@@ -6,6 +6,7 @@ install.lua
 ? mining/config.lua
 mining/drone.lua
 mining/drones.lua
+mining/estimate.lua
 mining/localnet.lua
 mining/meteors.lua
 mining/miners.lua

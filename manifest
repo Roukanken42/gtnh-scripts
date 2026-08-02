@@ -8,6 +8,7 @@ mining/drone.lua
 mining/lib/calc/estimate.lua
 mining/lib/calc/target.lua
 mining/lib/cli.lua
+mining/lib/control.lua
 mining/lib/gtnh/drones.lua
 mining/lib/gtnh/meteors.lua
 mining/lib/gtnh/plasmas.lua
@@ -18,6 +19,8 @@ mining/lib/hw/miners.lua
 mining/lib/hw/supply.lua
 mining/lib/hw/transport.lua
 mining/lib/stations.lua
+mining/lib/ui.lua
+mining/main.lua
 mining/plan.lua
 mining/plasma.lua
 mining/setup.lua

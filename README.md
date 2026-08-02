@@ -38,6 +38,7 @@ Inside a program folder, the split is by what a file *is*:
 
 ```
 mining/
+  main.lua               The controller. Keeps a manually-configured fleet fed.
   setup.lua drone.lua    Programs you run. Every one takes --help and --verbose.
   plan.lua stock.lua
   plasma.lua
@@ -48,6 +49,9 @@ mining/
     calc/                Pure maths over that data -- no components touched, so
                          it runs in any Lua interpreter.
     hw/                  Everything that talks to a component.
+    control.lua          What the controller decides: what to stock, what to
+                         request, and the plasma picker's keyboard.
+    ui.lua               The dashboard. Renders a state table, decides nothing.
     cli.lua              Argument parsing, --help, and progress output.
     stations.lua         Where the generated station map lives.
   data/                  Generated on the machine by `setup`. Not in the repo.

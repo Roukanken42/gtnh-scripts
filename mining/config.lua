@@ -229,6 +229,39 @@ cfg.supply = {
     maxCrafts = nil,
 }
 
+-- ---- The controller (main.lua) ---------------------------------------------
+-- MANUAL mode: you set each module's drone, distance and overdrive yourself and
+-- the controller keeps the consumables flowing. It never reconfigures a module.
+--
+-- What to stock is READ OFF THE HARDWARE -- a module's input bus says which drone
+-- it runs, and that says which material its kits are made of -- so nothing here
+-- names a material. The two figures below turn "which" into "how many". A number
+-- in cfg.supply.target or cfg.supply.plasma overrides the result for that entry.
+
+cfg.control = {
+    -- Seconds between maintenance cycles. Each one reads every module and its
+    -- hatch, so this is the real cost of running the controller; the dashboard
+    -- repaints on its own faster cadence without touching hardware.
+    interval = 5,
+    uiRefresh = 1,
+
+    -- Kits to keep in the local net per module running that material. One kit is
+    -- one meteor, so this is roughly "how many meteors of runway each module
+    -- has". Worth lowering for the expensive materials -- 256 Infinity kits is
+    -- 4,608 Infinity ingots sitting idle -- via cfg.supply.target above.
+    kitsPerMiner = 256,
+
+    -- Local-net plasma buffer, in hatchfuls per module with a plasma feed. The
+    -- hatches hold one each; this is what refills them.
+    hatchRefills = 4,
+
+    -- How many restock requests may be in flight at once, per kind. Each holds a
+    -- crafting CPU on the main net until the fake pattern's inputs are pushed, so
+    -- an uncapped controller could take the whole crafting bank. Plasma is one
+    -- because manual mode runs a single plasma fleet-wide.
+    jobs = { kit = 2, plasma = 1 },
+}
+
 -- ---- What `setup` discovered -----------------------------------------------
 -- Dead last, after every cfg table above exists: it fills in whatever was left
 -- unset and never clobbers something you set by hand. stations.lua is

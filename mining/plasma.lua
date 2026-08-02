@@ -6,6 +6,7 @@ local miners = require("lib.hw.miners")
 local transport = require("lib.hw.transport")
 local dbslots = require("lib.hw.db")
 local supply = require("lib.hw.supply")
+local control = require("lib.control")
 local plasmas = require("lib.gtnh.plasmas")
 local localnet = require("lib.hw.localnet")
 local computer = require("computer")
@@ -112,19 +113,10 @@ local function plasmaDbSlot(p)
     local handle, dbErr = dbslots.open(cfg.database)
     if not handle then return nil, "database: " .. tostring(dbErr) end
 
-    local catalog = supply.catalog(itf, handle)
-    local entry
-    for _, e in ipairs(catalog) do
-        if e.kind == "plasma" and e.plasma.tier == p.tier then entry = e; break end
-    end
-    if not entry then
-        return nil, "the supply interface has no pattern for " .. p.name
-            .. " -- its drop is the only way to name a fluid to the interface"
-    end
-
     -- The drop keeps a permanent slot: the fluid interface points at it for as
-    -- long as this plasma is the one being staged.
-    return supply.storePlasmaDrop(itf, entry, handle)
+    -- long as this plasma is the one being staged. Same lookup the controller
+    -- does, so it lives in control.lua rather than in both.
+    return control.plasmaSlot(supply.catalog(itf, handle), itf, handle, p)
 end
 
 -- Fills a station's hatch to `target`. The looping lives on the station itself

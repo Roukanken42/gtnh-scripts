@@ -238,52 +238,49 @@ end
 --   stock      { items = { [label] = count }, fluids = { [name] = litres } }
 --   cfg        cfg.supply (target / plasma / plasmaPerCraft / lowWater / maxCrafts)
 --   satisfied  caller-owned latch table, carried across cycles for hysteresis
---   onOrder    key -> amount already requested and not yet in stock
--- Returns a list of { entry, key, have, coming, target, deficit, crafts }, plus a
--- list of notes for anything that has a target but cannot be acted on.
+-- Returns a list of { entry, key, have, target, deficit, crafts }, plus a list of
+-- notes for anything that has a target but cannot be acted on.
 --
--- Two things stop this re-requesting forever.
+-- This compares the target against WHAT IS ACTUALLY THERE, and nothing else. An
+-- earlier version also counted what had been requested but not yet seen, to stop
+-- the same shortfall being ordered every cycle -- but it had to guess when an
+-- order had arrived by watching the stock rise, and the modules eat kits as fast
+-- as they land, so a delivery that was immediately consumed never looked like a
+-- delivery and the phantom order stuck around until it timed out.
 --
--- HYSTERESIS, as pump/main.lua's computeNeedy does it: once a material reaches
--- its target it stays "satisfied" until it drops below lowWater * target, so a
--- slow drain cannot make this ask every cycle.
+-- Guessing was the mistake. The caller re-reads the stock the moment a craft
+-- finishes, so by the time this runs again the answer is simply known. What stops
+-- the re-requesting is a fresh reading, not a prediction.
 --
--- WHAT IS ALREADY COMING. A request is counted as though it had already landed,
--- because it very nearly has. Without that the controller ordered the whole
--- deficit again on every cycle until the goods showed up in a stock read -- and a
--- fake-crafting job reports done the instant its inputs are pushed, well before
--- either AE2 or the next stock read catches up. More is only ever asked for when
--- the shortfall grows BEYOND what is on order.
-function supply.plan(catalog, stock, cfg, satisfied, onOrder)
+-- Hysteresis stays, as pump/main.lua's computeNeedy does it: once a material
+-- reaches its target it stays "satisfied" until it drops below lowWater * target,
+-- so a slow drain cannot make this ask every cycle.
+function supply.plan(catalog, stock, cfg, satisfied)
     cfg = cfg or {}
     stock = stock or {}
     satisfied = satisfied or {}
-    onOrder = onOrder or {}
     local lowWater = cfg.lowWater or 0.9
     local work, notes = {}, {}
 
     local function consider(entry, key, have, target, perCraft)
         if not target or target <= 0 then return end
-        local coming = onOrder[key] or 0
-        local effective = have + coming
-
-        if effective >= target then
+        if have >= target then
             satisfied[key] = true
             return
         end
-        if satisfied[key] and effective >= lowWater * target then return end
+        if satisfied[key] and have >= lowWater * target then return end
         satisfied[key] = false
 
         if not perCraft or perCraft <= 0 then
-            notes[#notes + 1] = key .. ": short " .. (target - effective)
+            notes[#notes + 1] = key .. ": short " .. (target - have)
                 .. ", but how much one craft delivers is unknown"
             return
         end
-        local deficit = target - effective
+        local deficit = target - have
         local crafts = math.ceil(deficit / perCraft)
         if cfg.maxCrafts and crafts > cfg.maxCrafts then crafts = cfg.maxCrafts end
         work[#work + 1] = {
-            entry = entry, key = key, have = have, coming = coming, target = target,
+            entry = entry, key = key, have = have, target = target,
             deficit = deficit, crafts = crafts,
         }
     end

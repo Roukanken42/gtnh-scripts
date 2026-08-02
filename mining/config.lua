@@ -266,13 +266,12 @@ cfg.control = {
     -- hatches hold one each; this is what refills them.
     hatchRefills = 4,
 
-    -- How long a requested-but-undelivered craft keeps counting towards its
-    -- target. A request is treated as good as delivered so the next cycle does
-    -- not order the same shortfall again -- a fake craft reports done the instant
-    -- its inputs are pushed, long before a stock read notices them. Past this it
-    -- is written off, since a craft can fail, be cancelled, or push into a full
-    -- network, and one that never arrives must not block a material for good.
-    orderTtl = 120,
+    -- How long after a craft finishes before its material may be requested again.
+    -- The local net is re-read the moment a craft lands, and THAT is what stops a
+    -- second order; this only covers the tick or two between the goods being
+    -- pushed and the network showing them. Short on purpose -- if a craft really
+    -- did under-deliver, this is how long before the shortfall is noticed.
+    settleGrace = 5,
 
     -- How long to keep waiting for a module to finish its operation before
     -- giving up on a queued parameter change. TecTech only accepts a write while

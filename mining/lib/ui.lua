@@ -33,8 +33,8 @@
 --                   parallels, parallelCap, overdrive, material, hatchLevel,
 --                   hatchCapacity, hatchTarget, hatchFluid, staged,
 --                   pending }, ... }   -- pending: a queued change, in words
---   kits        { { name, have, target, fill, crafts, coming, from }, ... } tier order
---   plasmas     { { tier, name, have, target, fill, crafts, coming, from,
+--   kits        { { name, have, target, fill, crafts, settling, from }, ... }
+--   plasmas     { { tier, name, have, target, fill, crafts, settling, from,
 --                   active }, ... }
 --   totals      { miners, mining, jobsKit, jobsPlasma, limitKit, limitPlasma }
 --   supplyErr   string | nil
@@ -540,15 +540,15 @@ local function drawStockRow(x, y, inner, e, gutter, gutterColor)
     end
 
     -- Why a row that is short is not being acted on. "craft xN" while the job is
-    -- still on a CPU; "+N due" once it is off but the goods have not landed, which
-    -- is the state that used to look like nothing happening and get re-ordered
-    -- every cycle; "no pattern" when there is nothing that could deliver it.
+    -- still on a CPU; "settling" for the moment after one lands, while the network
+    -- catches up with what was pushed into it; "no pattern" when there is nothing
+    -- that could deliver it at all.
     if e.missing then
         cell(x, y, SC.job, 11, "no pattern", C.crit, inner)
     elseif (e.crafts or 0) > 0 then
         cell(x, y, SC.job, 9, "craft x" .. e.crafts, C.accent2, inner)
-    elseif (e.coming or 0) > 0 then
-        cell(x, y, SC.job, 9, "+" .. human(e.coming) .. " due", C.accent, inner)
+    elseif e.settling then
+        cell(x, y, SC.job, 9, "settling", C.accent, inner)
     else
         cell(x, y, SC.job, 9, "", C.faint, inner)
     end

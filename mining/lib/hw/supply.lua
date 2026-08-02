@@ -519,11 +519,11 @@ end
 -- higher tier. A per-plasma litre figure in cfg.supply.hatchLitres overrides it.
 function supply.hatchLitres(plasma, cfg)
     cfg = cfg or {}
-    -- 0 means "no override", not "no plasma": config.lua lists every plasma so
-    -- only numbers need editing, and an untouched entry must fall through to the
-    -- meteor figure rather than emptying the hatch.
+    -- An absent override falls through to the meteor figure. config.lua lists
+    -- every plasma with a nil value, so the key is visible to edit without
+    -- meaning anything until a number replaces it.
     local override = cfg.hatchLitres and cfg.hatchLitres[plasma.name]
-    if override and override > 0 then return override end
+    if override then return override end
     return (cfg.hatchMeteors or 64) * plasma.consumed
 end
 

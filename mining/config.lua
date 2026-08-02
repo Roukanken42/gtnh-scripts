@@ -110,32 +110,33 @@ cfg.euCost = 1e-9
 -- What you can actually SUPPLY per second. A configuration that burns more than
 -- any of these is reported as infeasible rather than recommended.
 --
--- Every entry is listed so you only ever change a number. 0 means NO LIMIT -- an
--- untouched entry is "I have not said", not "none allowed".
+-- Every entry is listed so you never have to remember how a material is spelled:
+-- replace a nil with a number. nil means NO LIMIT -- "I have not said", not
+-- "none allowed".
 cfg.budget = {
     -- Ingots per second you can produce, per drone material.
     ingots = {
-        ["Steel"]              = 0,
-        ["Titanium"]           = 0,
-        ["Tungstensteel"]      = 0,
-        ["Naquadah"]           = 0,
-        ["Naquadah Alloy"]     = 0,
-        ["Neutronium"]         = 0,
-        ["Cosmic Neutronium"]  = 0,
-        ["Infinity"]           = 0,
-        ["Transcendent Metal"] = 0,
+        ["Steel"]              = nil,
+        ["Titanium"]           = nil,
+        ["Tungstensteel"]      = nil,
+        ["Naquadah"]           = nil,
+        ["Naquadah Alloy"]     = nil,
+        ["Neutronium"]         = nil,
+        ["Cosmic Neutronium"]  = nil,
+        ["Infinity"]           = nil,
+        ["Transcendent Metal"] = nil,
     },
 
     -- Litres per second you can produce, by plasma TIER (as cfg.plasmaCost).
     plasma = {
-        [1] = 0,   -- Helium
-        [2] = 0,   -- Bismuth
-        [3] = 0,   -- Radon
-        [4] = 0,   -- Technetium
-        [5] = 0,   -- Plutonium-241
+        [1] = nil,   -- Helium
+        [2] = nil,   -- Bismuth
+        [3] = nil,   -- Radon
+        [4] = nil,   -- Technetium
+        [5] = nil,   -- Plutonium-241
     },
 
-    eu = 0,        -- EU per second the mining line may draw
+    eu = nil,        -- EU per second the mining line may draw
 }
 
 -- Computation the space elevator can feed a module. Meteors ask for a fixed
@@ -160,29 +161,29 @@ cfg.supply = {
     interface = nil,
 
     -- KITS to keep in the local net, per drone material. One kit is 4 drill tips
-    -- + 4 rods, i.e. one meteor's worth. 0 means DO NOT STOCK it, so filling in
+    -- + 4 rods, i.e. one meteor's worth. nil means DO NOT STOCK it, so filling in
     -- only the materials your drones actually use is the normal state.
     target = {
-        ["Steel"]              = 0,
-        ["Titanium"]           = 0,
-        ["Tungstensteel"]      = 0,
-        ["Naquadah"]           = 0,
-        ["Naquadah Alloy"]     = 0,
-        ["Neutronium"]         = 0,
-        ["Cosmic Neutronium"]  = 0,
-        ["Infinity"]           = 0,
-        ["Transcendent Metal"] = 0,   -- listed for completeness; unobtainable above
+        ["Steel"]              = nil,
+        ["Titanium"]           = nil,
+        ["Tungstensteel"]      = nil,
+        ["Naquadah"]           = nil,
+        ["Naquadah Alloy"]     = nil,
+        ["Neutronium"]         = nil,
+        ["Cosmic Neutronium"]  = nil,
+        ["Infinity"]           = nil,
+        ["Transcendent Metal"] = nil,   -- listed for completeness; unobtainable above
     },
 
-    -- Litres of plasma to keep in the local net, by fluid name. 0 = do not stock.
+    -- Litres of plasma to keep in the local net, by fluid name. nil = do not stock.
     -- ae2fc carries a fluid through a pattern as "drop of <Fluid>" at one drop per
     -- litre, so a pattern's input count is already its volume -- nothing to measure.
     plasma = {
-        ["Helium Plasma"]        = 0,
-        ["Bismuth Plasma"]       = 0,
-        ["Radon Plasma"]         = 0,
-        ["Technetium Plasma"]    = 0,
-        ["Plutonium-241 Plasma"] = 0,
+        ["Helium Plasma"]        = nil,
+        ["Bismuth Plasma"]       = nil,
+        ["Radon Plasma"]         = nil,
+        ["Technetium Plasma"]    = nil,
+        ["Plutonium-241 Plasma"] = nil,
     },
 
     -- `plasma keep` tops a hatch up once it falls below this fraction of its
@@ -210,13 +211,13 @@ cfg.supply = {
     hatchMeteors = 256,
 
     -- Per-plasma override in LITRES, when the meteor figure above does not suit.
-    -- 0 = use hatchMeteors.
+    -- nil = use hatchMeteors.
     hatchLitres = {
-        ["Helium Plasma"]        = 0,
-        ["Bismuth Plasma"]       = 0,
-        ["Radon Plasma"]         = 0,
-        ["Technetium Plasma"]    = 0,
-        ["Plutonium-241 Plasma"] = 0,
+        ["Helium Plasma"]        = nil,
+        ["Bismuth Plasma"]       = nil,
+        ["Radon Plasma"]         = nil,
+        ["Technetium Plasma"]    = nil,
+        ["Plutonium-241 Plasma"] = nil,
     },
 
     -- Refill only once stock falls below this fraction of target, then fill to

@@ -30,7 +30,8 @@
 --                 edit, editHint, error }   -- see drawParams / drawPool
 --   miners      { { tierName, addr, state, stateKind, drone, distance,
 --                   parallels, parallelCap, overdrive, material, hatchLevel,
---                   hatchCapacity, hatchTarget, hatchFluid, staged }, ... }
+--                   hatchCapacity, hatchTarget, hatchFluid, staged,
+--                   pending }, ... }   -- pending: a queued change, in words
 --   kits        { { name, have, target, fill, crafts, from }, ... }  tier order
 --   plasmas     { { tier, name, have, target, fill, crafts, from, active }, ... }
 --   totals      { miners, mining, jobsKit, jobsPlasma, limitKit, limitPlasma }
@@ -230,7 +231,7 @@ end
 -- What a miner is doing, and how alarming that is. The kinds come from main.lua
 -- so the colour choice stays here and the diagnosis stays there.
 local STATE_COLOR = {
-    MINING = C.good, IDLE = C.dim, DRY = C.warn,
+    MINING = C.good, IDLE = C.dim, DRY = C.warn, STOPPING = C.accent2,
     ["NO DRONE"] = C.warn, ["NO STATION"] = C.crit, OFF = C.faint,
 }
 
@@ -407,6 +408,7 @@ end
 local MC = {
     tier = 2, addr = 7, state = 17, drone = 28, dist = 38, par = 45,
     od = 52, material = 58, bar = 77, level = 88, staged = 102, fluid = 111,
+    pending = 134,
 }
 
 local function drawMiners(state, x, y, w, h)
@@ -428,7 +430,8 @@ local function drawMiners(state, x, y, w, h)
     cell(ix, hy, MC.bar, 11, "HATCH", C.faint, inner)
     cell(ix, hy, MC.level, 14, "LEVEL", C.faint, inner)
     cell(ix, hy, MC.staged, 9, "STAGED", C.faint, inner)
-    cell(ix, hy, MC.fluid, inner - MC.fluid, "PLASMA", C.faint, inner)
+    cell(ix, hy, MC.fluid, 22, "PLASMA", C.faint, inner)
+    cell(ix, hy, MC.pending, inner - MC.pending, "PENDING", C.faint, inner)
 
     if #list == 0 then
         cell(ix, y + 3, 0, inner,
@@ -473,8 +476,13 @@ local function drawMiners(state, x, y, w, h)
                 C.faint, inner)
         end
         cell(ix, row, MC.staged, 9, m.staged and human(m.staged) or "-", C.dim, inner)
-        cell(ix, row, MC.fluid, inner - MC.fluid, m.hatchFluid or "(empty)",
+        cell(ix, row, MC.fluid, 22, m.hatchFluid or "(empty)",
             m.hatchFluid and C.mine or C.faint, inner)
+        -- A change asked for but not yet made. Without this a parameter write
+        -- that is waiting on a forty-second mining operation looks like one that
+        -- silently did nothing.
+        cell(ix, row, MC.pending, inner - MC.pending, m.pending or "",
+            C.warn, inner)
     end
 end
 
@@ -606,11 +614,17 @@ local function drawParams(state, x, y, w, h)
         if editing then
             cell(ix, row, 14, 26, "\xE2\x97\x82 " .. tostring(f.pending) .. " \xE2\x96\xB8",
                 C.focus, inner)
+        elseif f.queued then
+            -- Asked for, not yet taken: both values, so it is clear which is which.
+            cell(ix, row, 14, 26,
+                tostring(f.value or "-") .. " \xE2\x86\x92 " .. tostring(f.queued),
+                C.warn, inner)
         else
             cell(ix, row, 14, 26, tostring(f.value or "-"),
                 f.value and C.text or C.faint, inner)
         end
-        cell(ix, row, 41, inner - 41, f.note or "", C.faint, inner)
+        cell(ix, row, 41, inner - 41, f.note or "",
+            f.queued and C.warn or C.faint, inner)
     end
 
     local sy = y + h - 3

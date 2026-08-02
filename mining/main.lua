@@ -57,14 +57,19 @@ local ctx = cli.start({
             .. "value, ENTER applies. Both tables are recomputed from the value being "
             .. "dialled, so you see what a change would do BEFORE applying it.",
         "Distance, overdrive and a drone swap need the module STOPPED -- TecTech "
-            .. "accepts a parameter write no other way -- so applying one halts it, "
-            .. "writes, and re-allows work. It comes back on unless it was off.",
+            .. "accepts a parameter write no other way -- and a mining operation "
+            .. "runs for tens of seconds. So applying one QUEUES it: the module is "
+            .. "asked to stop, the controller waits in the background, and the write "
+            .. "happens the moment it is down. Work is re-allowed afterwards unless "
+            .. "it was off to begin with. The PENDING column says what each module "
+            .. "is still waiting on.",
         "Plasma is fleet-wide by default because a GT hatch holds one fluid at a "
             .. "time. Press P for the plasma list, arrows to choose, ENTER to select, "
             .. "ENTER again to confirm; every hatch holding something else is drained "
             .. "back into the network first, so the switch takes a few cycles to "
             .. "settle. A single module can be switched on its own from its detail "
-            .. "screen.",
+            .. "screen, and the controller then keeps it on that plasma rather than "
+            .. "putting it back on the fleet's.",
         "What to stock is read off the hardware: a module's input bus says which "
             .. "drone it runs, and that says which material its kits are made of. "
             .. "Set cfg.supply.target or cfg.supply.plasma to override a figure; "
@@ -188,8 +193,14 @@ if not net then log("No local ME controller found -- stock levels are unreadable
 -- ---- state -------------------------------------------------------------------
 
 local jobs = control.newJobs(jobLimits)
+
+-- Changes asked for but not yet made. A module has to be stopped before a
+-- parameter will take, and a mining operation runs for tens of seconds, so the
+-- controller works at these in the background instead of waiting.
+local queue = control.newQueue()
 local satisfied = {}            -- hysteresis latch, carried across cycles
 local activePlasma = nil        -- the plasma the fleet runs on
+local desiredPlasma = {}        -- address -> plasma a module was switched to
 local pendingPlasma = nil       -- chosen in the UI, applied by the next cycle
 local plasmaSlots = {}          -- plasma name -> database slot of its drop
 
@@ -296,6 +307,17 @@ end
 
 -- The plasma the fleet is on: whatever most hatches hold. Manual mode runs one
 -- plasma everywhere, so a disagreement means a switch is still settling.
+-- The plasma a module is MEANT to be on: what it was last told, which is not
+-- what its hatch holds while a switch is settling. Without this the controller
+-- sees a freshly drained hatch, decides the module has no plasma, and points it
+-- back at the fleet's -- undoing the switch every time.
+local function wantedPlasma(row)
+    local queued = queue:find(row.addr, "plasma")
+    if queued and queued.plasma then return queued.plasma end
+    if desiredPlasma[row.addr] then return desiredPlasma[row.addr] end
+    return activePlasma
+end
+
 local function detectPlasma(rows)
     local counts, best, bestN = {}, nil, 0
     for _, r in ipairs(rows) do
@@ -308,14 +330,6 @@ local function detectPlasma(rows)
     return best
 end
 
-local function stationsOf(rows)
-    local out = {}
-    for _, r in ipairs(rows) do
-        if r.station then out[#out + 1] = r.station end
-    end
-    return out
-end
-
 -- The database slot holding a plasma's ae2fc drop, cached: the fluid interfaces
 -- keep pointing at it, so it is stored once and reused for as long as the
 -- controller runs.
@@ -326,6 +340,23 @@ local function slotFor(p)
     if not slot then return nil, err end
     plasmaSlots[p.name] = slot
     return slot
+end
+
+-- A queued change in twenty columns: "OD 1.35 stopping". control.describe spells
+-- it out in full, which is right for the log and too wide for a table cell.
+local function pendingLabel(e)
+    local what
+    if e.field == "drone" then
+        local d = drones.get(e.value)
+        what = d and ("MK-" .. d.roman) or "drone"
+    elseif e.field == "distance" then
+        what = "dist " .. tostring(e.value)
+    elseif e.field == "overdrive" then
+        what = string.format("OD %.2f", e.value)
+    else
+        what = e.plasma and (e.plasma.name:gsub(" Plasma$", "")) or "plasma"
+    end
+    return what .. " " .. e.state
 end
 
 -- ---- one maintenance cycle ---------------------------------------------------
@@ -343,7 +374,6 @@ local function runCycle()
     local doneRead = profile.span("readFleet")
     local rows = readFleet(full)
     doneRead()
-    local stations = stationsOf(rows)
 
     -- Jobs first: a finished craft has already landed in the local net, so the
     -- stock read below sees it and the plan does not ask for it again.
@@ -358,58 +388,85 @@ local function runCycle()
         end
     end
 
-    -- A plasma chosen in the UI is applied here, in the control thread, because
-    -- draining hatches is slow and the key handler must stay responsive.
+    -- A fleet-wide plasma choice becomes one queued change per module, exactly as
+    -- an individual switch does. Each hatch then drains and refills at its own
+    -- pace, none of it blocks the loop, and the dashboard shows every one of them
+    -- working through it.
     if pendingPlasma then
-        local doneSwitch = profile.span("switch plasma")
         local p = pendingPlasma
         pendingPlasma = nil
         local slot, err = slotFor(p)
         if not slot then
             log("cannot stage " .. p.name .. ": " .. tostring(err))
         else
-            local results, returned = control.switchPlasma(stations, p, slot)
-            local failed = 0
-            for _, r in ipairs(results) do
-                if not r.ok then failed = failed + 1; log("  " .. tostring(r.err)) end
+            local n = 0
+            for _, r in ipairs(rows) do
+                if r.station and r.hasFluid then
+                    desiredPlasma[r.addr] = p
+                    queue:want(r.addr, "plasma", p.tier, computer.uptime(),
+                        { plasma = p, slot = slot })
+                    n = n + 1
+                end
             end
-            log(string.format("switched to %s%s%s", p.name,
-                returned > 0 and string.format(", returned %d L", returned) or "",
-                failed > 0 and string.format(", %d station(s) failed", failed) or ""))
             activePlasma = p
-            rows = readFleet(true)
+            log(string.format("switching %d module(s) to %s", n, p.name))
         end
-        doneSwitch()
     else
         activePlasma = detectPlasma(rows) or activePlasma
     end
 
     local doneHatch = profile.span("hatches")
+    -- Work at whatever each module has been asked to change. Before the hatches,
+    -- so a plasma switch gets its drain in before anything tries to top it up.
+    local doneQueue = profile.span("queued changes")
+    for _, r in ipairs(rows) do
+        local settled = control.stepModule(queue, r, computer.uptime(), ccfg)
+        for _, e in ipairs(settled) do
+            local what = control.describe(e)
+            if e.state == "done" then
+                log(string.format("%s: %s set", r.addr, what))
+            else
+                log(string.format("%s: %s FAILED -- %s", r.addr, what, tostring(e.error)))
+            end
+        end
+    end
+    doneQueue()
+
     if not paused and activePlasma then
         -- Assert the staging config for any station that has none: a hatch can
         -- only be filled from a tank that is pointed at the right fluid, and a
         -- previous run (or `plasma drain`) may have cleared it.
-        local slot = plasmaSlots[activePlasma.name] or select(1, slotFor(activePlasma))
-        if slot then
-            for _, r in ipairs(rows) do
-                if r.station and r.hasFluid and (r.staged or 0) <= 0
-                    and (r.hatchLevel or 0) <= 0 then
-                    r.station:setPlasmaSource(slot)
-                end
+        --
+        -- Per module, not fleet-wide: one that has been switched on its own must
+        -- be re-pointed at ITS plasma, and one mid-switch must not be touched at
+        -- all -- the queue is already draining it.
+        for _, r in ipairs(rows) do
+            if r.station and r.hasFluid and not queue:find(r.addr, "plasma")
+                and (r.staged or 0) <= 0 and (r.hatchLevel or 0) <= 0 then
+                local want = wantedPlasma(r)
+                local slot = want and (plasmaSlots[want.name] or select(1, slotFor(want)))
+                if slot then r.station:setPlasmaSource(slot) end
             end
         end
 
-        -- The levels readFleet just read, rather than reading them again.
-        local hatches = {}
+        -- The levels readFleet just read, rather than reading them again. Each
+        -- hatch is filled to ITS plasma's target, and one still being drained is
+        -- left out -- topping it up would refill what the switch is emptying.
+        local touched, moved = 0, 0
         for _, r in ipairs(rows) do
-            if r.station and r.hasFluid then
-                hatches[#hatches + 1] = {
-                    station = r.station, level = r.hatchLevel, capacity = r.hatchCapacity,
-                }
+            local switching = queue:find(r.addr, "plasma")
+            if r.station and r.hasFluid
+                and not (switching and switching.state ~= "filling") then
+                local want = wantedPlasma(r)
+                if want then
+                    local t, m = control.topUp({ {
+                        station = r.station, level = r.hatchLevel,
+                        capacity = r.hatchCapacity,
+                    } }, supply.hatchLitres(want, scfg), scfg.hatchRefill)
+                    touched, moved = touched + t, moved + m
+                end
             end
         end
-        local target = supply.hatchLitres(activePlasma, scfg)
-        local touched, moved = control.topUp(hatches, target, scfg.hatchRefill)
         if touched > 0 then
             log(string.format("topped up %d hatch(es), +%d L", touched, moved))
         end
@@ -419,7 +476,9 @@ local function runCycle()
     -- What to stock, and what to ask for.
     local demandFleet = {}
     for _, r in ipairs(rows) do
-        demandFleet[#demandFleet + 1] = { material = r.material, hasFluid = r.hasFluid }
+        demandFleet[#demandFleet + 1] = {
+            material = r.material, hasFluid = r.hasFluid, plasma = wantedPlasma(r),
+        }
     end
     local kitTargets, plasmaTargets, from =
         control.demand(demandFleet, scfg, ccfg, activePlasma)
@@ -501,6 +560,23 @@ local function runCycle()
         }
     end
 
+    -- What each module is waiting on, so the dashboard can show it rather than
+    -- leaving a change that takes a minute looking like one that did nothing.
+    for _, r in ipairs(rows) do
+        local waiting = queue:pending(r.addr)
+        if #waiting > 0 then
+            local e = waiting[1]
+            r.pending = pendingLabel(e)
+            if #waiting > 1 then r.pending = r.pending .. " +" .. (#waiting - 1) end
+            r.pendingNote = e.note
+            r.pendingCount = #waiting
+            -- A module told to stop is not idle, it is finishing an operation.
+            if e.state == "stopping" and r.state == "IDLE" then r.state = "STOPPING" end
+            if e.state == "stopping" and r.state == "MINING" then r.state = "STOPPING" end
+            r.stateKind = r.state
+        end
+    end
+
     local mining = 0
     for _, r in ipairs(rows) do if r.state == "MINING" then mining = mining + 1 end end
 
@@ -580,9 +656,9 @@ local function buildDetail(rows)
             note = "1 .. " .. control.MAX_DISTANCE
             pending = nav.edit and tostring(nav.edit.value) or nil
         elseif f.key == "overdrive" then
-            shown = live and string.format("%.1f", live) or nil
+            shown = live and string.format("%.2f", live) or nil
             note = "faster, but a smaller size bonus"
-            pending = nav.edit and string.format("%.1f", nav.edit.value) or nil
+            pending = nav.edit and string.format("%.2f", nav.edit.value) or nil
         else
             local pl = row.plasma
             shown = pl and pl.name or nil
@@ -598,8 +674,30 @@ local function buildDetail(rows)
             pending = pp and pp.name or nil
         end
 
+        -- A change already queued for this field: shown as "live -> target", with
+        -- the note saying what it is waiting for. Otherwise a parameter that takes
+        -- a minute to land looks like one that was never applied.
+        local queued, queuedNote = nil, nil
+        local q = queue:find(row.addr, f.key)
+        if q then
+            if f.key == "drone" then
+                local qd = drones.get(q.value)
+                queued = qd and ("MK-" .. qd.roman) or tostring(q.value)
+            elseif f.key == "overdrive" then
+                queued = string.format("%.2f", q.value)
+            elseif f.key == "plasma" then
+                queued = q.plasma and q.plasma.name or tostring(q.value)
+            else
+                queued = tostring(q.value)
+            end
+            queuedNote = q.state .. (q.note and ("  -- " .. q.note) or "")
+            if q.error then queuedNote = q.state .. "  -- " .. tostring(q.error) end
+        end
+
         fields[i] = {
-            label = f.label, kind = f.kind, value = shown, note = note,
+            label = f.label, kind = f.kind, value = shown,
+            note = queuedNote or note,
+            queued = queued,
             pending = (nav.edit and nav.edit.field == f.key) and pending or nil,
         }
     end
@@ -739,47 +837,28 @@ local quit = false
 -- a table worth reading whole.
 local PROFILE_FILE = "mining-profile.txt"
 
--- Switches ONE module's plasma, as opposed to the fleet-wide picker: the hatch
--- has to be emptied of the old fluid before it will take the new one, exactly as
--- for the whole fleet, so the same routine does it for a list of one.
-local function switchOne(row, p)
-    if not row.station or not row.hasFluid then
-        log(row.addr .. ": no plasma feed configured")
-        return
-    end
-    local slot, err = slotFor(p)
-    if not slot then
-        log(row.addr .. ": cannot stage " .. p.name .. ": " .. tostring(err))
-        return
-    end
-    local _, returned = control.switchPlasma({ row.station }, p, slot)
-    log(string.format("%s: plasma -> %s%s", row.addr, p.name,
-        returned > 0 and string.format(" (returned %d L)", returned) or ""))
-end
-
--- Carries out a committed edit. Everything here touches hardware and some of it
--- stops the module first, so it runs from the key handler only because the user
--- just asked for it and is watching -- unlike the plasma switch from the
--- dashboard, which is fleet-wide and queued for the control thread.
+-- Queues a committed edit. Nothing is written here: a parameter needs the module
+-- stopped, and a module mid-operation takes tens of seconds to get there, so the
+-- control thread works at it in the background and the dashboard shows it
+-- waiting. Which also means the key handler stays instant.
 local function commitEdit(row, field, value)
+    local extra
     if field == "plasma" then
         local p = plasmas.byTier[value]
-        if p then switchOne(row, p) end
-        return
-    end
-    local ok, err = control.applyParam(row.miner, field, value)
-    if ok then
-        local shown = value
-        if field == "drone" then
-            local d = drones.get(value)
-            shown = d and ("MK-" .. d.roman) or value
-        elseif field == "overdrive" then
-            shown = string.format("%.1f", value)
+        if not p then return end
+        if not row.station or not row.hasFluid then
+            log(row.addr .. ": no plasma feed configured")
+            return
         end
-        log(string.format("%s: %s -> %s", row.addr, field, tostring(shown)))
-    else
-        log(string.format("%s: %s not set -- %s", row.addr, field, tostring(err)))
+        local slot, err = slotFor(p)
+        extra = { plasma = p, slot = slot, slotError = err }
+        -- Recorded as this module's intent right away, so the staging logic stops
+        -- treating it as a module that has lost its plasma.
+        desiredPlasma[row.addr] = p
     end
+
+    local e = queue:want(row.addr, field, value, computer.uptime(), extra)
+    log(string.format("%s: %s queued", row.addr, (control.describe(e))))
 end
 
 local function handleKey(char, code)

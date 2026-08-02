@@ -266,6 +266,14 @@ cfg.control = {
     -- hatches hold one each; this is what refills them.
     hatchRefills = 4,
 
+    -- How long to keep waiting for a module to finish its operation before
+    -- giving up on a queued parameter change. TecTech only accepts a write while
+    -- the machine is STOPPED, and a mining operation runs for tens of seconds --
+    -- minutes, if the overdrive is throttled -- so this is a stuck-machine
+    -- backstop, not an expected wait. The change sits in the queue meanwhile and
+    -- the dashboard shows it waiting.
+    stopTimeout = 180,
+
     -- How many restock requests may be in flight at once, per kind. Each holds a
     -- crafting CPU on the main net until the fake pattern's inputs are pushed, so
     -- an uncapped controller could take the whole crafting bank. Plasma is one

@@ -63,20 +63,30 @@ function control.materialsByTier()
 end
 
 -- What the local net should hold, given what the fleet is actually running.
---   fleet   list of { material = <kit material or nil>, hasFluid = <bool> }
+--   fleet   list of { material = <kit material or nil>, hasFluid = <bool>,
+--                     plasma = <that module's plasma, or nil> }
 --   scfg    cfg.supply (target / plasma / hatchLitres / hatchMeteors)
 --   ccfg    cfg.control (kitsPerMiner / hatchRefills)
---   plasma  the plasma the fleet is set to, or nil
+--   plasma  the fleet default, for modules that name none of their own
 -- Returns kits (material -> kits), litres (fluid name -> L), and `from`
 -- (key -> "fleet" | "config") so the UI can say where a number came from.
 function control.demand(fleet, scfg, ccfg, plasma)
     scfg, ccfg = scfg or {}, ccfg or {}
     local kits, litres, from = {}, {}, {}
 
-    local perMaterial, fluidMiners = {}, 0
+    local perMaterial, perPlasma = {}, {}
     for _, m in ipairs(fleet or {}) do
         if m.material then perMaterial[m.material] = (perMaterial[m.material] or 0) + 1 end
-        if m.hasFluid then fluidMiners = fluidMiners + 1 end
+        -- Counted per plasma, not once for the fleet: a module switched on its own
+        -- burns a different fluid, and stocking only the majority's would starve it.
+        if m.hasFluid then
+            local p = m.plasma or plasma
+            if p then
+                local e = perPlasma[p.name]
+                if not e then e = { plasma = p, n = 0 }; perPlasma[p.name] = e end
+                e.n = e.n + 1
+            end
+        end
     end
 
     local perMiner = ccfg.kitsPerMiner or control.KITS_PER_MINER
@@ -85,10 +95,10 @@ function control.demand(fleet, scfg, ccfg, plasma)
         from[material] = "fleet"
     end
 
-    if plasma and fluidMiners > 0 then
-        local refills = ccfg.hatchRefills or control.HATCH_REFILLS
-        litres[plasma.name] = fluidMiners * supply.hatchLitres(plasma, scfg) * refills
-        from[plasma.name] = "fleet"
+    local refills = ccfg.hatchRefills or control.HATCH_REFILLS
+    for name, e in pairs(perPlasma) do
+        litres[name] = e.n * supply.hatchLitres(e.plasma, scfg) * refills
+        from[name] = "fleet"
     end
 
     -- An explicit target wins. nil in config.lua is "I have not said", so it never
@@ -221,41 +231,6 @@ function control.topUp(entries, target, refill)
     return touched, moved
 end
 
--- Points every station at `plasma`, draining any hatch still holding something
--- else -- a GT hatch takes one fluid and will refuse the new one until the old is
--- gone. Configs are cleared before any draining starts, so each interface tank is
--- free by the time a hatch pushes through it.
--- Returns a list of { station, ok, err, drained } and the litres given back.
-function control.switchPlasma(stations, plasma, dbSlot)
-    local results, returned = {}, 0
-
-    local wrong = {}
-    for _, st in ipairs(stations or {}) do
-        if st:hasFluid() then
-            local label = st:hatchFluid()
-            if label and label ~= plasma.name then
-                st:clearPlasmaSource()
-                wrong[st] = label
-            end
-        end
-    end
-    for st, label in pairs(wrong) do
-        local n = st:drainHatch() or 0
-        returned = returned + n
-        results[#results + 1] = { station = st, ok = true, drained = n, was = label }
-    end
-
-    for _, st in ipairs(stations or {}) do
-        if st:hasFluid() then
-            local ok, err = st:setPlasmaSource(dbSlot)
-            if not ok then
-                results[#results + 1] = { station = st, ok = false, err = err }
-            end
-        end
-    end
-    return results, returned
-end
-
 -- ---- the keyboard ------------------------------------------------------------
 --
 -- The whole navigation, as one state machine, kept here rather than inside
@@ -287,9 +262,9 @@ control.FIELDS = {
     { key = "drone",     label = "Drone",     kind = "list", min = 1, max = 13 },
     { key = "distance",  label = "Distance",  kind = "number", step = 1, page = 10,
       min = 1 },
-    { key = "overdrive", label = "Overdrive", kind = "number", step = 0.1, page = 0.5,
+    { key = "overdrive", label = "Overdrive", kind = "number", step = 0.05, page = 0.25,
       -- Not 0: mineTime divides by the overdrive, so a preview at 0 is infinite.
-      min = 0.1, max = 2 },
+      min = 0.05, max = 2 },
     { key = "plasma",    label = "Plasma",    kind = "list", min = 1, max = 5 },
 }
 
@@ -308,14 +283,23 @@ local function fieldByKey(key)
     end
 end
 
--- Clamps and rounds an edited value for its field. Overdrive is rounded to one
--- decimal because repeated +0.1 in binary floating point does not land on 1.3.
+-- Clamps and snaps an edited value for its field.
+--
+-- Snapped to a whole number of STEPS, not to a fixed number of decimals: the
+-- overdrive step is 0.05 and rounding that to one decimal would turn 1.05 into
+-- 1.1, so half the reachable values would be unreachable. The trailing round then
+-- clears the binary dust -- adding 0.05 twenty times does not land on 2 by
+-- itself, and a value shown as 1.35 has to be the 1.35 that gets written.
 local function clampField(f, v)
     local max = f.max
     if f.key == "distance" then max = control.MAX_DISTANCE end
     if f.min and v < f.min then v = f.min end
     if max and v > max then v = max end
-    if f.kind == "number" then v = math.floor(v * 10 + 0.5) / 10 end
+    if f.kind == "number" then
+        local step = f.step or 1
+        v = math.floor(v / step + 0.5) * step
+        v = math.floor(v * 1000 + 0.5) / 1000
+    end
     if f.key == "distance" then v = math.floor(v + 0.5) end
     return v
 end
@@ -451,74 +435,323 @@ function control.newNav()
     }
 end
 
--- ---- driving one module ------------------------------------------------------
-
--- Monotonic seconds and a yield, as transport.lua does them: computer.uptime()
--- and os.sleep() on the machine, os.clock() and nothing off it.
-local computer
-do local ok, c = pcall(require, "computer"); computer = ok and c or nil end
-
-local function now() return computer and computer.uptime() or os.clock() end
-local function pause(s) if os.sleep then os.sleep(s) end end
-
--- Runs `fn` with the module halted and then puts its work-allowed state back.
+-- ---- queued changes ----------------------------------------------------------
 --
--- TecTech accepts a parameter write only while the machine is STOPPED, and
--- setWorkAllowed is asynchronous -- a module can take up to ~0.5s to actually
--- halt -- so this polls isActive rather than guessing a delay (pump/main.lua
--- learned the same thing). The 2s cap is a stuck-machine backstop, not the
--- expected wait.
+-- A change to a module cannot simply be written. TecTech accepts a parameter
+-- write only while the machine is STOPPED, and a mining operation runs for forty
+-- seconds or more -- so halting a module and waiting a couple of seconds, as this
+-- used to, quietly failed every single time the module was busy. Which is most of
+-- the time.
 --
--- If the build cannot report whether work was allowed, the module is re-enabled:
--- in manual mode a module exists to run, and leaving one silently off after an
--- edit is the worse of the two mistakes. Returns fn's result, plus whether the
--- module actually stopped.
-local function withStopped(miner, fn)
-    local wasEnabled = miner:isEnabled()
-    miner:setEnabled(false)
+-- So changes are QUEUED and worked at a little each cycle until the module is
+-- ready to take them. Nothing blocks the event loop, and the dashboard can say
+-- what is waiting on what.
+--
+-- The queue also fixes a subtler failure. Switching ONE module's plasma drained
+-- its hatch and pointed it at the new fluid; the next cycle then saw an empty
+-- hatch, concluded the module had no plasma, and re-pointed it at the FLEET's --
+-- undoing the switch before it could take. What was missing is an intent that
+-- outlives a cycle, which is exactly what a queue is.
+--
+-- An entry:
+--   addr    the module it belongs to
+--   field   "drone" | "distance" | "overdrive" | "plasma"
+--   value   the target: a drone tier, a distance, an overdrive, a plasma tier
+--   state   "waiting" | "stopping" | "loading" | "draining" | "filling"
+--           | "done" | "failed"
+--   since   uptime when it was queued, which is what the wait is measured from
+--   note    what it is waiting for, in words, for the dashboard
+--   error   why it gave up
 
-    local deadline = now() + 2
-    while miner:isActive() and now() < deadline do pause(0.1) end
-    local stopped = not miner:isActive()
+-- How long to keep waiting for a module to finish what it is doing. A mining
+-- operation is tens of seconds and a throttled one can be minutes, so this is a
+-- stuck-machine backstop rather than an expected wait.
+control.STOP_TIMEOUT = 180
 
-    local ok, err = fn()
+local Queue = {}
+Queue.__index = Queue
+control.Queue = Queue
 
-    miner:setEnabled(wasEnabled ~= false)
-    return ok, err, stopped
+function control.newQueue()
+    return setmetatable({ byAddr = {} }, Queue)
 end
 
-control.withStopped = withStopped
+-- Queues a change, replacing any pending one for the same module and field:
+-- asking for overdrive 1.2 and then 1.3 before either lands should end at 1.3,
+-- not visit both. `extra` carries whatever the field needs (a plasma entry and
+-- its database slot).
+function Queue:want(addr, field, value, at, extra)
+    local list = self.byAddr[addr]
+    if not list then list = {}; self.byAddr[addr] = list end
 
--- Writes one edited parameter to a module. `field` is a control.FIELDS key;
--- plasma is NOT handled here (it is a station operation, see switchPlasma).
--- Returns true, or false + why.
-function control.applyParam(miner, field, value)
-    if field == "distance" or field == "overdrive" then
-        local ok, err, stopped = withStopped(miner, function()
-            if field == "distance" then return miner:setDistance(value) end
-            return miner:setOverdrive(value)
-        end)
-        if not ok then return false, tostring(err) end
-        -- A write to a machine that never halted is the one that looks like it
-        -- worked and did not, so say so rather than report success.
-        if not stopped then
-            return false, "the module would not stop, so the write may not have taken"
+    local e = { addr = addr, field = field, value = value,
+                state = "waiting", since = at or 0 }
+    if extra then for k, v in pairs(extra) do e[k] = v end end
+
+    for i, old in ipairs(list) do
+        if old.field == field then
+            -- Carry the work already done across the replacement. wasEnabled
+            -- above all: it was read BEFORE the module was halted, and re-reading
+            -- it now would report "off" and leave the module off for good.
+            e.wasEnabled = old.wasEnabled
+            list[i] = e
+            return e
         end
-        return true
+    end
+    list[#list + 1] = e
+    return e
+end
+
+-- The unsettled changes for a module, in the order they were asked for.
+function Queue:pending(addr)
+    local out = {}
+    for _, e in ipairs(self.byAddr[addr] or {}) do
+        if e.state ~= "done" and e.state ~= "failed" then out[#out + 1] = e end
+    end
+    return out
+end
+
+-- Every unsettled change, for the dashboard.
+function Queue:all()
+    local out = {}
+    for _, list in pairs(self.byAddr) do
+        for _, e in ipairs(list) do
+            if e.state ~= "done" and e.state ~= "failed" then out[#out + 1] = e end
+        end
+    end
+    table.sort(out, function(a, b)
+        if a.since ~= b.since then return a.since < b.since end
+        return a.field < b.field
+    end)
+    return out
+end
+
+-- What is queued for one module and field, or nil. The controller asks this to
+-- know a module's INTENDED plasma, which is not what its hatch holds yet.
+function Queue:find(addr, field)
+    for _, e in ipairs(self.byAddr[addr] or {}) do
+        if e.field == field and e.state ~= "done" and e.state ~= "failed" then
+            return e
+        end
+    end
+    return nil
+end
+
+-- Removes settled entries and hands them back, so the caller can report them.
+function Queue:reap(addr)
+    local list = self.byAddr[addr]
+    if not list then return {} end
+    local done, keep = {}, {}
+    for _, e in ipairs(list) do
+        if e.state == "done" or e.state == "failed" then done[#done + 1] = e
+        else keep[#keep + 1] = e end
+    end
+    self.byAddr[addr] = (#keep > 0) and keep or nil
+    return done
+end
+
+-- ---- carrying a change out ---------------------------------------------------
+
+-- Writes one parameter to a module that is ALREADY STOPPED. The stopping is the
+-- queue's job; this is only the write.
+function control.writeParam(miner, field, value)
+    if field == "distance" then return miner:setDistance(value) end
+    if field == "overdrive" then return miner:setOverdrive(value) end
+    return false, "cannot write '" .. tostring(field) .. "' as a parameter"
+end
+
+local function restoreEnabled(miner, entries)
+    local wasEnabled
+    for _, e in ipairs(entries) do
+        if e.wasEnabled ~= nil then wasEnabled = e.wasEnabled end
+    end
+    -- Where the build cannot report whether work was allowed, the module is
+    -- re-enabled: in manual mode a module exists to run, and leaving one silently
+    -- off after an edit is the worse of the two mistakes.
+    miner:setEnabled(wasEnabled ~= false)
+end
+
+-- Advances the parameter changes queued for one module. They share a single stop:
+-- if a distance and an overdrive are both waiting, both are written while the
+-- module is down rather than stopping it twice.
+local function stepParams(entries, row, at, timeout)
+    local miner = row.miner
+
+    -- Ask it to stop, once, remembering first whether it was allowed to work.
+    local starting = false
+    for _, e in ipairs(entries) do
+        if e.state == "waiting" then starting = true end
+    end
+    if starting then
+        local wasEnabled
+        for _, e in ipairs(entries) do
+            if e.wasEnabled ~= nil then wasEnabled = e.wasEnabled end
+        end
+        if wasEnabled == nil then wasEnabled = miner:isEnabled() end
+        miner:setEnabled(false)
+        for _, e in ipairs(entries) do
+            if e.wasEnabled == nil then e.wasEnabled = wasEnabled end
+            if e.state == "waiting" then e.state = "stopping" end
+        end
     end
 
-    if field == "drone" then
-        if not miner.station then return false, "no station configured" end
-        local drone = drones.get(value)
-        if not drone then return false, "invalid drone tier " .. tostring(value) end
-        local ok, err = withStopped(miner, function()
-            return miner.station:setDrone(drone, 1)
-        end)
-        if not ok then return false, tostring(err) end
-        return true
+    -- A drone already on its way is polled whatever the machine is doing: it goes
+    -- into the input bus, which does not care.
+    local loading = false
+    for _, e in ipairs(entries) do
+        if e.state == "loading" then
+            row.station:pollDrone(e.job)
+            if e.job.phase == "done" then
+                e.state = "done"
+            elseif e.job.phase == "error" then
+                e.state, e.error = "failed", e.job.err
+            else
+                loading = true
+                e.note = "waiting for the drone to arrive from ME"
+            end
+        end
     end
 
-    return false, "cannot set '" .. tostring(field) .. "' here"
+    local stopping = {}
+    for _, e in ipairs(entries) do
+        if e.state == "stopping" then stopping[#stopping + 1] = e end
+    end
+
+    if #stopping > 0 then
+        if miner:isActive() then
+            local oldest = at
+            for _, e in ipairs(stopping) do
+                if e.since < oldest then oldest = e.since end
+            end
+            local waited = at - oldest
+            for _, e in ipairs(stopping) do
+                e.note = string.format("waiting for the module to finish (%ds)",
+                    math.floor(waited))
+            end
+            if waited > timeout then
+                for _, e in ipairs(stopping) do
+                    e.state = "failed"
+                    e.error = string.format("still running after %ds", math.floor(waited))
+                end
+                restoreEnabled(miner, entries)
+            end
+            return
+        end
+
+        -- Stopped. Write everything waiting on that.
+        for _, e in ipairs(stopping) do
+            if e.field == "drone" then
+                -- Non-blocking: ask ME for it now and poll on later cycles, so a
+                -- slow stock does not freeze the dashboard for ten seconds.
+                local drone = drones.get(e.value)
+                if not row.station then
+                    e.state, e.error = "failed", "no station configured"
+                elseif not drone then
+                    e.state, e.error = "failed", "invalid drone tier " .. tostring(e.value)
+                else
+                    e.job = row.station:beginDrone(drone, 1)
+                    if e.job.phase == "done" then e.state = "done"
+                    elseif e.job.phase == "error" then e.state, e.error = "failed", e.job.err
+                    else e.state, loading = "loading", true end
+                end
+            else
+                local ok, err = control.writeParam(miner, e.field, e.value)
+                if ok then e.state = "done" else e.state, e.error = "failed", tostring(err) end
+            end
+        end
+    end
+
+    -- Only let it run again once nothing is still mid-flight.
+    if not loading then
+        local busy = false
+        for _, e in ipairs(entries) do
+            if e.state == "stopping" or e.state == "loading" then busy = true end
+        end
+        if not busy then restoreEnabled(miner, entries) end
+    end
+end
+
+-- Advances a queued plasma change. No stop is needed -- it is a station
+-- operation -- but a GT hatch holds one fluid, so the old one has to go first and
+-- that takes a cycle or two.
+local function stepPlasma(e, row, at, timeout)
+    local st = row.station
+    if not st or not row.hasFluid then
+        e.state, e.error = "failed", "no plasma feed configured"
+        return
+    end
+    if not e.slot then
+        e.state, e.error = "failed", e.slotError or "no database slot for the drop"
+        return
+    end
+
+    if e.state == "waiting" then
+        -- Clear the staging config FIRST, so the interface tank is free to take
+        -- the drained fluid back rather than refusing it as the wrong one.
+        st:clearPlasmaSource()
+        e.state = "draining"
+    end
+
+    if e.state == "draining" then
+        local level = row.hatchLevel or 0
+        if level > 0 and row.hatchFluid ~= e.plasma.name then
+            st:drainHatch()
+            e.note = "draining the old plasma"
+            if at - e.since > timeout then
+                e.state, e.error = "failed", "the hatch would not empty"
+            end
+            return
+        end
+        local ok, err = st:setPlasmaSource(e.slot)
+        if not ok then e.state, e.error = "failed", tostring(err); return end
+        e.state = "filling"
+        e.note = "waiting for the hatch to take it"
+        return
+    end
+
+    if e.state == "filling" then
+        if row.hatchFluid == e.plasma.name then e.state = "done"; return end
+        e.note = "waiting for the hatch to take it"
+        if at - e.since > timeout then
+            e.state, e.error = "failed", "the hatch never took it -- is the plasma in stock?"
+        end
+    end
+end
+
+-- Advances everything queued for one module. `row` is the fleet row: its miner,
+-- its station and the hatch figures already read this cycle.
+-- Returns the entries that settled (removed from the queue) and how many are
+-- still pending.
+function control.stepModule(queue, row, at, cfg)
+    local entries = queue:pending(row.addr)
+    if #entries == 0 then return {}, 0 end
+    local timeout = (cfg and cfg.stopTimeout) or control.STOP_TIMEOUT
+
+    local params = {}
+    for _, e in ipairs(entries) do
+        if e.field == "plasma" then stepPlasma(e, row, at, timeout)
+        else params[#params + 1] = e end
+    end
+    if #params > 0 then stepParams(params, row, at, timeout) end
+
+    local settled = queue:reap(row.addr)
+    return settled, #queue:pending(row.addr)
+end
+
+-- A one-line description of a queued change, for the dashboard.
+function control.describe(e, plasmas)
+    local what
+    if e.field == "drone" then
+        local d = drones.get(e.value)
+        what = "drone " .. (d and ("MK-" .. d.roman) or tostring(e.value))
+    elseif e.field == "plasma" then
+        what = (e.plasma and e.plasma.name) or "plasma"
+    elseif e.field == "overdrive" then
+        what = string.format("overdrive %.2f", e.value)
+    else
+        what = e.field .. " " .. tostring(e.value)
+    end
+    return what, e.state
 end
 
 -- ---- component edge ---------------------------------------------------------

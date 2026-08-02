@@ -143,6 +143,28 @@ function Miner:setStatic()
     return self:setMode(0)
 end
 
+-- Reads back every input parameter we drive, so a run that has to change them can
+-- put them back afterwards (setup does). A parameter that cannot be read comes
+-- back nil, and restore() then leaves that one alone rather than guessing.
+function Miner:snapshot()
+    return {
+        distance = readParam(self.proxy, PARAM.DISTANCE),
+        maxParallels = readParam(self.proxy, PARAM.MAX_PARALLELS),
+        overdrive = readParam(self.proxy, PARAM.OVERDRIVE),
+        mode = readParam(self.proxy, PARAM.MODE),
+    }
+end
+
+-- Puts back what snapshot() read. Like any parameter write, this only takes while
+-- the machine is STOPPED -- call setEnabled(false) and let it settle first.
+function Miner:restore(snap)
+    if type(snap) ~= "table" then return end
+    if snap.distance then writeParam(self.proxy, PARAM.DISTANCE, snap.distance) end
+    if snap.maxParallels then writeParam(self.proxy, PARAM.MAX_PARALLELS, snap.maxParallels) end
+    if snap.overdrive then writeParam(self.proxy, PARAM.OVERDRIVE, snap.overdrive) end
+    if snap.mode then writeParam(self.proxy, PARAM.MODE, snap.mode) end
+end
+
 -- Drone loading ------------------------------------------------------------
 
 -- Attaches the item-transport station (transposer + ME interface + input bus)

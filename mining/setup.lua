@@ -54,6 +54,7 @@ local transport = require("transport")
 local dbslots = require("db")
 local supply = require("supply")
 local plasmas = require("plasmas")
+local meteors = require("meteors")
 
 local INPUT_BUS_NAME = "gt.blockmachines"
 local INTERFACE_NAMES = {
@@ -638,6 +639,88 @@ local function purgeFeeds(scans, itemPairs, fluidPairs)
     return emptied, drained, stuck
 end
 
+-- A distance at which this drone tier and module tier can actually find
+-- something. Detection needs a module to START mining, and it will not start with
+-- nothing in range -- which is indistinguishable from a wiring fault.
+--
+-- There is no single number that works: what is reachable depends on the
+-- distance, the drone tier AND the module tier all at once, so every module needs
+-- its own. The pool only changes where some meteor's range begins or ends, so only
+-- those distances are worth testing.
+--
+-- Among the distances that yield anything, the one whose cheapest meteor needs the
+-- least COMPUTATION wins: a module starved of computation will not start either,
+-- and setup has no way to give it more. Meteors the module could not power at one
+-- parallel are ignored, since it cannot run those at all. Ties go to the bigger
+-- pool, then the shorter distance. Returns nil if nothing is ever reachable.
+local distanceCache = {}
+
+local function probeDistance(droneTier, moduleTier, voltage)
+    local key = droneTier .. ":" .. moduleTier .. ":" .. voltage
+    local cached = distanceCache[key]
+    if cached ~= nil then return cached or nil end
+
+    local seen, grid = {}, {}
+    for _, m in ipairs(meteors.list) do
+        for _, d in ipairs({ m.distance[1], m.distance[2] + 1 }) do
+            if d >= 1 and not seen[d] then seen[d] = true; grid[#grid + 1] = d end
+        end
+    end
+    table.sort(grid)
+
+    local best, bestComp, bestCount
+    for _, d in ipairs(grid) do
+        local cheapest, count = nil, 0
+        for _, m in ipairs(meteors.list) do
+            if meteors.canFind(m, d, droneTier, moduleTier) then
+                local s = meteors.scale(m, droneTier)
+                if s and s.eut <= voltage then
+                    count = count + 1
+                    if not cheapest or m.computation < cheapest then cheapest = m.computation end
+                end
+            end
+        end
+        if cheapest and (not best or cheapest < bestComp
+            or (cheapest == bestComp and count > bestCount)) then
+            best, bestComp, bestCount = d, cheapest, count
+        end
+    end
+
+    distanceCache[key] = best or false
+    return best
+end
+
+-- Points every module at something it can actually mine, and takes a snapshot so
+-- the run can put the settings back. Parameter writes only take while the machine
+-- is STOPPED, so this must run after prepare() has switched them off and waited.
+--
+-- Distance mode goes to static as well: left on automatic the module sweeps the
+-- distance itself and would wander off whatever we chose. Overdrive and max
+-- parallels are forced to sane values for the same reason a distance is chosen --
+-- a module at zero parallels, or zero overdrive, never starts.
+-- Returns the snapshots, keyed by miner address.
+local function aimMiners(minerList, droneTier)
+    local snaps, aimed, stuck = {}, 0, 0
+    for _, m in ipairs(minerList) do
+        snaps[m.address] = m:snapshot()
+        local d = probeDistance(droneTier, m.tier or 1, m.voltage or 0)
+        if not d then
+            stuck = stuck + 1
+            say("  %s.. (%s): no meteor is reachable with the probe drone -- it cannot "
+                .. "be identified.", m.address:sub(1, 8), tostring(m.tierName))
+        else
+            m:setStatic()
+            m:setDistance(d)
+            m:setOverdrive(1)
+            m:setMaxParallels(m.parallels or 1)
+            aimed = aimed + 1
+            detail("  %s.. (%s): distance %d, %d parallel(s)",
+                m.address:sub(1, 8), tostring(m.tierName), d, m.parallels or 1)
+        end
+    end
+    return snaps, aimed, stuck
+end
+
 -- Miner state readers.
 local function minerActive(m)  -- currently mining
     local ok, v = pcall(m.proxy.isMachineActive)
@@ -771,6 +854,8 @@ local M = {
     minerOn = minerOn,
     clearStaging = clearStaging,
     purgeFeeds = purgeFeeds,
+    probeDistance = probeDistance,
+    aimMiners = aimMiners,
     prepare = prepare,
     pickDatabase = pickDatabase,
     INTERFACE_NAMES = INTERFACE_NAMES,
@@ -862,6 +947,13 @@ local minerList = miners.discover()
 -- Clean slate: clear leftover drone configs, stop miners, wait for them to idle.
 step("Preparing miners (clearing drone configs, waiting for idle)...")
 local wasOn = prepare(interfaceComps, minerList)
+
+-- Point every module at something the probe drone can actually mine. Must be here:
+-- the miners are stopped and settled, and a parameter write does not take on a
+-- running machine.
+local snaps, aimed, stuckAim = aimMiners(minerList, probe.tier or 1)
+stepEnd("Aimed %d of %d miner(s) at a reachable meteor%s", aimed, #minerList,
+    stuckAim > 0 and string.format(" (%d have none)", stuckAim) or "")
 stepEnd("Found %d transposer(s), %d interface(s), %d miner(s)",
     #transposers, #interfaceComps, #minerList)
 
@@ -1200,7 +1292,11 @@ if #fluidStations > 0 then
     end
 end
 
--- Restore miners to their original on/off state, and tidy the probe metadata.
+-- Give the miners back exactly as they were. Parameters only accept a write while
+-- the machine is stopped, so they go back BEFORE the on/off state does.
+for _, m in ipairs(minerList) do m:setEnabled(false) end
+waitIdle(minerList)
+for _, m in ipairs(minerList) do m:restore(snaps[m.address]) end
 for _, m in ipairs(minerList) do m:setEnabled(wasOn[m.address] == true) end
 -- The probe metadata stays put: the slots are named, so a later run reuses them
 -- rather than tripping over them, and leaving them filled saves re-storing.

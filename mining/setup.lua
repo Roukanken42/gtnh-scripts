@@ -87,6 +87,8 @@ local PROBE_PLASMA_L = 8000
 local PROBE_KITS = 256
 -- How long to wait for a staged fluid to show up.
 local FLUID_TIMEOUT = 20
+-- One ME fluid interface tank, kept as headroom on top of what the hatches need.
+local STAGING_L = 16000
 
 -- ---- helpers -------------------------------------------------------------
 
@@ -132,32 +134,60 @@ local function tankCount(tp, side)
     return real
 end
 
+-- How many item slots a side has. Nothing to do with fluids -- see tankCount.
+local function inventorySize(tp, side)
+    local ok, n = pcall(tp.getInventorySize, side)
+    return (ok and tonumber(n)) or 0
+end
+
 -- Classify a transposer's six sides:
---   ifSides       ME interface (item staging)
---   busSides      GT input bus
---   hatchSides    GT input hatch (a bus with a tank)
---   fluidIfSides  ME interface exposing tanks (fluid staging)
--- One transposer cannot serve both items and fluids, so in practice a transposer
--- comes back with either buses or hatches, not both.
+--   ifSides       ME interface, item staging
+--   fluidIfSides  ME interface, fluid staging
+--   busSides      GT input bus  -- takes drones and kits
+--   hatchSides    GT input hatch -- takes plasma
+-- plus a per-side detail list for the printout, because getting this wrong is
+-- silent otherwise: a mislabelled side just means nothing is ever detected.
+--
+-- One ME interface can stage BOTH items and fluids, so an interface side goes in
+-- ifSides and, when it has tanks, fluidIfSides as well. One transposer can serve
+-- both too, so a transposer may come back with buses AND hatches.
+--
+-- A GT block is decided by its TANK alone: an input hatch also has item slots
+-- (for cells, not drones), so slots cannot be used to spot a bus. Capacity rather
+-- than tank level, since an empty hatch reads level 0 exactly like a bus.
 local function scanSides(tp)
-    local ifSides, busSides, hatchSides, fluidIfSides = {}, {}, {}, {}
+    local ifSides, busSides, hatchSides, fluidIfSides, detail = {}, {}, {}, {}, {}
     for side = 0, 5 do
         local ok, name = pcall(tp.getInventoryName, side)
         name = ok and name or nil
+        local slots = inventorySize(tp, side)
         local tanks = tankCount(tp, side)
-        if name == INPUT_BUS_NAME then
-            if tanks > 0 then hatchSides[#hatchSides + 1] = side
-            else busSides[#busSides + 1] = side end
-        elseif name and INTERFACE_NAMES[name] then
+        local kind
+
+        if name and INTERFACE_NAMES[name] then
             ifSides[#ifSides + 1] = side
-            if tanks > 0 then fluidIfSides[#fluidIfSides + 1] = side end
+            kind = "interface"
+            if tanks > 0 then
+                fluidIfSides[#fluidIfSides + 1] = side
+                kind = "interface+fluid"
+            end
         elseif tanks > 0 then
-            -- Has a tank but no name we know: treat it as a hatch rather than
-            -- discarding it, and let detection decide.
+            -- Tank wins: this is a hatch even though it has slots too.
             hatchSides[#hatchSides + 1] = side
+            kind = "hatch"
+        elseif name == INPUT_BUS_NAME then
+            busSides[#busSides + 1] = side
+            kind = "bus"
+        elseif slots > 0 or name then
+            kind = "-"
+        end
+
+        if kind then
+            detail[#detail + 1] = { side = side, name = name or "?",
+                slots = slots, tanks = tanks, kind = kind }
         end
     end
-    return ifSides, busSides, hatchSides, fluidIfSides
+    return ifSides, busSides, hatchSides, fluidIfSides, detail
 end
 
 -- Stores the probe drone's metadata into the database via the local net (for use
@@ -255,6 +285,42 @@ local function ensureKits(net, material, itf, dbAddr)
     return true, string.format("%d %s kit(s) in stock", have, material)
 end
 
+-- Makes sure the local net actually HOLDS the plasma we mean to probe with. A
+-- fluid interface can only stage what its network has, so without this every
+-- hatch stays empty and every hatch-to-miner pairing fails -- and fails silently,
+-- because an unfilled hatch looks exactly like a wrong side.
+-- Returns true, or false + reason.
+local function ensurePlasma(net, entry, itf, litres)
+    if not entry then return false, "no plasma pattern to stock from" end
+    local function have()
+        return supply.plasmaInStock(entry, supply.stock({ entry }, net))
+    end
+
+    local now = have()
+    if now >= litres then
+        return true, string.format("%d L of %s in the local net", now, entry.plasma.name)
+    end
+
+    local crafts = math.ceil((litres - now) / math.max(1, entry.perCraft))
+    print(string.format("  stocking %s: %d of %d L, requesting %d craft(s)...",
+        entry.plasma.name, now, litres, crafts))
+    local job, err = supply.request(itf, entry, crafts)
+    if not job then return false, tostring(err) end
+
+    local deadline = computer.uptime() + 30
+    while computer.uptime() < deadline do
+        if supply.jobState(job) ~= "computing" then break end
+        os.sleep(POLL_INTERVAL)
+    end
+    -- The fluid can take a moment to land after the job itself reports done.
+    deadline = computer.uptime() + 10
+    while computer.uptime() < deadline and have() < litres do os.sleep(POLL_INTERVAL) end
+
+    now = have()
+    if now <= 0 then return false, "no " .. entry.plasma.name .. " arrived" end
+    return true, string.format("%d L of %s in the local net", now, entry.plasma.name)
+end
+
 -- Puts a plasma's ae2fc drop in the database, which is the only way to name a
 -- fluid to setFluidInterfaceConfiguration -- the local net holds plasma as fluid,
 -- never as drops, so it is lifted out of the supply interface's own pattern.
@@ -272,7 +338,7 @@ local function stagePlasmaDrop(itf, dbAddr)
 
     local ok, err = supply.storePlasmaDrop(itf, best, database, PROBE_DROP_SLOT)
     if not ok then return nil, tostring(err) end
-    return best.plasma, PROBE_DROP_SLOT
+    return best, PROBE_DROP_SLOT
 end
 
 -- Finds which me_interface a FLUID transposer stages through, and on which side:
@@ -395,7 +461,9 @@ local M = {
     storeProbe = storeProbe,
     detectInterface = detectInterface,
     tankCount = tankCount,
+    inventorySize = inventorySize,
     ensureKits = ensureKits,
+    ensurePlasma = ensurePlasma,
     stagePlasmaDrop = stagePlasmaDrop,
     detectFluidInterface = detectFluidInterface,
     minerActive = minerActive,
@@ -455,8 +523,9 @@ else
     print("WARNING: unknown material for the probe drone; cannot check kits.")
 end
 
-local probePlasma, dropSlot = stagePlasmaDrop(supplyItf, dbAddr)
-if not probePlasma then
+local plasmaEntry, dropSlot = stagePlasmaDrop(supplyItf, dbAddr)
+local probePlasma = plasmaEntry and plasmaEntry.plasma
+if not plasmaEntry then
     print("WARNING: no plasma to probe with (" .. tostring(dropSlot) .. ").")
     print("         Input hatches cannot be matched to miners without it; buses still can.")
     dropSlot = nil
@@ -474,14 +543,46 @@ print(string.format("Found %d transposer(s), %d interface(s), %d miner(s).",
 print("Preparing (clearing drone configs, stopping miners, waiting for idle)...")
 local wasOn = prepare(interfaceComps, minerList)
 
--- 3. Pair each transposer with its interface, and collect what it reaches.
--- A transposer serves items OR fluids, never both, so it yields either input
--- buses or input hatches.
+-- 3. Pair each transposer with its interface(s), and collect what it reaches.
+-- A transposer may serve items AND fluids, and one ME interface may stage both,
+-- so a transposer can yield input buses and input hatches together.
 local feeds = {}        -- item: { transposer, interface, interfaceSide, inputBusSide }
 local fluidFeeds = {}   -- fluid: { transposer, interface, interfaceSide, inputHatchSide }
+
+-- Scan every transposer's sides FIRST. Two reasons: the hatch count decides how
+-- much plasma to stock before any of it can be filled, and the printout below is
+-- the only way to see a misread side -- detection just quietly finds nothing.
+local scans, hatchTotal = {}, 0
 for _, tpAddr in ipairs(transposers) do
     local tp = component.proxy(tpAddr)
-    local ifSides, busSides, hatchSides, fluidIfSides = scanSides(tp)
+    local ifSides, busSides, hatchSides, fluidIfSides, detail = scanSides(tp)
+    scans[#scans + 1] = { addr = tpAddr, tp = tp, ifSides = ifSides, busSides = busSides,
+        hatchSides = hatchSides, fluidIfSides = fluidIfSides }
+    hatchTotal = hatchTotal + #hatchSides
+
+    print(string.format("  %s..: %d interface(s) (%d fluid), %d bus(es), %d hatch(es)",
+        tpAddr:sub(1, 8), #ifSides, #fluidIfSides, #busSides, #hatchSides))
+    for _, d in ipairs(detail) do
+        print(string.format("      side %d %-11s %-34s %d slot(s), %d tank(s)",
+            d.side, d.kind, d.name, d.slots, d.tanks))
+    end
+end
+
+-- Plasma has to be IN the local net before a fluid interface can stage any: the
+-- interface only offers what its network holds.
+if hatchTotal > 0 and plasmaEntry then
+    local want = hatchTotal * PROBE_PLASMA_L + STAGING_L
+    local okP, msg = ensurePlasma(net, plasmaEntry, supplyItf, want)
+    print((okP and "Plasma OK: " or "WARNING: plasma -- ") .. tostring(msg))
+    if not okP then
+        print("         hatches cannot be filled, so they cannot be matched to miners.")
+    end
+end
+
+for _, s in ipairs(scans) do
+    local tpAddr, tp = s.addr, s.tp
+    local ifSides, busSides = s.ifSides, s.busSides
+    local hatchSides, fluidIfSides = s.hatchSides, s.fluidIfSides
     local tag = tpAddr:sub(1, 8)
 
     if #busSides > 0 then
@@ -790,9 +891,9 @@ for _, a in ipairs(keys) do
     end
 end
 if withoutPlasma > 0 then
-    print(string.format("%d module(s) have no plasma feed. Each needs its OWN transposer "
-        .. "touching an input hatch and an ME fluid interface", withoutPlasma))
-    print("(one transposer cannot serve both items and fluids).")
+    print(string.format("%d module(s) have no plasma feed. Each needs a transposer touching "
+        .. "an input hatch and an ME interface with tanks", withoutPlasma))
+    print("(the same transposer and interface that carry its items will do).")
 end
 print("Keep cfg.dryRun = true until you've watched a drone move, then flip it.")
 

@@ -23,8 +23,9 @@ local cfg = {}
 --       interfaceSlot = 1,                 -- staging slot; distinct per station
 --                                          -- when several share one interface
 --
---       -- Plasma feed (optional). A SECOND transposer, because one cannot serve
---       -- an item inventory and a tank at the same time. All four go together.
+--       -- Plasma feed (optional). May reuse the transposer and interface above
+--       -- -- both can carry items and fluids -- or name different ones. All
+--       -- four go together.
 --       fluidTransposer    = "<transposer-address>",
 --       fluidInterface     = "<me_interface-address>",   -- the FLUID interface
 --       fluidInterfaceSide = 1,            -- transposer side facing it

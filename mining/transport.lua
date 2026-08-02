@@ -5,9 +5,11 @@
 --
 --   item half   a transposer touching BOTH the module's input BUS and an ME
 --               interface. Carries drones and mining kits.
---   fluid half  a SECOND transposer touching the module's input HATCH and an ME
---               fluid interface. Carries plasma. It has to be its own transposer:
---               one cannot serve an item inventory and a tank at the same time.
+--   fluid half  a transposer touching the module's input HATCH and an ME
+--               interface with tanks. Carries plasma. It may be the SAME
+--               transposer and the SAME interface as the item half -- both can
+--               serve items and fluids -- but it is addressed separately, so a
+--               module whose plasma comes from elsewhere still works.
 --
 -- Both halves share the station's database component. The fluid half is optional
 -- -- a station without it simply has no plasma feed (Station:hasFluid()).

@@ -28,7 +28,13 @@
 --      settle in between, because isMachineActive lags.
 --   6. Each (miner -> item transposer + fluid transposer + sides) becomes a station.
 --
--- Run from this folder:  setup
+-- Run from this folder:
+--   setup              a one-screen summary: what was found, what was paired,
+--                      what was written, and anything that went wrong
+--   setup --verbose    adds the detail that only matters once something HAS gone
+--                      wrong -- every side considered and how it was classified,
+--                      every interface probed and what it said, the database map
+--
 -- require("setup") returns the helper functions (for debugging) without running.
 
 local component = require("component")
@@ -90,6 +96,58 @@ local STOCK_TIMEOUT = 30
 -- all stocked at once, so this is charged per hatch rather than once overall.
 local STAGING_L = 16000
 
+-- ---- output ----------------------------------------------------------------
+-- A default run is meant to fit on one screen: the narrative, the result, and
+-- anything that went wrong. Detail that only matters once something HAS gone
+-- wrong -- per-side classification, per-candidate probe outcomes, the database
+-- slot map -- is behind --verbose.
+local verbose = false
+for _, a in ipairs({ ... }) do
+    if a == "-v" or a == "--verbose" then verbose = true end
+end
+
+local term = nil
+do local okT, t = pcall(require, "term"); term = okT and t or nil end
+
+local function fmt(f, ...)
+    if select("#", ...) > 0 then return string.format(f, ...) end
+    return f
+end
+
+-- A step line rewrites itself in place, so "3/9 primed" does not become nine
+-- lines of scroll. `stepping` tracks whether one is still open, because anything
+-- printed on top of it would land mid-line.
+local stepping = false
+
+local function say(f, ...)
+    if stepping then io.write("\n"); stepping = false end
+    print(fmt(f, ...))
+end
+
+local function detail(f, ...)
+    if verbose then say(f, ...) end
+end
+
+-- With --verbose each update is printed instead: the detail lines in between
+-- would scroll a self-rewriting line away anyway.
+local function step(f, ...)
+    local line = fmt(f, ...)
+    if verbose or not term then say(line); return end
+    local ok = pcall(function()
+        local _, y = term.getCursor()
+        term.setCursor(1, y)
+        term.clearLine()
+        io.write(line)
+    end)
+    if ok then stepping = true else print(line) end
+end
+
+-- Closes a step line, optionally replacing it with its final form.
+local function stepEnd(f, ...)
+    if f then step(f, ...) end
+    if stepping then io.write("\n"); stepping = false end
+end
+
 -- ---- helpers -------------------------------------------------------------
 
 local function listByType(t)
@@ -145,7 +203,7 @@ end
 --   fluidIfSides  ME interface, fluid staging
 --   busSides      GT input bus  -- takes drones and kits
 --   hatchSides    GT input hatch -- takes plasma
--- plus a per-side detail list for the printout, because getting this wrong is
+-- plus a per-side list for the --verbose printout, because getting this wrong is
 -- silent otherwise: a mislabelled side just means nothing is ever detected.
 --
 -- One ME interface can stage BOTH items and fluids, so an interface side goes in
@@ -156,7 +214,7 @@ end
 -- (for cells, not drones), so slots cannot be used to spot a bus. Capacity rather
 -- than tank level, since an empty hatch reads level 0 exactly like a bus.
 local function scanSides(tp)
-    local ifSides, busSides, hatchSides, fluidIfSides, detail = {}, {}, {}, {}, {}
+    local ifSides, busSides, hatchSides, fluidIfSides, sides = {}, {}, {}, {}, {}
     for side = 0, 5 do
         local ok, name = pcall(tp.getInventoryName, side)
         name = ok and name or nil
@@ -183,11 +241,11 @@ local function scanSides(tp)
         end
 
         if kind then
-            detail[#detail + 1] = { side = side, name = name or "?",
+            sides[#sides + 1] = { side = side, name = name or "?",
                 slots = slots, tanks = tanks, kind = kind }
         end
     end
-    return ifSides, busSides, hatchSides, fluidIfSides, detail
+    return ifSides, busSides, hatchSides, fluidIfSides, sides
 end
 
 -- Stores the probe drone's metadata into the database via the local net (for use
@@ -318,14 +376,13 @@ local function detectInterface(tp, ifSides, interfaceComps, dbAddr, dbSlot, prob
                     os.sleep(POLL_INTERVAL)
                 end
                 if not foundSide then
-                    print(string.format("      %s..: staged %s in slot %d, no side saw it",
-                        c:sub(1, 8), how, slot))
+                    detail("      %s..: staged %s in slot %d, no side saw it",
+                        c:sub(1, 8), how, slot)
                 end
             else
                 -- Previously discarded, which made a refused write look exactly
                 -- like a transposer that simply is not adjacent.
-                print(string.format("      %s..: could not stage the probe -- %s",
-                    c:sub(1, 8), how))
+                detail("      %s..: could not stage the probe -- %s", c:sub(1, 8), how)
             end
 
             if slot then
@@ -366,8 +423,7 @@ local function ensureKits(net, material, itf, handle)
     end
 
     local crafts = math.ceil((PROBE_KITS - have) / math.max(1, entry.perCraft))
-    print(string.format("  stocking %s kits: %d of %d, requesting %d craft(s)...",
-        material, have, PROBE_KITS, crafts))
+    step("Kits: %d of %d %s, requesting %d craft(s)...", have, PROBE_KITS, material, crafts)
     local job, err = supply.request(itf, entry, crafts)
     if not job then return false, tostring(err) end
 
@@ -400,8 +456,7 @@ local function ensurePlasma(net, entry, itf, litres)
     end
 
     local crafts = math.ceil((litres - now) / math.max(1, entry.perCraft))
-    print(string.format("  stocking %s: %d of %d L, requesting %d craft(s)...",
-        entry.plasma.name, now, litres, crafts))
+    step("Plasma: %d of %d L, requesting %d craft(s)...", now, litres, crafts)
     local job, err = supply.request(itf, entry, crafts)
     if not job then return false, tostring(err) end
 
@@ -543,7 +598,7 @@ local function prepare(interfaceComps, minerList)
     end
 
     if not waitIdle(minerList) then
-        print("  WARNING: some miners are still finishing; detection may be off -- re-run if needed.")
+        say("  WARNING: some miners are still finishing; detection may be off -- re-run if needed.")
     end
     return wasOn
 end
@@ -590,70 +645,68 @@ end
 
 -- ---- automatic flow ------------------------------------------------------
 
-print("== Mining controller setup (automatic) ==")
+say("== Mining controller setup (automatic) ==%s", verbose and "  [verbose]" or "")
 
 -- 1. Local net + probe drone.
 local net, nerr = localnet.proxy()
-if not net then print("ERROR: " .. nerr); return M end
+if not net then say("ERROR: " .. nerr); return M end
 local probe = localnet.lowestDrone(net)
 if not probe then
-    print("ERROR: no mining drones in the local net -- keep a few of the lowest")
-    print("       tier in stock so setup can borrow one to probe with.")
+    say("ERROR: no mining drones in the local net -- keep a few of the lowest")
+    say("       tier in stock so setup can borrow one to probe with.")
     return M
 end
 local probeDrone = drones.fromName(probe.label) or { name = probe.label }
-print(string.format("Local net OK. Probe drone: %s (tier %s).",
-    probe.label, tostring(probe.tier)))
+say("Probe: %s (tier %s)", probe.label, tostring(probe.tier))
 
 -- 2. Database for staging probes. Slots come from db.lua by NAME, so the probe
 -- drone, the plasma drop and the scratch entry cannot land on each other -- which
 -- they used to, silently, leaving a plasma drop where the drone should have been.
 local dbAddr = pickDatabase()
 if not dbAddr then
-    print("ERROR: no database component. Add a Database Upgrade in an adapter.")
+    say("ERROR: no database component. Add a Database Upgrade in an adapter.")
     return M
 end
 local handle, dbErr = dbslots.open(dbAddr)
-if not handle then print("ERROR: " .. tostring(dbErr)); return M end
-print(string.format("Database %s.. has %d slot(s).", dbAddr:sub(1, 8), handle:size()))
+if not handle then say("ERROR: " .. tostring(dbErr)); return M end
+detail("Database %s..: %d slot(s)", dbAddr:sub(1, 8), handle:size())
 
 local dbSlot, derr = storeProbe(net, handle, probe)
-if not dbSlot then print("ERROR: " .. tostring(derr)); return M end
+if not dbSlot then say("ERROR: " .. tostring(derr)); return M end
 
 -- 2b. Kits and plasma. A module needs a drone, kits AND plasma to mine, so both
 -- detection phases depend on the other two being available first.
 local supplyItf, supplyErr = supply.find(nil)
-if not supplyItf then print("WARNING: " .. tostring(supplyErr)) end
+if not supplyItf then say("WARNING: " .. tostring(supplyErr)) end
 local probeMaterial = (probeDrone.material) or (drones.get(probe.tier or 0) or {}).material
 if probeMaterial then
     local okKits, kitMsg = ensureKits(net, probeMaterial, supplyItf, handle)
-    print((okKits and "Kits OK: " or "WARNING: kits -- ") .. tostring(kitMsg))
+    stepEnd((okKits and "Kits: " or "WARNING: kits -- ") .. tostring(kitMsg))
     if not okKits then
-        print("       detection needs them; continuing in case they are stocked by hand.")
+        say("       detection needs them; continuing in case they are stocked by hand.")
     end
 else
-    print("WARNING: unknown material for the probe drone; cannot check kits.")
+    say("WARNING: unknown material for the probe drone; cannot check kits.")
 end
 
 local plasmaEntry, dropSlot = stagePlasmaDrop(supplyItf, handle)
 local probePlasma = plasmaEntry and plasmaEntry.plasma
 if not plasmaEntry then
-    print("WARNING: no plasma to probe with (" .. tostring(dropSlot) .. ").")
-    print("         Input hatches cannot be matched to miners without it; buses still can.")
+    say("WARNING: no plasma to probe with (" .. tostring(dropSlot) .. ").")
+    say("         Input hatches cannot be matched to miners without it; buses still can.")
     dropSlot = nil
 else
-    print(string.format("Probing plasma: %s (%d L per hatch).", probePlasma.name, PROBE_PLASMA_L))
+    say("Plasma: %s, %d L per hatch", probePlasma.name, PROBE_PLASMA_L)
 end
 
 local transposers = listByType("transposer")
 local interfaceComps = listByType("me_interface")
 local minerList = miners.discover()
-print(string.format("Found %d transposer(s), %d interface(s), %d miner(s).",
-    #transposers, #interfaceComps, #minerList))
-
 -- Clean slate: clear leftover drone configs, stop miners, wait for them to idle.
-print("Preparing (clearing drone configs, stopping miners, waiting for idle)...")
+step("Preparing miners (clearing drone configs, waiting for idle)...")
 local wasOn = prepare(interfaceComps, minerList)
+stepEnd("Found %d transposer(s), %d interface(s), %d miner(s)",
+    #transposers, #interfaceComps, #minerList)
 
 -- 3. Pair each transposer with its interface(s), and collect what it reaches.
 -- A transposer may serve items AND fluids, and one ME interface may stage both,
@@ -664,21 +717,25 @@ local fluidFeeds = {}   -- fluid: { transposer, interface, interfaceSide, inputH
 -- Scan every transposer's sides FIRST. Two reasons: the hatch count decides how
 -- much plasma to stock before any of it can be filled, and the printout below is
 -- the only way to see a misread side -- detection just quietly finds nothing.
-local scans, hatchTotal = {}, 0
+local scans, hatchTotal, busTotal = {}, 0, 0
 for _, tpAddr in ipairs(transposers) do
     local tp = component.proxy(tpAddr)
-    local ifSides, busSides, hatchSides, fluidIfSides, detail = scanSides(tp)
+    local ifSides, busSides, hatchSides, fluidIfSides, sides = scanSides(tp)
     scans[#scans + 1] = { addr = tpAddr, tp = tp, ifSides = ifSides, busSides = busSides,
         hatchSides = hatchSides, fluidIfSides = fluidIfSides }
     hatchTotal = hatchTotal + #hatchSides
 
-    print(string.format("  %s..: %d interface(s) (%d fluid), %d bus(es), %d hatch(es)",
-        tpAddr:sub(1, 8), #ifSides, #fluidIfSides, #busSides, #hatchSides))
-    for _, d in ipairs(detail) do
-        print(string.format("      side %d %-11s %-34s %d slot(s), %d tank(s)",
-            d.side, d.kind, d.name, d.slots, d.tanks))
+    busTotal = busTotal + #busSides
+    step("Scanning transposers... %d/%d", #scans, #transposers)
+    detail("  %s..: %d interface(s) (%d fluid), %d bus(es), %d hatch(es)",
+        tpAddr:sub(1, 8), #ifSides, #fluidIfSides, #busSides, #hatchSides)
+    for _, d in ipairs(sides) do
+        detail("      side %d %-11s %-34s %d slot(s), %d tank(s)",
+            d.side, d.kind, d.name, d.slots, d.tanks)
     end
 end
+stepEnd("Scanned %d transposer(s): %d bus(es), %d hatch(es)",
+    #transposers, busTotal, hatchTotal)
 
 -- Plasma has to be IN the local net before a fluid interface can stage any: the
 -- interface only offers what its network holds.
@@ -691,10 +748,10 @@ end
 if hatchTotal > 0 and plasmaEntry then
     local want = hatchTotal * (STAGING_L + PROBE_PLASMA_L) + STAGING_L
     local okP, msg = ensurePlasma(net, plasmaEntry, supplyItf, want)
-    print((okP and "Plasma OK: " or "WARNING: plasma -- ") .. tostring(msg))
+    stepEnd((okP and "Plasma staged: " or "WARNING: plasma -- ") .. tostring(msg))
     if not okP then
-        print(string.format("         %d hatch(es) need %d L staged at once; any that stay "
-            .. "empty cannot be matched to a miner.", hatchTotal, want))
+        say("         %d hatch(es) need %d L staged at once; any that stay "
+            .. "empty cannot be matched to a miner.", hatchTotal, want)
     end
 end
 
@@ -705,26 +762,25 @@ end
 -- storeProbe has also been writing to it, and a cleared slot would make every
 -- interface look like it refused.
 local okDb, dbWhat = handle:holds(dbSlot, probe.label)
-print(string.format("Probe metadata in database slot %d: %s", dbSlot, dbWhat))
+detail("Probe metadata in database slot %d: %s", dbSlot, dbWhat)
 if not okDb then
-    print("  Nothing can be staged without it -- no input bus will be paired.")
+    say("WARNING: database slot %d -- %s", dbSlot, dbWhat)
+    say("  Nothing can be staged without it -- no input bus will be paired.")
 end
 
 local itemCandidates = interfacesHolding(interfaceComps, probe.label)
-print(string.format("Interfaces that can stage %s: %d of %d.",
-    probe.label, #itemCandidates, #interfaceComps))
-if #itemCandidates == 0 then
-    print("  None. Every interface's network was asked and none reported that drone,")
-    print("  so no input bus can be paired. Is the local net's interface adaptered?")
-end
-
 local fluidCandidates = interfaceComps
 if probePlasma then
     fluidCandidates = interfacesHoldingFluid(interfaceComps, probePlasma.name)
-    print(string.format("Interfaces that can stage %s: %d of %d.",
-        probePlasma.name, #fluidCandidates, #interfaceComps))
+end
+say("Can stage the probe: %d/%d interface(s); the plasma: %d/%d",
+    #itemCandidates, #interfaceComps, #fluidCandidates, #interfaceComps)
+if #itemCandidates == 0 then
+    say("  None. Every interface's network was asked and none reported that drone,")
+    say("  so no input bus can be paired. Is the local net's interface adaptered?")
 end
 
+local pairedItem, pairedFluid = 0, 0
 for _, s in ipairs(scans) do
     local tpAddr, tp = s.addr, s.tp
     local ifSides, busSides = s.ifSides, s.busSides
@@ -733,14 +789,15 @@ for _, s in ipairs(scans) do
 
     if #busSides > 0 then
         if #ifSides == 0 then
-            print(string.format("  %s..: input buses but no interface side -- skipped.", tag))
+            say("  %s..: input buses but no interface side -- skipped.", tag)
         else
             local ifAddr, ifSide = detectInterface(tp, ifSides, itemCandidates, dbAddr, dbSlot, probe, net)
             if not ifAddr then
-                print(string.format("  %s..: could not detect its interface (timed out).", tag))
+                say("  %s..: could not detect its interface.", tag)
             else
-                print(string.format("  %s..: interface %s.. on side %d, %d input bus(es).",
-                    tag, ifAddr:sub(1, 8), ifSide, #busSides))
+                pairedItem = pairedItem + 1
+                detail("  %s..: interface %s.. on side %d, %d input bus(es).",
+                    tag, ifAddr:sub(1, 8), ifSide, #busSides)
                 for _, busSide in ipairs(busSides) do
                     feeds[#feeds + 1] = {
                         transposer = tpAddr, interface = ifAddr,
@@ -753,18 +810,19 @@ for _, s in ipairs(scans) do
 
     if #hatchSides > 0 then
         if not dropSlot then
-            print(string.format("  %s..: %d input hatch(es), but there is no plasma to probe with.",
-                tag, #hatchSides))
+            say("  %s..: %d input hatch(es), but there is no plasma to probe with.",
+                tag, #hatchSides)
         elseif #fluidIfSides == 0 then
-            print(string.format("  %s..: input hatches but no fluid interface side -- skipped.", tag))
+            say("  %s..: input hatches but no fluid interface side -- skipped.", tag)
         else
             local ifAddr, ifSide = detectFluidInterface(tp, fluidIfSides, fluidCandidates,
                 dbAddr, dropSlot, probePlasma.name)
             if not ifAddr then
-                print(string.format("  %s..: could not detect its fluid interface (timed out).", tag))
+                say("  %s..: could not detect its fluid interface.", tag)
             else
-                print(string.format("  %s..: fluid interface %s.. on side %d, %d input hatch(es).",
-                    tag, ifAddr:sub(1, 8), ifSide, #hatchSides))
+                pairedFluid = pairedFluid + 1
+                detail("  %s..: fluid interface %s.. on side %d, %d input hatch(es).",
+                    tag, ifAddr:sub(1, 8), ifSide, #hatchSides)
                 for _, hatchSide in ipairs(hatchSides) do
                     fluidFeeds[#fluidFeeds + 1] = {
                         transposer = tpAddr, interface = ifAddr,
@@ -774,8 +832,11 @@ for _, s in ipairs(scans) do
             end
         end
     end
+    step("Pairing transposers... %d item, %d fluid", pairedItem, pairedFluid)
 end
-if #feeds == 0 then print("No usable input buses found -- nothing to configure."); return M end
+stepEnd("Paired %d transposer(s) to an interface, %d to a fluid interface",
+    pairedItem, pairedFluid)
+if #feeds == 0 then say("No usable input buses found -- nothing to configure."); return M end
 
 -- Build a transport.Station for a feed. Slot is fixed here (we load buses one at
 -- a time during identification, so there is no concurrency to collide).
@@ -820,8 +881,8 @@ do
         nextTank[feed.interface] = n + 1
         feed.fluidTank = n
         if n > 5 then
-            print(string.format("WARNING: fluid interface %s.. has %d hatches (>6 tanks) -- "
-                .. "the extras cannot be staged.", feed.interface:sub(1, 8), n + 1))
+            say("WARNING: fluid interface %s.. has %d hatches (>6 tanks) -- "
+                .. "the extras cannot be staged.", feed.interface:sub(1, 8), n + 1)
         end
         fluidStations[i] = fluidStationFor(feed)
     end
@@ -831,20 +892,27 @@ end
 -- the only thing a module is still missing is its drone; then feed one bus at a
 -- time and watch which miner starts.
 if #fluidStations > 0 then
-    print(string.format("Priming %d hatch(es) with %s...", #fluidStations, probePlasma.name))
+    local primed = 0
     for i, st in ipairs(fluidStations) do
         if st then
             st:setPlasmaSource(dropSlot)
             local okFill = fillHatchTo(st, PROBE_PLASMA_L)
             local level = st:hatchTank()
-            print(string.format("  hatch %s../side%d: %d L%s",
+            if okFill then primed = primed + 1 end
+            step("Priming hatches with %s... %d/%d", probePlasma.name, primed, #fluidStations)
+            detail("  hatch %s../side%d: %d L%s",
                 fluidFeeds[i].transposer:sub(1, 8), fluidFeeds[i].inputHatchSide, level,
-                okFill and "" or "  (did not fill -- is that plasma in the local net?)"))
+                okFill and "" or "  (did not fill -- is that plasma in the local net?)")
+            if not okFill then
+                say("  hatch %s../side%d did not fill -- is that plasma in the local net?",
+                    fluidFeeds[i].transposer:sub(1, 8), fluidFeeds[i].inputHatchSide)
+            end
         end
     end
+    stepEnd("Primed %d of %d hatch(es) with %s", primed, #fluidStations, probePlasma.name)
 end
 
-print("Emptying input buses...")
+step("Emptying input buses...")
 for _, feed in ipairs(feeds) do
     local st = stationFor(feed)
     if st then st:returnAll() end
@@ -853,41 +921,43 @@ end
 -- Miners are already off (prepare); enable them so the one with a drone runs.
 for _, m in ipairs(minerList) do m:setEnabled(true) end
 
-print("Identifying miners by input bus...")
-local assigned = {}   -- miner address -> item feed
+local assigned, foundBus = {}, 0
 for _, feed in ipairs(feeds) do
     local st = stationFor(feed)
     if st then
         local ok, err = st:setDrone(probeDrone, 1)
         if not ok then
-            print(string.format("  bus %s../side%d: could not load a probe drone (%s).",
-                feed.transposer:sub(1, 8), feed.inputBusSide, tostring(err)))
+            say("  bus %s../side%d: could not load a probe drone (%s).",
+                feed.transposer:sub(1, 8), feed.inputBusSide, tostring(err))
         else
             local found = waitForNewMiner(minerList, assigned)
             if found then
                 assigned[found.address] = feed
-                print(string.format("  miner %s.. <- transposer %s.. bus side %d",
-                    found.address:sub(1, 8), feed.transposer:sub(1, 8), feed.inputBusSide))
+                foundBus = foundBus + 1
+                detail("  miner %s.. <- transposer %s.. bus side %d",
+                    found.address:sub(1, 8), feed.transposer:sub(1, 8), feed.inputBusSide)
             else
-                print(string.format("  bus %s../side%d: no new miner started (already found, or none).",
-                    feed.transposer:sub(1, 8), feed.inputBusSide))
+                detail("  bus %s../side%d: no new miner started (already found, or none).",
+                    feed.transposer:sub(1, 8), feed.inputBusSide)
             end
         end
         st:returnAll()   -- empty this bus before testing the next
     end
+    step("Identifying by bus... %d/%d", foundBus, #feeds)
 end
+stepEnd("Identified %d miner(s) by input bus (%d bus(es) tested)", foundBus, #feeds)
 
 -- 5. PHASE B -- pair input HATCHES with miners, the other way round: a drone in
 -- EVERY bus, every hatch empty, then fill one hatch at a time.
 local fluidAssigned = {}   -- miner address -> fluid feed
 if #fluidStations > 0 then
-    print("Settling miners between phases...")
+    step("Settling miners between phases...")
     for _, m in ipairs(minerList) do m:setEnabled(false) end
     if not waitIdle(minerList) then
-        print("  WARNING: some miners are still finishing; hatch detection may be off.")
+        say("  WARNING: some miners are still finishing; hatch detection may be off.")
     end
 
-    print("Draining hatches...")
+    step("Draining hatches...")
     for _, st in ipairs(fluidStations) do
         if st then
             st:clearPlasmaSource()   -- so the tank cannot refuse what we drain back
@@ -895,7 +965,7 @@ if #fluidStations > 0 then
         end
     end
 
-    print("Loading a drone into every bus...")
+    step("Loading a drone into every bus...")
     local busStations = {}
     for i, feed in ipairs(feeds) do
         local st = stationFor(feed)
@@ -903,39 +973,43 @@ if #fluidStations > 0 then
         if st then
             local ok, err = st:setDrone(probeDrone, 1)
             if not ok then
-                print(string.format("  bus %s../side%d: %s",
-                    feed.transposer:sub(1, 8), feed.inputBusSide, tostring(err)))
+                say("  bus %s../side%d: %s",
+                    feed.transposer:sub(1, 8), feed.inputBusSide, tostring(err))
             end
         end
     end
 
     for _, m in ipairs(minerList) do m:setEnabled(true) end
 
-    print("Identifying miners by input hatch...")
+    local foundHatch = 0
     for i, st in ipairs(fluidStations) do
         local feed = fluidFeeds[i]
         if st then
             st:setPlasmaSource(dropSlot)
             if not fillHatchTo(st, PROBE_PLASMA_L) then
-                print(string.format("  hatch %s../side%d: would not fill -- skipped.",
-                    feed.transposer:sub(1, 8), feed.inputHatchSide))
+                say("  hatch %s../side%d: would not fill -- skipped.",
+                    feed.transposer:sub(1, 8), feed.inputHatchSide)
             else
                 local found = waitForNewMiner(minerList, fluidAssigned)
                 if found then
                     fluidAssigned[found.address] = feed
-                    print(string.format("  miner %s.. <- transposer %s.. hatch side %d tank %d",
+                    foundHatch = foundHatch + 1
+                    detail("  miner %s.. <- transposer %s.. hatch side %d tank %d",
                         found.address:sub(1, 8), feed.transposer:sub(1, 8),
-                        feed.inputHatchSide, feed.fluidTank))
+                        feed.inputHatchSide, feed.fluidTank)
                 else
-                    print(string.format("  hatch %s../side%d: no new miner started.",
-                        feed.transposer:sub(1, 8), feed.inputHatchSide))
+                    detail("  hatch %s../side%d: no new miner started.",
+                        feed.transposer:sub(1, 8), feed.inputHatchSide)
                 end
             end
             -- Empty it again so the next hatch is the only plasma in play.
             st:clearPlasmaSource()
             st:drainHatch()
         end
+        step("Identifying by hatch... %d/%d", foundHatch, #fluidStations)
     end
+    stepEnd("Identified %d miner(s) by input hatch (%d hatch(es) tested)",
+        foundHatch, #fluidStations)
 
     -- Give the drones back; the controller loads what it actually wants later.
     for _, st in ipairs(busStations) do
@@ -947,9 +1021,9 @@ end
 for _, m in ipairs(minerList) do m:setEnabled(wasOn[m.address] == true) end
 -- The probe metadata stays put: the slots are named, so a later run reuses them
 -- rather than tripping over them, and leaving them filled saves re-storing.
-print(string.format("Database slots used: %d of %d.", handle:used(), handle:size()))
+say("Database: %d of %d slot(s) used", handle:used(), handle:size())
 for _, e in ipairs(handle:dump()) do
-    print(string.format("  %2d  %-24s %s", e.slot, e.name, tostring(e.label)))
+    detail("  %2d  %-24s %s", e.slot, e.name, tostring(e.label))
 end
 
 -- 5. Build stations, assign a distinct interface slot per shared interface.
@@ -979,8 +1053,8 @@ for addr, feed in pairs(fluidAssigned) do
         st.inputHatchSide = feed.inputHatchSide
         st.fluidTank = feed.fluidTank
     else
-        print(string.format("WARNING: miner %s.. was found by its hatch but not by any bus; "
-            .. "its plasma feed cannot be recorded without one.", addr:sub(1, 8)))
+        say("WARNING: miner %s.. was found by its hatch but not by any bus; "
+            .. "its plasma feed cannot be recorded without one.", addr:sub(1, 8))
     end
 end
 
@@ -995,8 +1069,8 @@ do
         nextSlot[st.interface] = n
         st.interfaceSlot = n
         if n > 9 then
-            print(string.format("WARNING: interface %s.. has %d stations (>9 slots) -- "
-                .. "concurrent loads may collide.", st.interface:sub(1, 8), n))
+            say("WARNING: interface %s.. has %d stations (>9 slots) -- "
+                .. "concurrent loads may collide.", st.interface:sub(1, 8), n)
         end
     end
 end
@@ -1015,32 +1089,33 @@ local text = table.concat({
 local path = filesystem.concat(shell.getWorkingDirectory(), "stations.lua")
 local f, ferr = io.open(path, "w")
 if not f then
-    print("! could not write " .. path .. ": " .. tostring(ferr))
+    say("! could not write " .. path .. ": " .. tostring(ferr))
     print(text)
     return M
 end
 f:write(text)
 f:close()
 
-print(string.format("Wrote %d station(s) to %s", #keys, path))
+say("Wrote %d station(s) to %s", #keys, path)
 local withoutPlasma = 0
 for _, a in ipairs(keys) do
     local st = stations[a]
-    print(string.format("  %s: transposer %s.. bus=side%d interface=side%d slot=%d",
-        st.label, st.transposer:sub(1, 8), st.inputBusSide, st.interfaceSide, st.interfaceSlot))
+    local plasma = "no plasma feed"
     if st.fluidTransposer then
-        print(string.format("      plasma:  transposer %s.. hatch=side%d interface=side%d tank=%d",
-            st.fluidTransposer:sub(1, 8), st.inputHatchSide, st.fluidInterfaceSide, st.fluidTank))
+        plasma = string.format("plasma %s.. hatch s%d/if s%d tank%d",
+            st.fluidTransposer:sub(1, 8), st.inputHatchSide, st.fluidInterfaceSide, st.fluidTank)
     else
         withoutPlasma = withoutPlasma + 1
-        print("      plasma:  none found -- this module cannot be fed plasma")
     end
+    say("  %-12s %s.. bus s%d/if s%d slot%d  |  %s", st.label,
+        st.transposer:sub(1, 8), st.inputBusSide, st.interfaceSide, st.interfaceSlot, plasma)
 end
 if withoutPlasma > 0 then
-    print(string.format("%d module(s) have no plasma feed. Each needs a transposer touching "
-        .. "an input hatch and an ME interface with tanks", withoutPlasma))
-    print("(the same transposer and interface that carry its items will do).")
+    say("%d module(s) have no plasma feed: each needs a transposer touching an input "
+        .. "hatch and an ME interface with tanks (the same ones carrying its items will do).",
+        withoutPlasma)
 end
-print("Keep cfg.dryRun = true until you've watched a drone move, then flip it.")
+say("Keep cfg.dryRun = true until you've watched a drone move, then flip it.")
+if not verbose then say("Run `setup --verbose` for per-side and per-candidate detail.") end
 
 return M

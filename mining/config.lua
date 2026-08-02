@@ -44,19 +44,9 @@ cfg.stations = {}
 -- to let setup pick it (there is usually exactly one).
 cfg.database = nil
 
--- Pull in whatever `setup` discovered (stations.lua) without clobbering anything
--- you set above. stations.lua is machine-specific and not shipped in the repo.
-do
-    local ok, data = pcall(require, "stations")
-    if ok and type(data) == "table" then
-        if cfg.database == nil then cfg.database = data.database end
-        if type(data.stations) == "table" then
-            for addr, st in pairs(data.stations) do
-                if cfg.stations[addr] == nil then cfg.stations[addr] = st end
-            end
-        end
-    end
-end
+-- Whatever `setup` discovered is merged in at the BOTTOM of this file, so it can
+-- fill in anything you left unset here -- including cfg.supply.interface, which is
+-- defined further down.
 
 -- ---- Behaviour -------------------------------------------------------------
 
@@ -136,6 +126,23 @@ cfg.budget = {
 -- on. Leave nil to assume computation is never the limit.
 cfg.computation = nil
 
+-- ---- What `setup` discovered -----------------------------------------------
+-- Merged last so it can fill in anything left unset above, and never clobbers
+-- something you set by hand. stations.lua is machine-specific and not in the repo;
+-- re-run `setup` to regenerate it.
+do
+    local ok, data = pcall(require, "stations")
+    if ok and type(data) == "table" then
+        if cfg.database == nil then cfg.database = data.database end
+        if cfg.supply.interface == nil then cfg.supply.interface = data.supply end
+        if type(data.stations) == "table" then
+            for addr, st in pairs(data.stations) do
+                if cfg.stations[addr] == nil then cfg.stations[addr] = st end
+            end
+        end
+    end
+end
+
 -- ---- Keeping the local net stocked -----------------------------------------
 -- Consumables reach the local net through an ME Interface on the MAIN net that
 -- carries fake crafting patterns: requesting one pushes that pattern's INPUTS
@@ -145,8 +152,10 @@ cfg.computation = nil
 -- Run `stock patterns` once after wiring the adapter to see what it found.
 
 cfg.supply = {
-    -- Adapter address of the supply interface. nil = autodetect (the one
-    -- me_interface that has patterns; the per-module station interfaces have none).
+    -- Adapter address of the supply interface. `setup` records the one it found
+    -- in stations.lua, so this is normally left nil and filled in below; setting
+    -- it here overrides that. A stored address that no longer has patterns is
+    -- discarded and re-detected rather than trusted.
     interface = nil,
 
     -- KITS to keep in the local net, per drone material. One kit is 4 drill tips

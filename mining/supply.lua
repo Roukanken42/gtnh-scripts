@@ -286,7 +286,13 @@ end
 
 -- ---- component edge ---------------------------------------------------------
 
-local function components() return require("component") end
+-- nil off-machine, so the pure half of this module stays loadable and callers
+-- that need hardware can report it instead of throwing.
+local function components()
+    local ok, c = pcall(require, "component")
+    if ok then return c end
+    return nil
+end
 
 -- Reads every pattern in an interface. Probes each slot under pcall and CONTINUES
 -- PAST GAPS -- patterns need not be contiguous, and an empty slot may error or
@@ -308,8 +314,16 @@ end
 -- one me_interface that HAS patterns (the per-module station interfaces in
 -- transport.lua carry none). Ambiguity is an error naming the candidates rather
 -- than a coin flip. Returns proxy, or nil + error.
+-- Returns proxy, how -- where `how` is "configured" or "found", so a caller can
+-- say whether the stored address was any use. A configured address is CHECKED
+-- rather than trusted: setup records the one it found, and an address that has
+-- since moved would otherwise surface much later as "no kit pattern for
+-- Neutronium", which points at entirely the wrong thing.
 function supply.find(address)
     local component = components()
+    if not component then return nil, "no component library (off-machine?)" end
+
+    local stale
     if address and address ~= "" then
         local full = address
         if #address < 36 then
@@ -317,8 +331,9 @@ function supply.find(address)
             if ok and g then full = g end
         end
         local ok, p = pcall(component.proxy, full)
-        if not ok or not p then return nil, "no component at '" .. address .. "'" end
-        return p
+        if ok and p and #supply.readPatterns(p, 4) > 0 then return p, "configured" end
+        stale = (ok and p) and "the configured interface has no patterns"
+            or "there is no component at the configured address"
     end
 
     local found = {}
@@ -326,9 +341,10 @@ function supply.find(address)
         local p = component.proxy(addr)
         if #supply.readPatterns(p, 4) > 0 then found[#found + 1] = p end
     end
-    if #found == 1 then return found[1] end
+    if #found == 1 then return found[1], stale and "found (" .. stale .. ")" or "found" end
     if #found == 0 then
-        return nil, "no me_interface with patterns found -- add an adapter to the "
+        return nil, (stale and (stale .. ", and ") or "")
+            .. "no me_interface with patterns found -- add an adapter to the "
             .. "main-net supply interface, or set cfg.supply.interface"
     end
     local addrs = {}

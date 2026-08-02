@@ -183,6 +183,13 @@ function miners.attachStation(miner, spec, shared)
         interfaceSide = spec.interfaceSide,
         inputBusSide = spec.inputBusSide,
         interfaceSlot = spec.interfaceSlot or shared.interfaceSlot,
+        -- Plasma feed: absent from the spec means this module has no fluid half
+        -- yet, which transport.new treats as simply not having one.
+        fluidTransposer = spec.fluidTransposer,
+        fluidInterface = spec.fluidInterface,
+        fluidInterfaceSide = spec.fluidInterfaceSide,
+        inputHatchSide = spec.inputHatchSide,
+        fluidTank = spec.fluidTank,
         stockTimeout = spec.stockTimeout or shared.stockTimeout,
         dryRun = shared.dryRun,
         log = shared.log,

@@ -1,8 +1,29 @@
--- Item transport for the mining modules -- the ONE place that shuffles drones
--- (or any item) between the AE2 network and a module's input bus.
+-- Transport for the mining modules -- the ONE place that shuffles drones, kits
+-- (or any item) and plasma between the AE2 network and a module's input hatches.
 --
--- Each module has a "station": a transposer physically touching BOTH the
--- module's input bus AND an ME interface, plus a (shared) database component.
+-- Each module has a "station", which has up to two halves:
+--
+--   item half   a transposer touching BOTH the module's input BUS and an ME
+--               interface. Carries drones and mining kits.
+--   fluid half  a SECOND transposer touching the module's input HATCH and an ME
+--               fluid interface. Carries plasma. It has to be its own transposer:
+--               one cannot serve an item inventory and a tank at the same time.
+--
+-- Both halves share the station's database component. The fluid half is optional
+-- -- a station without it simply has no plasma feed (Station:hasFluid()).
+--
+-- ---- fluid indexing --------------------------------------------------------
+-- An ME fluid interface has SIX tanks of 16,000 L, and its configuration index is
+-- 0-BASED because it corresponds to the interface's sides. A transposer beside it
+-- can reach all six, so several stations share one interface by taking different
+-- `fluidTank` values -- the fluid counterpart of `interfaceSlot`.
+--
+-- That one 0-based number does three jobs, which is why it is stored raw:
+--   setFluidInterfaceConfiguration(fluidTank, db, dbIndex)   0-based
+--   transferFluid(src, dst, amount, sourceTank = fluidTank)  0-based
+--   getTankLevel / getTankCapacity(side, fluidTank + 1)      1-BASED
+-- Only the read methods count from one. Station:tank() is the single place that
+-- knows this, so nothing else has to.
 --
 -- Moving items back INTO ME is easy -- drop them into the interface and the
 -- network absorbs them. Pulling an item OUT of ME is indirect:
@@ -23,12 +44,25 @@
 -- API references (OpenComputers):
 --   transposer.transferItem(srcSide, dstSide[, count[, srcSlot[, dstSlot]]]) -> moved
 --   transposer.getAllStacks(side) / getStackInSlot(side, slot)
+--   transposer.transferFluid(srcSide, dstSide[, mB[, srcTank]]) -> ok, moved
+--   transposer.getTankLevel / getTankCapacity(side, tank) / getFluidInTank(side, tank)
 --   me_interface.store(filter, dbAddress[, startSlot[, count]]) -> boolean
 --   me_interface.setInterfaceConfiguration(slot[, dbAddress, dbSlot, count])
+--   me_interface.setFluidInterfaceConfiguration(tank[, dbAddress, dbIndex])
 --   database.get(slot) / database.clear(slot)
 
-local component = require("component")
-local computer = require("computer")
+-- Pulled in defensively so this module can be LOADED off the machine: the tank
+-- indexing and transfer arithmetic below is worth exercising without
+-- OpenComputers around. Anything that actually touches hardware still needs
+-- them; a test hands transport.new ready-made proxies instead of addresses.
+local function optional(name)
+    local ok, mod = pcall(require, name)
+    if ok then return mod end
+    return nil
+end
+
+local component = optional("component")
+local computer = optional("computer")
 
 local transport = {}
 
@@ -45,9 +79,23 @@ local function cacheFor(dbAddress)
     return c
 end
 
+-- Reserves a database slot from the same counter Station:ensureDbSlot draws on,
+-- so a caller staging its own metadata -- the ae2fc plasma drop the fluid
+-- interface needs, say -- cannot land on top of a cached item entry.
+function transport.reserveDbSlot(dbAddress)
+    local cache = cacheFor(dbAddress)
+    local slot = cache.next
+    cache.next = slot + 1
+    return slot
+end
+
 -- Resolves a (possibly abbreviated) component address to a proxy, or nil + err.
+-- An already-resolved proxy passes straight through, which is how tests inject
+-- fakes and how a caller that already holds one avoids a second lookup.
 local function resolve(addr)
+    if type(addr) == "table" then return addr end
     if type(addr) ~= "string" or addr == "" then return nil, "missing address" end
+    if not component then return nil, "no component library (off-machine?)" end
     local full = addr
     if #addr < 36 then
         local ok, g = pcall(component.get, addr)
@@ -83,6 +131,12 @@ transport.Station = Station
 --   interfaceSide  transposer side facing the interface
 --   inputBusSide   transposer side facing the module's input bus
 --   interfaceSlot  interface config/inventory slot to stage through (default 1)
+-- Optional fluid half (all four required together, see the header):
+--   fluidTransposer     component address (touches the input hatch + fluid interface)
+--   fluidInterface      me_interface address whose tanks stage the plasma
+--   fluidInterfaceSide  transposer side facing the fluid interface
+--   inputHatchSide      transposer side facing the module's input hatch
+--   fluidTank           which of the interface's 6 tanks to use, 0-BASED (default 0)
 --   stockTimeout   seconds to wait for AE2 to stock a request (default 10)
 --   pollInterval   seconds between stock-arrival polls (default 0.25)
 --   dryRun         when true, item moves are only logged (default false)
@@ -114,6 +168,28 @@ function transport.new(spec)
     self.dryRun = spec.dryRun or false
     self.label = spec.label or "station"
     self.log = spec.log or function() end
+
+    -- Fluid half. Optional as a whole, but all-or-nothing once any of it is given
+    -- -- a half-configured plasma feed would fail later and further from the cause.
+    if spec.fluidTransposer or spec.fluidInterface then
+        local ftp, e4 = resolve(spec.fluidTransposer)
+        if not ftp then return nil, "fluidTransposer: " .. tostring(e4) end
+        local fitf, e5 = resolve(spec.fluidInterface)
+        if not fitf then return nil, "fluidInterface: " .. tostring(e5) end
+        if type(spec.fluidInterfaceSide) ~= "number" or type(spec.inputHatchSide) ~= "number" then
+            return nil, "fluidInterfaceSide and inputHatchSide must be side numbers"
+        end
+        local tank = spec.fluidTank or 0
+        if type(tank) ~= "number" or tank < 0 or tank > 5 then
+            return nil, "fluidTank must be 0..5 (the interface has six tanks, indexed from 0)"
+        end
+        self.fluidTransposer = ftp
+        self.fluidInterface = fitf
+        self.fluidInterfaceSide = spec.fluidInterfaceSide
+        self.inputHatchSide = spec.inputHatchSide
+        self.fluidTank = tank
+    end
+
     return self
 end
 
@@ -178,6 +254,118 @@ function Station:returnAll()
         total = total + self:returnSlot(s.slot, s.size)
     end
     return total
+end
+
+-- ---- fluid half ------------------------------------------------------------
+
+-- True if this station has a plasma feed configured.
+function Station:hasFluid()
+    return self.fluidTransposer ~= nil
+end
+
+-- Level and capacity (mB) of a tank the fluid transposer can see. `tank0` is
+-- 0-based, matching transferFluid and the interface config; the read methods
+-- count from one, and this is the ONLY place that knows it.
+function Station:tank(side, tank0)
+    if not self.fluidTransposer then return 0, 0 end
+    local t = (tank0 or 0) + 1
+    local okL, level = pcall(self.fluidTransposer.getTankLevel, side, t)
+    local okC, capacity = pcall(self.fluidTransposer.getTankCapacity, side, t)
+    return (okL and tonumber(level)) or 0, (okC and tonumber(capacity)) or 0
+end
+
+-- The module's input hatch: level, capacity.
+function Station:hatchTank()
+    return self:tank(self.inputHatchSide, 0)
+end
+
+-- The interface tank plasma is staged in: level, capacity (16,000 L).
+function Station:bufferTank()
+    return self:tank(self.fluidInterfaceSide, self.fluidTank)
+end
+
+-- Which fluid is in the module's input hatch: its label, or nil when empty. A
+-- GT hatch holds one fluid at a time, so this is what says whether a plasma
+-- switch has actually taken effect yet.
+function Station:hatchFluid()
+    if not self.fluidTransposer then return nil end
+    local ok, f = pcall(self.fluidTransposer.getFluidInTank, self.inputHatchSide, 1)
+    if not ok or type(f) ~= "table" then return nil end
+    -- Some builds hand back the tank list rather than the tank.
+    if f.label == nil and type(f[1]) == "table" then f = f[1] end
+    if type(f.label) ~= "string" or (f.amount or 0) <= 0 then return nil end
+    return f.label, f.amount
+end
+
+-- Points this station's interface tank at a plasma, by database slot (see
+-- supply.storePlasmaDrop -- the entry has to be an ae2fc drop). Unlike the item
+-- path this config is LEFT SET: the tank then keeps ~16,000 L staged for a
+-- continuously-drained hatch, which is the whole reason a pull feed beats a
+-- clear-after-every-use one. Returns true, or false + error.
+function Station:setPlasmaSource(dbSlot)
+    if not self:hasFluid() then return false, "no fluid half configured" end
+    if self.dryRun then
+        self.log(string.format("[dry] %s: stage plasma from db slot %d in tank %d",
+            self.label, dbSlot, self.fluidTank))
+        return true
+    end
+    local ok, err = pcall(self.fluidInterface.setFluidInterfaceConfiguration,
+        self.fluidTank, self.dbAddress, dbSlot)
+    if not ok then return false, "setFluidInterfaceConfiguration failed: " .. tostring(err) end
+    return true
+end
+
+-- Clears the staging tank's config, handing whatever it holds back to the
+-- network. Do this before switching plasma, so the tank cannot refuse the drained
+-- hatch contents for being the wrong fluid.
+function Station:clearPlasmaSource()
+    if not self:hasFluid() or self.dryRun then return end
+    pcall(self.fluidInterface.setFluidInterfaceConfiguration, self.fluidTank)
+end
+
+-- Moves fluid between two of the fluid transposer's sides. Returns moved, err.
+-- transferFluid answers (ok, amount) on success and (false, message) on refusal,
+-- which pcall turns into three values.
+function Station:moveFluid(fromSide, toSide, amount, sourceTank)
+    if amount <= 0 then return 0 end
+    local ok, res, moved = pcall(self.fluidTransposer.transferFluid,
+        fromSide, toSide, amount, sourceTank or 0)
+    if not ok then return 0, tostring(res) end
+    if res ~= true then return 0, tostring(moved or "transfer refused") end
+    return tonumber(moved) or 0
+end
+
+-- Tops the module's hatch up to `target` litres from the staging tank, capped by
+-- what the hatch can hold. Returns moved, err. Moving nothing is normal -- it
+-- means the hatch is already full enough, or the staging tank has not refilled
+-- yet.
+function Station:fillHatch(target)
+    if not self:hasFluid() then return 0, "no fluid half configured" end
+    local level, capacity = self:hatchTank()
+    if capacity > 0 and target > capacity then target = capacity end
+    local want = target - level
+    if want <= 0 then return 0 end
+
+    if self.dryRun then
+        self.log(string.format("[dry] %s: fill hatch %d -> %d mB", self.label, level, target))
+        return want
+    end
+    return self:moveFluid(self.fluidInterfaceSide, self.inputHatchSide, want, self.fluidTank)
+end
+
+-- Empties the module's hatch back through the interface into the network. Needed
+-- when the plasma choice changes: a GT hatch holds ONE fluid, so it will refuse
+-- the new plasma until the old one is gone. Clear the staging config first.
+-- Returns moved, err.
+function Station:drainHatch()
+    if not self:hasFluid() then return 0, "no fluid half configured" end
+    local level = self:hatchTank()
+    if level <= 0 then return 0 end
+    if self.dryRun then
+        self.log(string.format("[dry] %s: drain %d mB from the hatch", self.label, level))
+        return level
+    end
+    return self:moveFluid(self.inputHatchSide, self.fluidInterfaceSide, level, 0)
 end
 
 -- Drone loading is split into a non-blocking begin + poll so many stations can

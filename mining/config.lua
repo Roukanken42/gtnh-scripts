@@ -22,6 +22,15 @@ local cfg = {}
 --       inputBusSide  = 2,                 -- transposer side facing the input bus
 --       interfaceSlot = 1,                 -- staging slot; distinct per station
 --                                          -- when several share one interface
+--
+--       -- Plasma feed (optional). A SECOND transposer, because one cannot serve
+--       -- an item inventory and a tank at the same time. All four go together.
+--       fluidTransposer    = "<transposer-address>",
+--       fluidInterface     = "<me_interface-address>",   -- the FLUID interface
+--       fluidInterfaceSide = 1,            -- transposer side facing it
+--       inputHatchSide     = 0,            -- transposer side facing the input HATCH
+--       fluidTank          = 0,            -- which of its 6 tanks, 0-BASED;
+--                                          -- distinct per station when shared
 --     },
 --   }
 --
@@ -154,6 +163,21 @@ cfg.supply = {
     -- pattern's input count is already its volume -- nothing to measure.
     plasma = {
         -- ["Radon Plasma"] = 64000,
+    },
+
+    -- How much plasma to keep in each module's INPUT HATCH, in meteors' worth.
+    -- Expressing it per-meteor makes it scale itself with the plasma tier: 64
+    -- meteors is 52,800 L of Helium but only 9,600 L of Plutonium-241, since a
+    -- higher tier burns far fewer litres per meteor. There is no reason to hoard
+    -- more -- the interface keeps another 16,000 L staged behind it.
+    --
+    -- Note a module running 8 parallels chews through this eight times faster
+    -- than one running 1, so raise it if the feed cycle is slow.
+    hatchMeteors = 64,
+
+    -- Per-plasma override in LITRES, when the meteor figure above does not suit.
+    hatchLitres = {
+        -- ["Helium Plasma"] = 32000,
     },
 
     -- Refill only once stock falls below this fraction of target, then fill to

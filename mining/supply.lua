@@ -111,7 +111,9 @@ local function slots(list)
     -- primary one, which is the label a craft request has to be made against.
     table.sort(keys)
     for _, k in ipairs(keys) do
-        out[#out + 1] = { name = list[k].name, count = list[k].count or 0 }
+        -- The original slot key is kept: storeInterfacePatternInput addresses
+        -- inputs by it, and whether it counts from 0 or 1 is not documented.
+        out[#out + 1] = { name = list[k].name, count = list[k].count or 0, index = k }
     end
     return out
 end
@@ -369,6 +371,50 @@ function supply.request(itf, entry, crafts)
         end
     end
     return nil, "'" .. entry.label .. "' is not craftable on the supply network"
+end
+
+-- Writes a plasma pattern's ae2fc DROP into a database slot, which is the form
+-- setFluidInterfaceConfiguration wants -- and the only place to get one, since
+-- the local net holds plasma as fluid and never as drops.
+--
+-- storeInterfacePatternInput addresses inputs by slot index, and nothing says
+-- whether that counts from 0 or 1, so the pattern's own key is tried first and
+-- the neighbours after; the database is read back each time to see which took
+-- (store() is silent on failure, exactly as Station:ensureDbSlot found for items).
+-- Returns true, or false + error.
+function supply.storePlasmaDrop(itf, entry, database, dbSlot)
+    if not entry or entry.kind ~= "plasma" then return false, "not a plasma pattern" end
+    if itf.storeInterfacePatternInput == nil then
+        return false, "interface has no storeInterfacePatternInput"
+    end
+    local input = entry.inputs[1]
+    if not input then return false, "plasma pattern has no input to store" end
+
+    local base = input.index or 1
+    for _, idx in ipairs({ base, base + 1, base - 1 }) do
+        pcall(database.clear, dbSlot)
+        local ok = pcall(itf.storeInterfacePatternInput, entry.index, idx, database.address, dbSlot)
+        if ok then
+            local okGet, stack = pcall(database.get, dbSlot)
+            if okGet and type(stack) == "table" and (stack.name or stack.label) then
+                return true
+            end
+        end
+    end
+    pcall(database.clear, dbSlot)
+    return false, "could not store the drop for " .. entry.plasma.name
+        .. " (pattern " .. tostring(entry.index) .. ")"
+end
+
+-- Litres of plasma a module's input hatch should hold. Expressed in METEORS'
+-- worth, so it scales itself with the plasma tier -- 64 meteors is 52,800 L of
+-- Helium but only 9,600 L of Plutonium-241, which is the whole point of running a
+-- higher tier. A per-plasma litre figure in cfg.supply.hatchLitres overrides it.
+function supply.hatchLitres(plasma, cfg)
+    cfg = cfg or {}
+    local override = cfg.hatchLitres and cfg.hatchLitres[plasma.name]
+    if override then return override end
+    return (cfg.hatchMeteors or 64) * plasma.consumed
 end
 
 -- State of a crafting job: "computing" | "done" | "failed" | "canceled".

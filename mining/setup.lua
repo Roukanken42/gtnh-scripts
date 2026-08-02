@@ -87,7 +87,11 @@ local PROBE_PLASMA_L = 8000
 local PROBE_KITS = 256
 -- How long to wait for a staged fluid to show up.
 local FLUID_TIMEOUT = 20
--- One ME fluid interface tank, kept as headroom on top of what the hatches need.
+-- How long to wait on a supply request for kits or plasma. A large plasma order
+-- arrives in pieces, so this is the settle window as well as the job window.
+local STOCK_TIMEOUT = 30
+-- One ME fluid interface tank. Each hatch is staged through its own, and they are
+-- all stocked at once, so this is charged per hatch rather than once overall.
 local STAGING_L = 16000
 
 -- ---- helpers -------------------------------------------------------------
@@ -273,7 +277,7 @@ local function ensureKits(net, material, itf, dbAddr)
     local job, err = supply.request(itf, entry, crafts)
     if not job then return false, tostring(err) end
 
-    local deadline = computer.uptime() + 30
+    local deadline = computer.uptime() + STOCK_TIMEOUT
     while computer.uptime() < deadline do
         local state = supply.jobState(job)
         if state ~= "computing" then break end
@@ -307,17 +311,23 @@ local function ensurePlasma(net, entry, itf, litres)
     local job, err = supply.request(itf, entry, crafts)
     if not job then return false, tostring(err) end
 
-    local deadline = computer.uptime() + 30
+    local deadline = computer.uptime() + STOCK_TIMEOUT
     while computer.uptime() < deadline do
         if supply.jobState(job) ~= "computing" then break end
         os.sleep(POLL_INTERVAL)
     end
-    -- The fluid can take a moment to land after the job itself reports done.
-    deadline = computer.uptime() + 10
+    -- The fluid can take a while to land after the job itself reports done, and a
+    -- large request arrives in pieces.
+    deadline = computer.uptime() + STOCK_TIMEOUT
     while computer.uptime() < deadline and have() < litres do os.sleep(POLL_INTERVAL) end
 
     now = have()
     if now <= 0 then return false, "no " .. entry.plasma.name .. " arrived" end
+    if now < litres then
+        -- Partial is not success: the hatches it does not cover stay empty, and an
+        -- empty hatch is indistinguishable from a wrong side during detection.
+        return false, string.format("only %d of %d L of %s", now, litres, entry.plasma.name)
+    end
     return true, string.format("%d L of %s in the local net", now, entry.plasma.name)
 end
 
@@ -570,12 +580,19 @@ end
 
 -- Plasma has to be IN the local net before a fluid interface can stage any: the
 -- interface only offers what its network holds.
+--
+-- Every hatch gets its OWN staging tank, and phase A primes them all at once, so
+-- the network has to cover a full tank for each of them on top of what actually
+-- lands in the hatches -- not one tank between them. Plus a spare tank of
+-- headroom, since a request that comes up short leaves hatches unfilled and their
+-- miners unmatched.
 if hatchTotal > 0 and plasmaEntry then
-    local want = hatchTotal * PROBE_PLASMA_L + STAGING_L
+    local want = hatchTotal * (STAGING_L + PROBE_PLASMA_L) + STAGING_L
     local okP, msg = ensurePlasma(net, plasmaEntry, supplyItf, want)
     print((okP and "Plasma OK: " or "WARNING: plasma -- ") .. tostring(msg))
     if not okP then
-        print("         hatches cannot be filled, so they cannot be matched to miners.")
+        print(string.format("         %d hatch(es) need %d L staged at once; any that stay "
+            .. "empty cannot be matched to a miner.", hatchTotal, want))
     end
 end
 

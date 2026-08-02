@@ -66,30 +66,9 @@ end
 local component = optional("component")
 local computer = optional("computer")
 
+local dbslots = require("db")
+
 local transport = {}
-
--- Per-database metadata cache so each item type is store()d only once per run,
--- even across stations that share a database:
---   dbCache[dbAddress] = { byLabel = { [label] = dbSlot }, next = <next free slot> }
-local dbCache = {}
-local function cacheFor(dbAddress)
-    local c = dbCache[dbAddress]
-    if not c then
-        c = { byLabel = {}, next = 1 }
-        dbCache[dbAddress] = c
-    end
-    return c
-end
-
--- Reserves a database slot from the same counter Station:ensureDbSlot draws on,
--- so a caller staging its own metadata -- the ae2fc plasma drop the fluid
--- interface needs, say -- cannot land on top of a cached item entry.
-function transport.reserveDbSlot(dbAddress)
-    local cache = cacheFor(dbAddress)
-    local slot = cache.next
-    cache.next = slot + 1
-    return slot
-end
 
 -- Resolves a (possibly abbreviated) component address to a proxy, or nil + err.
 -- An already-resolved proxy passes straight through, which is how tests inject
@@ -147,10 +126,15 @@ transport.Station = Station
 function transport.new(spec)
     local self = setmetatable({}, Station)
 
-    local db, e3 = resolve(spec.database)
-    if not db then return nil, "database: " .. tostring(e3) end
-    self.database = db
-    self.dbAddress = db.address
+    local database, e3 = resolve(spec.database)
+    if not database then return nil, "database: " .. tostring(e3) end
+    -- Slots come from the shared allocator, so a station cannot land on metadata
+    -- another part of the system is relying on (see db.lua).
+    local handle, e4 = dbslots.open(database)
+    if not handle then return nil, "database: " .. tostring(e4) end
+    self.database = database
+    self.db = handle
+    self.dbAddress = handle.address
 
     -- Either half may be absent, but not both. A module in normal service has
     -- both; setup.lua builds fluid-only handles while it is still working out
@@ -214,22 +198,22 @@ end
 -- (once per run per database) if needed. nil + err if the item is not in ME.
 function Station:ensureDbSlot(filter, label)
     if not self:hasItems() then return nil, "no item half configured" end
-    local cache = cacheFor(self.dbAddress)
-    if cache.byLabel[label] then return cache.byLabel[label] end
 
-    local slot = cache.next
+    -- One slot per item label, shared across every station on this database. A
+    -- name already seen was written on a previous call and can be reused as-is.
+    local slot, fresh = self.db:slot("item:" .. label)
+    if not slot then return nil, tostring(fresh) end
+    if not fresh then return slot end
+
     local ok, err = pcall(self.interface.store, filter, self.dbAddress, slot, 1)
     if not ok then return nil, "interface.store errored: " .. tostring(err) end
 
     -- store() is silent on "nothing matched", so confirm the slot got populated.
-    local okGet, stack = pcall(self.database.get, slot)
-    if not (okGet and type(stack) == "table" and (stack.name or stack.label)) then
-        pcall(self.database.clear, slot)   -- keep the database tidy on failure
-        return nil, "'" .. label .. "' not found in the ME network"
+    local held, why = self.db:holds(slot, nil)
+    if not held then
+        self.db:clear(slot)   -- keep the database tidy on failure
+        return nil, "'" .. label .. "' not found in the ME network (" .. why .. ")"
     end
-
-    cache.byLabel[label] = slot
-    cache.next = slot + 1
     return slot
 end
 

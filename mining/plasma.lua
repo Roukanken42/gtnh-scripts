@@ -19,6 +19,7 @@
 
 local miners = require("miners")
 local transport = require("transport")
+local dbslots = require("db")
 local supply = require("supply")
 local plasmas = require("plasmas")
 local localnet = require("localnet")
@@ -95,8 +96,10 @@ local function plasmaDbSlot(p)
     -- Resolved against the database: a fake pattern's output is a renamed item and
     -- the pattern slot only reports its base type, so requesting by that would
     -- craft the wrong thing (see supply.resolveOutput).
-    local scratch = transport.reserveDbSlot(cfg.database)
-    local catalog = supply.catalog(itf, cfg.database, scratch)
+    local handle, dbErr = dbslots.open(cfg.database)
+    if not handle then return nil, "database: " .. tostring(dbErr) end
+
+    local catalog = supply.catalog(itf, handle)
     local entry
     for _, e in ipairs(catalog) do
         if e.kind == "plasma" and e.plasma.tier == p.tier then entry = e; break end
@@ -106,11 +109,9 @@ local function plasmaDbSlot(p)
             .. " -- its drop is the only way to name a fluid to the interface"
     end
 
-    local database = require("component").proxy(cfg.database)
-    local slot = transport.reserveDbSlot(cfg.database)
-    local ok, serr = supply.storePlasmaDrop(itf, entry, database, slot)
-    if not ok then return nil, serr end
-    return slot
+    -- The drop keeps a permanent slot: the fluid interface points at it for as
+    -- long as this plasma is the one being staged.
+    return supply.storePlasmaDrop(itf, entry, handle)
 end
 
 -- Fills a station's hatch to `target`, waiting for the staging tank to refill

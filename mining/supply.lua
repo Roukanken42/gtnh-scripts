@@ -341,22 +341,20 @@ end
 -- entries and, separately, the ones that could not be identified (each with a
 -- .reason) so they can be shown rather than silently dropped.
 --
--- Pass `database` (a proxy) and a scratch `dbSlot` to resolve each pattern's true
--- output item. Without it, entry.label is only the output item TYPE's name, which
--- for a renamed fake output points at a different craftable entirely -- so any
--- caller that intends to REQUEST something must supply them.
-function supply.catalog(itf, database, dbSlot)
-    if type(database) == "string" then
-        local ok, p = pcall(components().proxy, database)
-        database = ok and p or nil
-    end
+-- Pass a db.lua handle (or a database address) to resolve each pattern's true
+-- output item. Without one, entry.label is only the output item TYPE's name,
+-- which for a renamed fake output points at a different craftable entirely -- so
+-- any caller that intends to REQUEST something must supply it.
+function supply.catalog(itf, handle)
+    if type(handle) == "string" then handle = require("db").open(handle) end
+
     local usable, unknown = {}, {}
     for _, p in ipairs(supply.readPatterns(itf)) do
         local entry = supply.classify(p)
         if entry.kind == "unknown" then unknown[#unknown + 1] = entry
         else
-            if database and dbSlot then
-                local ok, err = supply.resolveOutput(itf, entry, database, dbSlot)
+            if handle then
+                local ok, err = supply.resolveOutput(itf, entry, handle)
                 if not ok then entry.outputError = err end
             end
             usable[#usable + 1] = entry
@@ -429,21 +427,19 @@ end
 -- the database is read back each time to see which took, because store() is
 -- silent on failure (exactly as Station:ensureDbSlot found for items).
 -- Returns the stack, or nil + error.
-local function storePatternSlot(itf, method, patternIndex, slotIndex, database, dbSlot)
+local function storePatternSlot(itf, method, patternIndex, slotIndex, handle, dbSlot)
     if itf[method] == nil then return nil, "interface has no " .. method end
 
     local base = slotIndex or 1
     for _, idx in ipairs({ base, base + 1, base - 1 }) do
-        pcall(database.clear, dbSlot)
-        local ok = pcall(itf[method], patternIndex, idx, database.address, dbSlot)
+        handle:clear(dbSlot)
+        local ok = pcall(itf[method], patternIndex, idx, handle.address, dbSlot)
         if ok then
-            local okGet, stack = pcall(database.get, dbSlot)
-            if okGet and type(stack) == "table" and (stack.name or stack.label) then
-                return stack
-            end
+            local stack = handle:get(dbSlot)
+            if stack then return stack end
         end
     end
-    pcall(database.clear, dbSlot)
+    handle:clear(dbSlot)
     return nil, method .. " found nothing at pattern " .. tostring(patternIndex)
         .. " slot " .. tostring(base)
 end
@@ -454,17 +450,23 @@ supply.storePatternSlot = storePatternSlot
 -- setFluidInterfaceConfiguration wants -- and the only place to get one, since
 -- the local net holds plasma as fluid and never as drops.
 -- Returns true, or false + error.
-function supply.storePlasmaDrop(itf, entry, database, dbSlot)
-    if not entry or entry.kind ~= "plasma" then return false, "not a plasma pattern" end
+-- The drop is long-lived -- a fluid interface keeps pointing at it -- so it gets
+-- a permanent named slot rather than borrowing one. Returns the slot, or nil+err.
+function supply.storePlasmaDrop(itf, entry, handle)
+    if not entry or entry.kind ~= "plasma" then return nil, "not a plasma pattern" end
     local input = entry.inputs[1]
-    if not input then return false, "plasma pattern has no input to store" end
+    if not input then return nil, "plasma pattern has no input to store" end
+
+    local dbSlot, fresh = handle:slot("plasma:" .. entry.plasma.name)
+    if not dbSlot then return nil, tostring(fresh) end
+    if not fresh and handle:label(dbSlot) then return dbSlot end
 
     local stack, err = storePatternSlot(itf, "storeInterfacePatternInput",
-        entry.index, input.index, database, dbSlot)
+        entry.index, input.index, handle, dbSlot)
     if not stack then
-        return false, "could not store the drop for " .. entry.plasma.name .. ": " .. tostring(err)
+        return nil, "could not store the drop for " .. entry.plasma.name .. ": " .. tostring(err)
     end
-    return true
+    return dbSlot
 end
 
 -- Resolves a pattern's true OUTPUT item -- the thing a craft request has to be
@@ -477,10 +479,11 @@ end
 -- Fills entry.output = { label, name, damage, hasTag } and repoints entry.label at
 -- the true label, keeping the type's name in entry.slotLabel for display.
 -- Returns true, or false + error.
-function supply.resolveOutput(itf, entry, database, dbSlot)
+function supply.resolveOutput(itf, entry, handle)
     if not entry or not entry.outputIndex then return false, "entry has no output slot" end
+    -- Scratch: read straight back, never depended on afterwards.
     local stack, err = storePatternSlot(itf, "storeInterfacePatternOutput",
-        entry.index, entry.outputIndex, database, dbSlot)
+        entry.index, entry.outputIndex, handle, handle:scratch())
     if not stack then return false, tostring(err) end
 
     entry.output = {

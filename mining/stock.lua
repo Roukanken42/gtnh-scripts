@@ -18,7 +18,7 @@
 -- See config.lua for the supply interface address and the target levels.
 
 local supply = require("supply")
-local transport = require("transport")
+local dbslots = require("db")
 local localnet = require("localnet")
 local cfg = require("config")
 
@@ -37,22 +37,25 @@ if not net then
     print("Warning: no local me_controller found -- stock levels will read as zero.")
 end
 
+-- One shared slot allocator for this database, so nothing here lands on metadata
+-- setup or the controller is relying on (see db.lua).
+local handle, dbErr = dbslots.open(cfg.database)
+if not handle then
+    print("WARNING: " .. tostring(dbErr) .. " -- pattern outputs cannot be resolved,")
+    print("         so nothing can be requested. Run `setup`, or set cfg.database.")
+end
+
 -- ---- helpers ---------------------------------------------------------------
 
--- The catalog, built once. A database and a scratch slot are passed so each
--- pattern's REAL output item is read back: a fake pattern's output is usually a
--- renamed item, and the pattern slot only reports the underlying type. Without
--- this, "Mining Kit: Steel" reads as "Steel Drill Tip" and a request would craft
--- drill tips into main-net storage instead of pushing anything across.
+-- The catalog, built once. The database handle is passed so each pattern's REAL
+-- output item is read back: a fake pattern's output is usually a renamed item,
+-- and the pattern slot only reports the underlying type. Without this,
+-- "Mining Kit: Steel" reads as "Steel Drill Tip" and a request would craft drill
+-- tips into main-net storage instead of pushing anything across.
 local catalogCache, unknownCache
 local function getCatalog()
     if not catalogCache then
-        local scratch = cfg.database and transport.reserveDbSlot(cfg.database) or nil
-        catalogCache, unknownCache = supply.catalog(itf, cfg.database, scratch)
-        if not cfg.database then
-            print("WARNING: no database configured -- pattern outputs cannot be resolved,")
-            print("         so nothing can be requested. Run `setup`, or set cfg.database.")
-        end
+        catalogCache, unknownCache = supply.catalog(itf, handle)
     end
     return catalogCache, unknownCache
 end
@@ -104,17 +107,10 @@ local function cmdPatterns()
     print(string.format("Interface %s: %d pattern(s) found in %d slots probed.",
         itf.address:sub(1, 8), #raw, supply.MAX_PATTERN_SLOTS))
 
-    local database = cfg.database
-    local scratch = database and require("transport").reserveDbSlot(database) or nil
-    if database then
-        local ok, p = pcall(require("component").proxy, database)
-        database = ok and p or nil
-    end
-
     for _, p in ipairs(raw) do
         local entry = supply.classify(p)
-        if database and entry.kind ~= "unknown" then
-            local ok, err = supply.resolveOutput(itf, entry, database, scratch)
+        if handle and entry.kind ~= "unknown" then
+            local ok, err = supply.resolveOutput(itf, entry, handle)
             if not ok then entry.outputError = err end
         end
         print(string.format("  [%2d] %-34s %s", p.index, tostring(entry.label), entry.kind))
@@ -143,7 +139,7 @@ local function cmdPatterns()
     if #raw == 0 then
         print("  Nothing. Is the adapter on the interface that holds the patterns?")
     end
-    if not database then
+    if not handle then
         print("  (no database configured, so real output labels could not be read)")
     end
 end

@@ -40,6 +40,7 @@ local miners = require("miners")
 local drones = require("drones")
 local localnet = require("localnet")
 local transport = require("transport")
+local dbslots = require("db")
 local supply = require("supply")
 local plasmas = require("plasmas")
 
@@ -68,16 +69,11 @@ local SETTLE_TIMEOUT = 60
 -- interface; the transposer sees it at slot-1). Config slot 1's item does not
 -- surface to the transposer, so use 2.
 local PROBE_CFG_SLOT = 2
-local PROBE_DB_SLOT = 1
 
 -- Fluid probing. The interface tank we stage plasma through during detection
 -- (0-BASED, like every fluid-interface index -- see transport.lua), and the db
 -- slot its ae2fc drop goes in.
 local PROBE_FLUID_TANK = 0
-local PROBE_DROP_SLOT = 2
--- Scratch slot for reading a pattern's real output back; kept apart from the drop
--- slot so resolving a catalog cannot overwrite the staged plasma.
-local PROBE_SCRATCH_SLOT = 3
 -- Plasma put in a hatch to make a module runnable. One operation costs
 -- (consumed x parallels), at worst 825 x 8 for Helium, so this covers a few.
 local PROBE_PLASMA_L = 8000
@@ -196,24 +192,22 @@ end
 
 -- Stores the probe drone's metadata into the database via the local net (for use
 -- with setInterfaceConfiguration). Returns the db slot, or nil + error.
-local function storeProbe(net, dbAddr, probe)
+local function storeProbe(net, handle, probe)
     if net.store == nil then return nil, "local net has no store()" end
-    local okStore, res = pcall(net.store, { label = probe.label }, dbAddr, PROBE_DB_SLOT, 1)
+
+    -- A permanent named slot: nothing else can be handed it, which is exactly the
+    -- collision that used to leave a plasma drop where the drone should be.
+    local slot, err = handle:slot("probe-drone")
+    if not slot then return nil, tostring(err) end
+
+    local okStore, res = pcall(net.store, { label = probe.label }, handle.address, slot, 1)
     if not okStore then return nil, "store() errored: " .. tostring(res) end
 
-    local okp, db = pcall(component.proxy, dbAddr)
-    if not (okp and db and db.get) then return nil, "database " .. tostring(dbAddr) .. " unreachable" end
-    local okg, st = pcall(db.get, PROBE_DB_SLOT)
-    if not (okg and type(st) == "table" and (st.name or st.label)) then
-        return nil, "database did not accept the probe drone"
-    end
     -- The ME filter is not reliably exact, so confirm what landed is the drone
     -- itself: staging the wrong metadata would fail later and much less clearly.
-    local got = st.label or st.name
-    if got ~= probe.label then
-        return nil, "database slot holds '" .. tostring(got) .. "', not " .. probe.label
-    end
-    return PROBE_DB_SLOT
+    local held, what = handle:holds(slot, probe.label)
+    if not held then return nil, what end
+    return slot
 end
 
 -- The interfaces whose OWN network holds `label`. Only those can possibly stage
@@ -263,18 +257,6 @@ end
 -- Confirms a database slot really holds `label`, so a stage that fails can be
 -- blamed on the interface rather than on metadata that was never written.
 -- Returns true + what is there, or false + why not.
-local function dbSlotHolds(dbAddr, dbSlot, label)
-    local ok, db = pcall(component.proxy, dbAddr)
-    if not ok or not db or db.get == nil then return false, "no database component" end
-    local okg, stack = pcall(db.get, dbSlot)
-    if not okg or type(stack) ~= "table" then return false, "slot " .. dbSlot .. " is empty" end
-    local got = stack.label or stack.name
-    if label and got ~= label then
-        return false, "slot " .. dbSlot .. " holds '" .. tostring(got) .. "'"
-    end
-    return true, tostring(got)
-end
-
 -- Which interface config slot actually accepts a stocking request. The item slots
 -- have already caught us out once -- there is a note that slot 1's item does not
 -- surface to the transposer -- and the fluid side of the same block turned out to
@@ -364,13 +346,13 @@ end
 -- from the supply interface's kit pattern rather than being guessed at.
 -- Returns true, or false + reason (which is a warning, not a hard stop: the kits
 -- may have been put there by hand).
-local function ensureKits(net, material, itf, dbAddr)
+local function ensureKits(net, material, itf, handle)
     if not itf then return false, "no supply interface found to request kits from" end
 
     -- Resolved against the database so the request targets the fake pattern's real
     -- (renamed) output rather than the base item its slot reports.
     local entry
-    for _, e in ipairs(supply.catalog(itf, dbAddr, PROBE_SCRATCH_SLOT)) do
+    for _, e in ipairs(supply.catalog(itf, handle)) do
         if e.kind == "kit" and e.material == material then entry = e; break end
     end
     if not entry then
@@ -447,20 +429,19 @@ end
 -- fluid to setFluidInterfaceConfiguration -- the local net holds plasma as fluid,
 -- never as drops, so it is lifted out of the supply interface's own pattern.
 -- Returns plasma, dbSlot, or nil + error.
-local function stagePlasmaDrop(itf, dbAddr)
+local function stagePlasmaDrop(itf, handle)
     if not itf then return nil, "no supply interface found to take a plasma drop from" end
-    local database = component.proxy(dbAddr)
 
     -- Any plasma will do for detection; take the cheapest per litre to probe with.
     local best
-    for _, e in ipairs(supply.catalog(itf, database, PROBE_SCRATCH_SLOT)) do
+    for _, e in ipairs(supply.catalog(itf, handle)) do
         if e.kind == "plasma" and (not best or e.plasma.tier < best.plasma.tier) then best = e end
     end
     if not best then return nil, "the supply interface has no plasma pattern" end
 
-    local ok, err = supply.storePlasmaDrop(itf, best, database, PROBE_DROP_SLOT)
-    if not ok then return nil, tostring(err) end
-    return best, PROBE_DROP_SLOT
+    local slot, err = supply.storePlasmaDrop(itf, best, handle)
+    if not slot then return nil, tostring(err) end
+    return best, slot
 end
 
 -- Finds which me_interface a FLUID transposer stages through, and on which side:
@@ -581,7 +562,6 @@ local M = {
     sideHasLabel = sideHasLabel,
     scanSides = scanSides,
     storeProbe = storeProbe,
-    dbSlotHolds = dbSlotHolds,
     stageProbe = stageProbe,
     detectInterface = detectInterface,
     interfacesHolding = interfacesHolding,
@@ -625,13 +605,19 @@ local probeDrone = drones.fromName(probe.label) or { name = probe.label }
 print(string.format("Local net OK. Probe drone: %s (tier %s).",
     probe.label, tostring(probe.tier)))
 
--- 2. Database for staging probes.
+-- 2. Database for staging probes. Slots come from db.lua by NAME, so the probe
+-- drone, the plasma drop and the scratch entry cannot land on each other -- which
+-- they used to, silently, leaving a plasma drop where the drone should have been.
 local dbAddr = pickDatabase()
 if not dbAddr then
     print("ERROR: no database component. Add a Database Upgrade in an adapter.")
     return M
 end
-local dbSlot, derr = storeProbe(net, dbAddr, probe)
+local handle, dbErr = dbslots.open(dbAddr)
+if not handle then print("ERROR: " .. tostring(dbErr)); return M end
+print(string.format("Database %s.. has %d slot(s).", dbAddr:sub(1, 8), handle:size()))
+
+local dbSlot, derr = storeProbe(net, handle, probe)
 if not dbSlot then print("ERROR: " .. tostring(derr)); return M end
 
 -- 2b. Kits and plasma. A module needs a drone, kits AND plasma to mine, so both
@@ -640,7 +626,7 @@ local supplyItf, supplyErr = supply.find(nil)
 if not supplyItf then print("WARNING: " .. tostring(supplyErr)) end
 local probeMaterial = (probeDrone.material) or (drones.get(probe.tier or 0) or {}).material
 if probeMaterial then
-    local okKits, kitMsg = ensureKits(net, probeMaterial, supplyItf, dbAddr)
+    local okKits, kitMsg = ensureKits(net, probeMaterial, supplyItf, handle)
     print((okKits and "Kits OK: " or "WARNING: kits -- ") .. tostring(kitMsg))
     if not okKits then
         print("       detection needs them; continuing in case they are stocked by hand.")
@@ -649,7 +635,7 @@ else
     print("WARNING: unknown material for the probe drone; cannot check kits.")
 end
 
-local plasmaEntry, dropSlot = stagePlasmaDrop(supplyItf, dbAddr)
+local plasmaEntry, dropSlot = stagePlasmaDrop(supplyItf, handle)
 local probePlasma = plasmaEntry and plasmaEntry.plasma
 if not plasmaEntry then
     print("WARNING: no plasma to probe with (" .. tostring(dropSlot) .. ").")
@@ -718,7 +704,7 @@ end
 -- The probe's metadata has to still be in the database: everything since
 -- storeProbe has also been writing to it, and a cleared slot would make every
 -- interface look like it refused.
-local okDb, dbWhat = dbSlotHolds(dbAddr, dbSlot, probe.label)
+local okDb, dbWhat = handle:holds(dbSlot, probe.label)
 print(string.format("Probe metadata in database slot %d: %s", dbSlot, dbWhat))
 if not okDb then
     print("  Nothing can be staged without it -- no input bus will be paired.")
@@ -959,11 +945,11 @@ end
 
 -- Restore miners to their original on/off state, and tidy the probe metadata.
 for _, m in ipairs(minerList) do m:setEnabled(wasOn[m.address] == true) end
-local okdb, db = pcall(component.proxy, dbAddr)
-if okdb and db and db.clear then
-    pcall(db.clear, PROBE_DB_SLOT)
-    pcall(db.clear, PROBE_DROP_SLOT)
-    pcall(db.clear, PROBE_SCRATCH_SLOT)
+-- The probe metadata stays put: the slots are named, so a later run reuses them
+-- rather than tripping over them, and leaving them filled saves re-storing.
+print(string.format("Database slots used: %d of %d.", handle:used(), handle:size()))
+for _, e in ipairs(handle:dump()) do
+    print(string.format("  %2d  %-24s %s", e.slot, e.name, tostring(e.label)))
 end
 
 -- 5. Build stations, assign a distinct interface slot per shared interface.

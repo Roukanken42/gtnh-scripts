@@ -4,6 +4,7 @@
 inspect/main.lua
 install.lua
 ? mining/config.lua
+mining/db.lua
 mining/drone.lua
 mining/drones.lua
 mining/estimate.lua

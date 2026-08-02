@@ -105,6 +105,21 @@ function Miner:isActive()
     return false
 end
 
+-- Whether the machine is ALLOWED to work, which is not the same as isActive():
+-- a module waiting on plasma is allowed but not active. Returns nil when the
+-- build exposes no getter, so a caller that has to stop the machine and put it
+-- back knows the difference between "it was off" and "I cannot tell" -- guessing
+-- would silently leave a deliberately-disabled module running, or the reverse.
+function Miner:isEnabled()
+    for _, name in ipairs({ "isWorkAllowed", "getWorkAllowed", "isAllowedToWork" }) do
+        if self.proxy[name] ~= nil then
+            local ok, v = pcall(self.proxy[name])
+            if ok and type(v) == "boolean" then return v end
+        end
+    end
+    return nil
+end
+
 -- TecTech parameters -------------------------------------------------------
 
 -- Sets the target mining distance. The module's applied distance lags this and

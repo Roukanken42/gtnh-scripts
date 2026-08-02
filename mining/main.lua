@@ -22,6 +22,7 @@ local localnet = require("lib.hw.localnet")
 local dbslots = require("lib.hw.db")
 local drones = require("lib.gtnh.drones")
 local plasmas = require("lib.gtnh.plasmas")
+local estimate = require("lib.calc.estimate")
 local ui = require("lib.ui")
 local cli = require("lib.cli")
 local cfg = require("config")
@@ -45,10 +46,21 @@ local ctx = cli.start({
             .. "the controller only keeps the consumables flowing. It does not "
             .. "enable, disable or reconfigure a module, so quitting leaves the fleet "
             .. "mining -- with whatever is already in its hatches.",
-        "Plasma is fleet-wide because a GT hatch holds one fluid at a time. Press P "
-            .. "to open the plasma list, arrows to choose, ENTER to select, ENTER "
-            .. "again to confirm. Every hatch holding something else is drained back "
-            .. "into the network first, so the switch takes a few cycles to settle.",
+        "The arrows move down the module list and ENTER opens one. That screen shows "
+            .. "its meteor pool and the ore coming out of it (TAB switches between "
+            .. "the two), and lets you drive its drone, distance, overdrive and "
+            .. "plasma: arrows pick a field, ENTER starts editing, arrows change the "
+            .. "value, ENTER applies. Both tables are recomputed from the value being "
+            .. "dialled, so you see what a change would do BEFORE applying it.",
+        "Distance, overdrive and a drone swap need the module STOPPED -- TecTech "
+            .. "accepts a parameter write no other way -- so applying one halts it, "
+            .. "writes, and re-allows work. It comes back on unless it was off.",
+        "Plasma is fleet-wide by default because a GT hatch holds one fluid at a "
+            .. "time. Press P for the plasma list, arrows to choose, ENTER to select, "
+            .. "ENTER again to confirm; every hatch holding something else is drained "
+            .. "back into the network first, so the switch takes a few cycles to "
+            .. "settle. A single module can be switched on its own from its detail "
+            .. "screen.",
         "What to stock is read off the hardware: a module's input bus says which "
             .. "drone it runs, and that says which material its kits are made of. "
             .. "Set cfg.supply.target or cfg.supply.plasma to override a figure; "
@@ -152,9 +164,9 @@ local showLog = false
 local view = { miners = {}, kits = {}, plasmas = {}, totals = {} }
 local stock = { items = {}, fluids = {} }
 
--- Where the keyboard is: which panel has focus, the row it is on, and the row
--- awaiting a second ENTER. control.key owns the transitions.
-local picker = { focus = nil, cursor = 1, confirm = nil }
+-- Where the keyboard is: which screen, which row, and what is being edited.
+-- control.key owns every transition; main only carries the actions out.
+local nav = control.newNav()
 
 local MATERIALS = control.materialsByTier()
 
@@ -187,7 +199,11 @@ local function readFleet()
                 local d = drones.fromName(s.label)
                 -- "MK-X" rather than the full "Mining Drone MK-X": the column is
                 -- headed DRONE and every one of them starts the same way.
-                if d then row.drone, row.material = "MK-" .. d.roman, d.material; break end
+                if d then
+                    row.drone, row.material = "MK-" .. d.roman, d.material
+                    row.droneTier = d.tier
+                    break
+                end
             end
         end
 
@@ -196,7 +212,10 @@ local function readFleet()
             row.hatchFluid = st:hatchFluid()
             row.staged = st:bufferTank()
             local p = row.hatchFluid and plasmas.byName[row.hatchFluid]
-            if p then row.hatchTarget = supply.hatchLitres(p, scfg) end
+            if p then
+                row.plasma = p
+                row.hatchTarget = supply.hatchLitres(p, scfg)
+            end
         end
 
         -- Precedence is worst-first: a module with no station cannot be helped at
@@ -402,6 +421,177 @@ local function runCycle()
     }
 end
 
+-- ---- the detail screen -------------------------------------------------------
+
+-- Seconds as "41.2s" / "3m20s", for a mining cycle.
+local function secs(t)
+    if not t or t <= 0 then return "-" end
+    if t < 60 then return string.format("%.1fs", t) end
+    return string.format("%dm%02ds", math.floor(t / 60), math.floor(t % 60))
+end
+
+-- A magnitude: EU/t, computation, litres. Whole numbers below a thousand.
+local function si(n)
+    n = n or 0
+    if n < 1e3 then return string.format("%.0f", n) end
+    if n < 1e6 then return string.format("%.2fk", n / 1e3) end
+    if n < 1e9 then return string.format("%.2fM", n / 1e6) end
+    return string.format("%.2fG", n / 1e9)
+end
+
+-- The four drivable parameters of the open module, as the values an EDIT starts
+-- from. Anything the module cannot tell us is nil, and control.key refuses to
+-- start editing a field with no current value -- there is nothing to step from.
+local function currentOf(row)
+    return {
+        drone = row.droneTier,
+        distance = row.distance,
+        overdrive = row.overdrive,
+        plasma = row.plasma and row.plasma.tier or nil,
+    }
+end
+
+-- What the module would be doing at `cur`, whether or not that is what it is set
+-- to: while a field is being edited the pending value is substituted, so the
+-- pool and the ore table show the effect before it is committed. That is the
+-- whole reason for editing here rather than at the machine.
+local function buildDetail(rows)
+    local row = rows[nav.module]
+    if not row then return nil end
+
+    local cur = currentOf(row)
+    if nav.edit then cur[nav.edit.field] = nav.edit.value end
+
+    local d = {
+        miner = row, view = nav.view, field = nav.field,
+        edit = nav.edit and nav.edit.field or nil,
+        pool = {}, yield = {},
+    }
+
+    local fields = {}
+    for i, f in ipairs(control.FIELDS) do
+        local live, note = currentOf(row)[f.key], nil
+        local shown, pending
+
+        if f.key == "drone" then
+            local dr = live and drones.get(live)
+            shown = dr and ("MK-" .. dr.roman) or nil
+            note = dr and (dr.material .. " kits") or "no drone in the input bus"
+            if not row.hasItems then note = "no station -- cannot load a drone" end
+            local pd = nav.edit and drones.get(nav.edit.value)
+            pending = pd and ("MK-" .. pd.roman .. "  " .. pd.material) or nil
+        elseif f.key == "distance" then
+            shown = live and tostring(live) or nil
+            note = "1 .. " .. control.MAX_DISTANCE
+            pending = nav.edit and tostring(nav.edit.value) or nil
+        elseif f.key == "overdrive" then
+            shown = live and string.format("%.1f", live) or nil
+            note = "faster, but a smaller size bonus"
+            pending = nav.edit and string.format("%.1f", nav.edit.value) or nil
+        else
+            local pl = row.plasma
+            shown = pl and pl.name or nil
+            if not row.hasFluid then
+                note = "no plasma feed configured"
+            elseif pl then
+                note = string.format("%s / %s L in the hatch",
+                    si(row.hatchLevel or 0), si(row.hatchTarget or 0))
+            else
+                note = "the hatch is empty"
+            end
+            local pp = nav.edit and plasmas.byTier[nav.edit.value]
+            pending = pp and pp.name or nil
+        end
+
+        fields[i] = {
+            label = f.label, kind = f.kind, value = shown, note = note,
+            pending = (nav.edit and nav.edit.field == f.key) and pending or nil,
+        }
+    end
+    d.fields = fields
+
+    if nav.edit then
+        local f = control.FIELDS[nav.field]
+        d.editHint = "ENTER applies " .. f.label:lower() .. " to this module"
+            .. ((f.key == "drone" or f.key == "distance" or f.key == "overdrive")
+                and " (it will be stopped for the write)" or "")
+            .. " -- the tables below already show the result."
+    end
+
+    -- The estimate needs all four. Say which one is missing rather than showing
+    -- an empty table that looks like "this module mines nothing".
+    local missing
+    if not cur.drone then missing = "a drone in the input bus"
+    elseif not cur.distance then missing = "a distance (the module reports none)"
+    elseif not cur.plasma then missing = "plasma in the hatch"
+    end
+    if missing then
+        d.error = "Cannot estimate without " .. missing .. "."
+        d.summary = string.format("%d/%d parallels", row.parallels or 0, row.parallelCap or 0)
+        return d
+    end
+
+    local est, err = estimate.run({
+        distance = cur.distance, drone = cur.drone, module = row.miner.tier,
+        plasma = cur.plasma, overdrive = cur.overdrive or 1,
+        parallels = row.parallels, computation = cfg.computation,
+    })
+    if not est then
+        d.error = "Cannot estimate: " .. tostring(err)
+        return d
+    end
+
+    for _, e in ipairs(est.pool) do
+        local sz = e.meteor and e.meteor.size
+        d.pool[#d.pool + 1] = {
+            name = e.name, chance = e.chance, parallels = e.parallels,
+            size = sz and (sz[1] .. "-" .. sz[2]) or "-",
+            time = secs(e.time), eut = si(e.eut), computation = si(e.computation),
+            note = e.limit and ("capped by " .. e.limit) or nil,
+        }
+    end
+    -- Meteors in range that the module cannot power or compute are shown too,
+    -- marked: "why is that ore not coming out" is exactly this list.
+    --
+    -- Their chance is their share of the RAW roll, not of the runnable pool --
+    -- the pool percentages above are renormalised over what can actually run, so
+    -- a blocked meteor has no share of it. Showing 0% would read as "this hardly
+    -- ever comes up" when it means "this comes up and is thrown away".
+    local rawWeight = 0
+    for _, e in ipairs(est.pool) do rawWeight = rawWeight + (e.weight or 0) end
+    for _, e in ipairs(est.blocked) do rawWeight = rawWeight + (e.weight or 0) end
+
+    for _, e in ipairs(est.blocked) do
+        local sz = e.meteor and e.meteor.size
+        d.pool[#d.pool + 1] = {
+            name = e.name, parallels = 0, blocked = true,
+            chance = rawWeight > 0 and (e.weight or 0) / rawWeight or 0,
+            size = sz and (sz[1] .. "-" .. sz[2]) or "-",
+            time = "-", eut = si(e.needs and e.needs.eut or 0),
+            computation = si(e.needs and e.needs.computation or 0),
+            note = "no " .. tostring(e.limit or "capacity"),
+        }
+    end
+
+    for _, y in ipairs(est.yield) do
+        d.yield[#d.yield + 1] = {
+            name = y.mat or y.oredict, share = y.share,
+            itemsPerSecond = y.itemsPerSecond, stacksPerSecond = y.stacksPerSecond,
+        }
+    end
+
+    d.summary = string.format("%d/%d parallels   cycle %s   %s EU/t avg   %s comp",
+        row.parallels or 0, row.parallelCap or 0, secs(est.cycle),
+        si(est.cost.eut), si(est.cost.computation))
+    -- Rates keep their decimals: si() would round 12.4 items/s to "12".
+    d.rates = string.format("%.2f items/s   %.3f stacks/s   kits %.3f/s   plasma %.1f L/s%s",
+        est.itemsPerSecond, est.stacksPerSecond, est.cost.kit.perSecond,
+        est.cost.plasma.perSecond,
+        est.blockedChance > 0
+            and string.format("   %.0f%% of rolls unpowered", est.blockedChance * 100) or "")
+    return d
+end
+
 -- ---- rendering ---------------------------------------------------------------
 
 local tick = 0
@@ -411,9 +601,11 @@ local function render()
     tick = tick + 1
     ui.render({
         mode = "MANUAL", dryRun = cfg.dryRun, paused = paused, showLog = showLog,
-        focus = picker.focus, cursor = picker.cursor,
-        confirm = picker.confirm and view.plasmas[picker.confirm]
-            and view.plasmas[picker.confirm].name or nil,
+        screen = nav.screen, moduleCursor = nav.module,
+        detail = (nav.screen == "detail") and buildDetail(view.miners) or nil,
+        focus = nav.focus, cursor = nav.cursor,
+        confirm = nav.confirm and view.plasmas[nav.confirm]
+            and view.plasmas[nav.confirm].name or nil,
         switching = pendingPlasma and pendingPlasma.name or nil,
         cycle = cycle, tick = tick, updated = os.date("%H:%M:%S"),
         miners = view.miners, kits = view.kits, plasmas = view.plasmas,
@@ -447,21 +639,81 @@ end
 
 local quit = false
 
-local function handleKey(char, code)
-    local wasFocused = picker.focus
-    local action, changed = control.key(picker, #(view.plasmas or {}), char, code)
+-- Switches ONE module's plasma, as opposed to the fleet-wide picker: the hatch
+-- has to be emptied of the old fluid before it will take the new one, exactly as
+-- for the whole fleet, so the same routine does it for a list of one.
+local function switchOne(row, p)
+    if not row.station or not row.hasFluid then
+        log(row.addr .. ": no plasma feed configured")
+        return
+    end
+    local slot, err = slotFor(p)
+    if not slot then
+        log(row.addr .. ": cannot stage " .. p.name .. ": " .. tostring(err))
+        return
+    end
+    local _, returned = control.switchPlasma({ row.station }, p, slot)
+    log(string.format("%s: plasma -> %s%s", row.addr, p.name,
+        returned > 0 and string.format(" (returned %d L)", returned) or ""))
+end
 
-    -- Opening the list lands on the plasma in use, so the common case -- look,
-    -- then escape -- needs no navigation at all.
-    if picker.focus == "plasma" and not wasFocused then
+-- Carries out a committed edit. Everything here touches hardware and some of it
+-- stops the module first, so it runs from the key handler only because the user
+-- just asked for it and is watching -- unlike the plasma switch from the
+-- dashboard, which is fleet-wide and queued for the control thread.
+local function commitEdit(row, field, value)
+    if field == "plasma" then
+        local p = plasmas.byTier[value]
+        if p then switchOne(row, p) end
+        return
+    end
+    local ok, err = control.applyParam(row.miner, field, value)
+    if ok then
+        local shown = value
+        if field == "drone" then
+            local d = drones.get(value)
+            shown = d and ("MK-" .. d.roman) or value
+        elseif field == "overdrive" then
+            shown = string.format("%.1f", value)
+        end
+        log(string.format("%s: %s -> %s", row.addr, field, tostring(shown)))
+    else
+        log(string.format("%s: %s not set -- %s", row.addr, field, tostring(err)))
+    end
+end
+
+local function handleKey(char, code)
+    local wasFocused = nav.focus
+    local action, changed = control.key(nav, {
+        modules = #(view.miners or {}),
+        plasmas = #(view.plasmas or {}),
+        cur = (nav.screen == "detail") and view.miners[nav.module]
+            and currentOf(view.miners[nav.module]) or nil,
+    }, char, code)
+
+    -- Opening the plasma list lands on the plasma in use, so the common case --
+    -- look, then escape -- needs no navigation at all.
+    if nav.focus == "plasma" and not wasFocused then
         for i, p in ipairs(view.plasmas or {}) do
-            if p.active then picker.cursor = i end
+            if p.active then nav.cursor = i end
         end
     end
 
-    if action == "apply" then
-        local pick = view.plasmas[picker.confirm]
-        picker.confirm, picker.focus = nil, nil
+    if action == "open" then
+        nav.screen, nav.field, nav.edit = "detail", 1, nil
+    elseif action == "close" then
+        nav.screen, nav.edit = "dashboard", nil
+    elseif action == "commit" then
+        local edit = nav.edit
+        nav.edit = nil
+        local row = view.miners[nav.module]
+        if row and edit then commitEdit(row, edit.field, edit.value) end
+        -- The write changed the hardware; re-read it rather than showing the old
+        -- values until the next cycle comes round.
+        view.miners = readFleet()
+    elseif action == "apply-plasma" then
+        local pick = view.plasmas[nav.confirm]
+        nav.confirm, nav.focus = nil, nil
         if pick then
             pendingPlasma = pick.plasma
             log("switching the fleet to " .. pick.name .. " ...")

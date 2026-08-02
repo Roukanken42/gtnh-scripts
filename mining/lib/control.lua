@@ -252,46 +252,146 @@ function control.switchPlasma(stations, plasma, dbSlot)
     return results, returned
 end
 
--- ---- the plasma picker's keyboard -------------------------------------------
+-- ---- the keyboard ------------------------------------------------------------
 --
--- A state machine over { focus, cursor, confirm }, kept here rather than inside
--- main.lua's event loop because it is the one part of the controller a player
--- drives directly -- and a two-step confirm that is wrong in one direction is not
+-- The whole navigation, as one state machine, kept here rather than inside
+-- main.lua's event loop because it is the part of the controller a player drives
+-- directly -- and a two-step confirm that is wrong in one direction is not
 -- noticed until it has drained nine hatches.
 --
+--   screen   "dashboard" | "detail"
+--   module   cursor in the module list; in "detail", which module is open
+--   focus    nil | "plasma"          -- dashboard: is the plasma picker open
+--   cursor   row in the plasma picker
+--   confirm  picker row awaiting a second ENTER
+--   field    1..#FIELDS              -- detail: which parameter is selected
+--   edit     nil | { field, value }  -- detail: the pending, uncommitted value
+--
 -- Letters are matched on the CHARACTER and navigation on the SCANCODE: a
--- character is what the keyboard layout actually produced, while arrows and ESC
--- have none. The codes are the ones OpenComputers reports (LWJGL).
-control.KEY = { esc = 1, enter = 28, up = 200, down = 208, numEnter = 156 }
+-- character is what the keyboard layout actually produced, while arrows, TAB and
+-- ESC have none. The codes are the ones OpenComputers reports (LWJGL).
+control.KEY = {
+    esc = 1, tab = 15, enter = 28, numEnter = 156,
+    up = 200, down = 208, left = 203, right = 205,
+}
 control.CH = { space = 32, l = 108, p = 112, q = 113 }
 
--- Applies a keypress to `st` (mutated in place; fields focus / cursor / confirm)
--- given `n` selectable plasmas. Returns the action for the caller to carry out --
--- "apply" | "pause" | "log" | "quit" | nil -- and whether anything changed, so a
--- key that did nothing does not force a repaint.
+-- The parameters a module can be driven with, in the order they are listed.
+-- `list` fields cycle through a fixed set (the caller maps index -> thing);
+-- `number` fields step by `step`, or by `page` with left/right.
+control.FIELDS = {
+    { key = "drone",     label = "Drone",     kind = "list", min = 1, max = 13 },
+    { key = "distance",  label = "Distance",  kind = "number", step = 1, page = 10,
+      min = 1 },
+    { key = "overdrive", label = "Overdrive", kind = "number", step = 0.1, page = 0.5,
+      -- Not 0: mineTime divides by the overdrive, so a preview at 0 is infinite.
+      min = 0.1, max = 2 },
+    { key = "plasma",    label = "Plasma",    kind = "list", min = 1, max = 5 },
+}
+
+-- Furthest any meteor can be found, which is where the distance field stops.
+control.MAX_DISTANCE = 0
+do
+    local meteors = require("lib.gtnh.meteors")
+    for _, m in ipairs(meteors.list) do
+        if m.distance[2] > control.MAX_DISTANCE then control.MAX_DISTANCE = m.distance[2] end
+    end
+end
+
+local function fieldByKey(key)
+    for _, f in ipairs(control.FIELDS) do
+        if f.key == key then return f end
+    end
+end
+
+-- Clamps and rounds an edited value for its field. Overdrive is rounded to one
+-- decimal because repeated +0.1 in binary floating point does not land on 1.3.
+local function clampField(f, v)
+    local max = f.max
+    if f.key == "distance" then max = control.MAX_DISTANCE end
+    if f.min and v < f.min then v = f.min end
+    if max and v > max then v = max end
+    if f.kind == "number" then v = math.floor(v * 10 + 0.5) / 10 end
+    if f.key == "distance" then v = math.floor(v + 0.5) end
+    return v
+end
+
+-- Applies a keypress to `st`, mutated in place. `ctx` says what there is to
+-- navigate: { modules = n, plasmas = n, cur = { drone, distance, overdrive,
+-- plasma } } -- `cur` being the open module's live values, which is what an edit
+-- starts from. Returns the action for the caller and whether anything changed, so
+-- a key that did nothing does not force a repaint.
 --
--- On "apply", st.confirm still holds the chosen index: the caller reads it and
--- clears it, because it is the caller that knows whether the switch can start.
-function control.key(st, n, char, code)
+-- Actions: "open" | "close" | "commit" | "apply-plasma" | "pause" | "log" | "quit".
+-- On "commit", st.edit still holds { field, value }; on "apply-plasma",
+-- st.confirm still holds the row. The caller reads and clears them, because only
+-- the caller knows whether the change can actually be carried out.
+function control.key(st, ctx, char, code)
     local KEY, CH = control.KEY, control.CH
+    local nMod, nPla = ctx.modules or 0, ctx.plasmas or 0
     local function enter() return code == KEY.enter or code == KEY.numEnter end
 
-    -- Confirming. Only ENTER commits; anything else that means "no" backs out to
-    -- the list rather than out of the picker, so a mistyped key cannot commit and
-    -- cannot lose the selection either.
+    -- ---- detail: editing one parameter ----
+    if st.screen == "detail" and st.edit then
+        local f = fieldByKey(st.edit.field)
+        local delta
+        if code == KEY.up then delta = f.kind == "list" and 1 or f.step
+        elseif code == KEY.down then delta = f.kind == "list" and -1 or -f.step
+        elseif code == KEY.right then delta = f.kind == "list" and 1 or f.page
+        elseif code == KEY.left then delta = f.kind == "list" and -1 or -f.page
+        end
+
+        if delta then
+            if f.kind == "list" then
+                -- Wrap: thirteen drone tiers are quicker to reach from either end.
+                local n = (f.key == "plasma") and nPla or f.max
+                if n > 0 then st.edit.value = (st.edit.value - 1 + delta) % n + 1 end
+            else
+                st.edit.value = clampField(f, st.edit.value + delta)
+            end
+            return nil, true
+        end
+        if enter() then return "commit", true end
+        if code == KEY.esc then st.edit = nil; return nil, true end
+        return nil, false
+    end
+
+    -- ---- detail: choosing a parameter ----
+    if st.screen == "detail" then
+        local n = #control.FIELDS
+        if code == KEY.up then st.field = (st.field - 2) % n + 1
+        elseif code == KEY.down then st.field = st.field % n + 1
+        elseif code == KEY.tab then
+            st.view = (st.view == "ore") and "meteors" or "ore"
+        elseif enter() then
+            local f = control.FIELDS[st.field]
+            local cur = (ctx.cur or {})[f.key]
+            if cur == nil then return nil, false end
+            st.edit = { field = f.key, value = cur }
+        elseif code == KEY.esc or char == CH.q then
+            return "close", true
+        elseif char == CH.l then return "log", true
+        else return nil, false
+        end
+        return nil, true
+    end
+
+    -- ---- dashboard: confirming a fleet-wide plasma switch ----
+    -- Only ENTER commits; anything else that means "no" backs out to the list
+    -- rather than out of the picker, so a mistyped key can neither commit nor
+    -- lose the selection.
     if st.confirm then
-        if enter() then return "apply", true end
+        if enter() then return "apply-plasma", true end
         if code == KEY.esc or char == CH.q then st.confirm = nil; return nil, true end
         return nil, false
     end
 
+    -- ---- dashboard: the plasma picker ----
     if st.focus == "plasma" then
-        if n > 0 and code == KEY.up then
-            st.cursor = (st.cursor - 2) % n + 1
-        elseif n > 0 and code == KEY.down then
-            st.cursor = st.cursor % n + 1
+        if nPla > 0 and code == KEY.up then st.cursor = (st.cursor - 2) % nPla + 1
+        elseif nPla > 0 and code == KEY.down then st.cursor = st.cursor % nPla + 1
         elseif enter() then
-            if n <= 0 then return nil, false end
+            if nPla <= 0 then return nil, false end
             st.confirm = st.cursor
         elseif code == KEY.esc or char == CH.p or char == CH.q then
             st.focus = nil
@@ -301,11 +401,103 @@ function control.key(st, n, char, code)
         return nil, true
     end
 
+    -- ---- dashboard ----
+    -- The module list needs no key to enter: it is the main table, so the arrows
+    -- belong to it and ENTER opens what they landed on.
+    if nMod > 0 and code == KEY.up then
+        st.module = (st.module - 2) % nMod + 1
+        return nil, true
+    elseif nMod > 0 and code == KEY.down then
+        st.module = st.module % nMod + 1
+        return nil, true
+    elseif enter() then
+        if nMod <= 0 then return nil, false end
+        return "open", true
+    end
+
     if char == CH.p then st.focus = "plasma"; return nil, true end
     if char == CH.space then return "pause", true end
     if char == CH.l then return "log", true end
     if char == CH.q then return "quit", true end
     return nil, false
+end
+
+-- A fresh navigation state.
+function control.newNav()
+    return {
+        screen = "dashboard", module = 1, focus = nil, cursor = 1,
+        confirm = nil, field = 1, edit = nil, view = "meteors",
+    }
+end
+
+-- ---- driving one module ------------------------------------------------------
+
+-- Monotonic seconds and a yield, as transport.lua does them: computer.uptime()
+-- and os.sleep() on the machine, os.clock() and nothing off it.
+local computer
+do local ok, c = pcall(require, "computer"); computer = ok and c or nil end
+
+local function now() return computer and computer.uptime() or os.clock() end
+local function pause(s) if os.sleep then os.sleep(s) end end
+
+-- Runs `fn` with the module halted and then puts its work-allowed state back.
+--
+-- TecTech accepts a parameter write only while the machine is STOPPED, and
+-- setWorkAllowed is asynchronous -- a module can take up to ~0.5s to actually
+-- halt -- so this polls isActive rather than guessing a delay (pump/main.lua
+-- learned the same thing). The 2s cap is a stuck-machine backstop, not the
+-- expected wait.
+--
+-- If the build cannot report whether work was allowed, the module is re-enabled:
+-- in manual mode a module exists to run, and leaving one silently off after an
+-- edit is the worse of the two mistakes. Returns fn's result, plus whether the
+-- module actually stopped.
+local function withStopped(miner, fn)
+    local wasEnabled = miner:isEnabled()
+    miner:setEnabled(false)
+
+    local deadline = now() + 2
+    while miner:isActive() and now() < deadline do pause(0.1) end
+    local stopped = not miner:isActive()
+
+    local ok, err = fn()
+
+    miner:setEnabled(wasEnabled ~= false)
+    return ok, err, stopped
+end
+
+control.withStopped = withStopped
+
+-- Writes one edited parameter to a module. `field` is a control.FIELDS key;
+-- plasma is NOT handled here (it is a station operation, see switchPlasma).
+-- Returns true, or false + why.
+function control.applyParam(miner, field, value)
+    if field == "distance" or field == "overdrive" then
+        local ok, err, stopped = withStopped(miner, function()
+            if field == "distance" then return miner:setDistance(value) end
+            return miner:setOverdrive(value)
+        end)
+        if not ok then return false, tostring(err) end
+        -- A write to a machine that never halted is the one that looks like it
+        -- worked and did not, so say so rather than report success.
+        if not stopped then
+            return false, "the module would not stop, so the write may not have taken"
+        end
+        return true
+    end
+
+    if field == "drone" then
+        if not miner.station then return false, "no station configured" end
+        local drone = drones.get(value)
+        if not drone then return false, "invalid drone tier " .. tostring(value) end
+        local ok, err = withStopped(miner, function()
+            return miner.station:setDrone(drone, 1)
+        end)
+        if not ok then return false, tostring(err) end
+        return true
+    end
+
+    return false, "cannot set '" .. tostring(field) .. "' here"
 end
 
 -- ---- component edge ---------------------------------------------------------

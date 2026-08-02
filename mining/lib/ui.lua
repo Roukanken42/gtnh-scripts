@@ -23,6 +23,10 @@
 --   confirm     string               -- plasma name awaiting confirmation
 --   switching   string               -- plasma name being applied right now
 --   cycle / tick / updated
+--   screen      "dashboard" | "detail"
+--   moduleCursor integer            -- selected row in state.miners
+--   detail      { miner, view, field, fields, pool, yield, summary, rates,
+--                 edit, editHint, error }   -- see drawParams / drawPool
 --   miners      { { tierName, addr, state, stateKind, drone, distance,
 --                   parallels, parallelCap, overdrive, material, hatchLevel,
 --                   hatchCapacity, hatchTarget, hatchFluid, staged }, ... }
@@ -156,6 +160,17 @@ local function human(n)
     return string.format(fmt, scaled, HUMAN_PREFIX[tier])
 end
 
+-- A PER-SECOND figure, where the decimals are the whole point: an ore coming out
+-- at 12.4/s and one at 12.9/s are different answers, and human() rounds both to
+-- "12". Only once a rate is large does the magnitude matter more than the digits.
+local function rate(v)
+    v = v or 0
+    if v >= 1000 then return human(v) end
+    if v >= 10 then return string.format("%.2f", v) end
+    if v >= 1 then return string.format("%.3f", v) end
+    return string.format("%.4f", v)
+end
+
 local function box(x, y, w, h, borderColor, fillColor)
     rect(x, y, w, h, fillColor)
     setfg(borderColor); setbg(fillColor)
@@ -271,13 +286,28 @@ end
 
 -- The hint line changes with what the keyboard is doing, so the two-step plasma
 -- choice explains itself rather than needing to be remembered.
+local UPDOWN = "\xE2\x86\x91\xE2\x86\x93"
+local LEFTRIGHT = "\xE2\x86\x90\xE2\x86\x92"
+
 local function hintFor(state)
+    if state.screen == "detail" then
+        local d = state.detail or {}
+        if d.edit then
+            local f = d.fields and d.fields[d.field]
+            if f and f.kind == "number" then
+                return "[" .. UPDOWN .. "] adjust  [" .. LEFTRIGHT
+                    .. "] jump  [ENTER] apply  [ESC] cancel"
+            end
+            return "[" .. UPDOWN .. "] choose  [ENTER] apply  [ESC] cancel"
+        end
+        return "[" .. UPDOWN .. "] field  [ENTER] edit  [TAB] view  [ESC] back"
+    end
     if state.confirm then
         return "[ENTER] apply " .. state.confirm .. "   [ESC] back"
     elseif state.focus == "plasma" then
-        return "[" .. "\xE2\x86\x91\xE2\x86\x93" .. "] choose   [ENTER] select   [ESC] cancel"
+        return "[" .. UPDOWN .. "] choose   [ENTER] select   [ESC] cancel"
     end
-    return "[P] plasma  [SPACE] pause  [L] log  [Q] quit"
+    return "[" .. UPDOWN .. "] module  [ENTER] details  [P] plasma  [SPACE] pause  [L] log  [Q] quit"
 end
 
 local function drawTitle(state)
@@ -364,15 +394,19 @@ local function drawKPIs(state, y)
     kpiCard(x, y, w, "STATUS", st, stColor)
 end
 
--- Column offsets for the miners table, relative to the row's left edge.
+-- Column offsets for the miners table, relative to the row's left edge. The
+-- first two columns are the selection gutter: the arrows drive this list, so it
+-- has to show which row they are on.
 local MC = {
-    tier = 0, addr = 5, state = 15, drone = 26, dist = 36, par = 43,
-    od = 50, material = 56, bar = 75, level = 86, staged = 100, fluid = 109,
+    tier = 2, addr = 7, state = 17, drone = 28, dist = 38, par = 45,
+    od = 52, material = 58, bar = 77, level = 88, staged = 102, fluid = 111,
 }
 
 local function drawMiners(state, x, y, w, h)
     local list = state.miners or {}
-    panel(x, y, w, h, "MODULES  " .. #list)
+    local focused = state.screen ~= "detail" and not state.focus
+    panel(x, y, w, h, "MODULES  " .. #list .. "  " .. MIDDOT .. "  ENTER for details",
+        focused)
     local ix, inner = x + 2, w - 4
     local hy = y + 1
 
@@ -404,6 +438,8 @@ local function drawMiners(state, x, y, w, h)
                     #list - i + 1, #list - i + 1), C.faint, inner)
             break
         end
+        cell(ix, row, 0, 2, (state.moduleCursor == i) and ARROW or " ",
+            focused and C.focus or C.faint, inner)
         cell(ix, row, MC.tier, 4, m.tierName or "?", C.accent, inner)
         cell(ix, row, MC.addr, 9, m.addr or "", C.dim, inner)
         cell(ix, row, MC.state, 10, m.state or "",
@@ -534,6 +570,154 @@ local function drawPlasma(state, x, y, w, h)
     end
 end
 
+-- ---- the detail screen -------------------------------------------------------
+--
+-- One module, close up: its four drivable parameters on top, and underneath
+-- either the meteor pool it is rolling against or the ore that comes out. Both
+-- tables are computed from the PENDING value while a field is being edited, so
+-- dialling the distance shows what it would do before it is committed.
+
+local function drawParams(state, x, y, w, h)
+    local d = state.detail or {}
+    local m = d.miner or {}
+    panel(x, y, w, h, "MODULE  " .. (m.tierName or "?") .. "  " .. (m.addr or ""),
+        d.edit ~= nil)
+    local ix, inner = x + 2, w - 4
+
+    for i, f in ipairs(d.fields or {}) do
+        local row = y + i
+        if row > y + h - 4 then break end
+        local selected = (d.field == i)
+        local editing = selected and d.edit ~= nil
+
+        cell(ix, row, 0, 2, (selected and ARROW) or " ",
+            editing and C.focus or (selected and C.accent or C.faint), inner)
+        cell(ix, row, 2, 12, f.label, selected and C.text or C.dim, inner)
+
+        -- An edited value is shown between arrows and in the focus colour, so
+        -- what is pending and what is live are never the same thing on screen.
+        if editing then
+            cell(ix, row, 14, 26, "\xE2\x97\x82 " .. tostring(f.pending) .. " \xE2\x96\xB8",
+                C.focus, inner)
+        else
+            cell(ix, row, 14, 26, tostring(f.value or "-"),
+                f.value and C.text or C.faint, inner)
+        end
+        cell(ix, row, 41, inner - 41, f.note or "", C.faint, inner)
+    end
+
+    local sy = y + h - 3
+    if d.edit then
+        cell(ix, sy, 0, inner, d.editHint or "", C.focus, inner)
+    else
+        cell(ix, sy, 0, inner,
+            "State " .. (m.state or "?") .. "   " .. (d.summary or ""),
+            STATE_COLOR[m.stateKind or m.state] or C.dim, inner)
+    end
+    cell(ix, y + h - 2, 0, inner, d.rates or "", C.dim, inner)
+end
+
+-- CHANCE | METEOR | SIZE | TIME | PAR | EU/t | COMP, with a bar for the chance.
+local PC = { bar = 0, pct = 11, name = 17, size = 45, time = 58, par = 67,
+             eut = 73, comp = 84, note = 94 }
+
+local function drawPool(state, x, y, w, h)
+    local d = state.detail or {}
+    local list = d.pool or {}
+    panel(x, y, w, h, "METEOR POOL  " .. #list .. "  " .. MIDDOT .. "  TAB for ore output")
+    local ix, inner = x + 2, w - 4
+    local hy = y + 1
+
+    cell(ix, hy, PC.bar, 10, "CHANCE", C.faint, inner)
+    cell(ix, hy, PC.name, 27, "METEOR", C.faint, inner)
+    cell(ix, hy, PC.size, 12, "SIZE", C.faint, inner)
+    cell(ix, hy, PC.time, 8, "TIME", C.faint, inner)
+    cell(ix, hy, PC.par, 5, "PAR", C.faint, inner)
+    cell(ix, hy, PC.eut, 10, "EU/t", C.faint, inner)
+    cell(ix, hy, PC.comp, 9, "COMP", C.faint, inner)
+    cell(ix, hy, PC.note, inner - PC.note, "", C.faint, inner)
+
+    if d.error then
+        cell(ix, y + 3, 0, inner, d.error, C.warn, inner)
+        return
+    end
+    if #list == 0 then
+        cell(ix, y + 3, 0, inner,
+            "Nothing is findable at this distance with this drone.", C.faint, inner)
+        return
+    end
+
+    for i, e in ipairs(list) do
+        local row = y + 1 + i
+        if row > y + h - 2 then
+            cell(ix, y + h - 2, 0, inner,
+                string.format("... and %d more", #list - i + 1), C.faint, inner)
+            break
+        end
+        local col = e.blocked and C.crit or C.text
+        if inner - PC.bar >= 10 then
+            bar(ix + PC.bar, row, 10, e.chance or 0, e.blocked and C.crit or C.accent2,
+                C.panelHi)
+        end
+        cell(ix, row, PC.pct, 6, padL(string.format("%.1f%%", (e.chance or 0) * 100), 5),
+            C.dim, inner)
+        cell(ix, row, PC.name, 27, e.name or "?", col, inner)
+        cell(ix, row, PC.size, 12, e.size or "-", C.dim, inner)
+        cell(ix, row, PC.time, 8, e.time or "-", C.dim, inner)
+        cell(ix, row, PC.par, 5, tostring(e.parallels or "-"), C.dim, inner)
+        cell(ix, row, PC.eut, 10, e.eut or "-", C.dim, inner)
+        cell(ix, row, PC.comp, 9, e.computation or "-", C.dim, inner)
+        cell(ix, row, PC.note, inner - PC.note, e.note or "", C.crit, inner)
+    end
+end
+
+-- SHARE | ORE | ITEMS/s | STACKS/s | PER HOUR, with a bar for the share.
+local YC = { bar = 0, pct = 11, name = 17, items = 47, stacks = 60, hour = 73 }
+
+local function drawYield(state, x, y, w, h)
+    local d = state.detail or {}
+    local list = d.yield or {}
+    panel(x, y, w, h, "ORE OUTPUT  " .. #list .. "  " .. MIDDOT .. "  TAB for the meteor pool")
+    local ix, inner = x + 2, w - 4
+    local hy = y + 1
+
+    cell(ix, hy, YC.bar, 10, "SHARE", C.faint, inner)
+    cell(ix, hy, YC.name, 29, "ORE", C.faint, inner)
+    cell(ix, hy, YC.items, 12, padL("ITEMS/s", 11), C.faint, inner)
+    cell(ix, hy, YC.stacks, 12, padL("STACKS/s", 11), C.faint, inner)
+    cell(ix, hy, YC.hour, 12, padL("PER HOUR", 11), C.faint, inner)
+
+    if d.error then
+        cell(ix, y + 3, 0, inner, d.error, C.warn, inner)
+        return
+    end
+    if #list == 0 then
+        cell(ix, y + 3, 0, inner, "Nothing would be mined at this configuration.",
+            C.faint, inner)
+        return
+    end
+
+    for i, e in ipairs(list) do
+        local row = y + 1 + i
+        if row > y + h - 2 then
+            cell(ix, y + h - 2, 0, inner,
+                string.format("... and %d more", #list - i + 1), C.faint, inner)
+            break
+        end
+        if inner - YC.bar >= 10 then
+            bar(ix + YC.bar, row, 10, e.share or 0, C.mine, C.panelHi)
+        end
+        cell(ix, row, YC.pct, 6, padL(string.format("%.1f%%", (e.share or 0) * 100), 5),
+            C.dim, inner)
+        cell(ix, row, YC.name, 29, e.name or "?", C.text, inner)
+        cell(ix, row, YC.items, 12, padL(rate(e.itemsPerSecond), 11), C.good, inner)
+        cell(ix, row, YC.stacks, 12, padL(string.format("%.3f", e.stacksPerSecond or 0), 11),
+            C.dim, inner)
+        cell(ix, row, YC.hour, 12, padL(human((e.itemsPerSecond or 0) * 3600), 11),
+            C.dim, inner)
+    end
+end
+
 local function drawLog(state, x, y, w, h)
     panel(x, y, w, h, "LOG")
     local msgs = state.messages or {}
@@ -558,6 +742,23 @@ function ui.render(state)
     local logH = state.showLog and 8 or 0
     local logY = H - logH + 1
     local contentH = state.showLog and (logY - contentY - 1) or (H - contentY + 1)
+
+    -- One module, close up. The parameter block is fixed; whichever table is
+    -- selected takes the rest.
+    if state.screen == "detail" then
+        local paramsH = #(state.detail and state.detail.fields or {}) + 6
+        drawParams(state, 2, contentY, W - 2, paramsH)
+        local tableY = contentY + paramsH + 1
+        local tableH = contentH - paramsH - 1
+        if (state.detail or {}).view == "ore" then
+            drawYield(state, 2, tableY, W - 2, tableH)
+        else
+            drawPool(state, 2, tableY, W - 2, tableH)
+        end
+        if state.showLog then drawLog(state, 2, logY, W - 2, logH) end
+        if buffer then gpu.bitblt(0, 1, 1, W, H, buffer, 1, 1) end
+        return
+    end
 
     -- The stock panels are sized to their contents (there are only ever nine
     -- materials and five plasmas) and the modules table takes everything left,

@@ -82,6 +82,12 @@ local ctx = cli.start({
             .. "JOB column shows it as \"+N due\". An order nothing ever delivers is "
             .. "written off after cfg.control.orderTtl seconds, so a failed craft "
             .. "cannot block a material for good.",
+        "C copies the module under the cursor -- its drone, distance, overdrive and "
+            .. "plasma -- and V pastes them onto another. The clipboard is held, so "
+            .. "one module can be pasted onto several in turn; Q closes copy mode "
+            .. "rather than quitting. Only the settings that actually differ are "
+            .. "queued, so pasting does not stop a module to write what it already "
+            .. "has.",
         "SPACE pauses maintenance (the modules keep running); L shows the log; "
             .. "Q quits.",
         "Run with --profile when a cycle feels slow, then press F: it shows where "
@@ -806,7 +812,7 @@ local function render()
     tick = tick + 1
     ui.render({
         mode = "MANUAL", dryRun = cfg.dryRun, paused = paused, showLog = showLog,
-        screen = nav.screen, moduleCursor = nav.module,
+        screen = nav.screen, moduleCursor = nav.module, clipboard = nav.clipboard,
         profile = (nav.screen == "profile") and profile.snapshot() or nil,
         detail = (nav.screen == "detail") and buildDetail(view.miners) or nil,
         focus = nav.focus, cursor = nav.cursor,
@@ -836,6 +842,23 @@ local function printCycle()
                 (p.coming or 0) > 0 and string.format(" (+%d on order)", p.coming) or ""))
         end
     end
+end
+
+-- What a copied config is, in a few words: enough to see at a glance which
+-- module the clipboard came off, without reading the address.
+local function clipLabel(c)
+    local parts = {}
+    if c.drone then
+        local d = drones.get(c.drone)
+        parts[#parts + 1] = d and ("MK-" .. d.roman) or ("drone " .. c.drone)
+    end
+    if c.distance then parts[#parts + 1] = "d" .. tostring(c.distance) end
+    if c.overdrive then parts[#parts + 1] = string.format("OD%.2f", c.overdrive) end
+    if c.plasma then
+        local p = plasmas.byTier[c.plasma]
+        if p then parts[#parts + 1] = (p.name:gsub(" Plasma$", "")) end
+    end
+    return (c.addr or "") .. "  " .. table.concat(parts, " ")
 end
 
 -- ---- keys --------------------------------------------------------------------
@@ -873,6 +896,33 @@ local function commitEdit(row, field, value)
     log(string.format("%s: %s queued", row.addr, (control.describe(e))))
 end
 
+-- Applies a copied config to another module. Only the fields that DIFFER are
+-- queued: pasting a value a module already has would stop it, write what was
+-- already there, and start it again for nothing.
+local function pasteInto(row, clip)
+    if not clip then return end
+    if clip.addr == row.addr then
+        log(row.addr .. ": that is where the config came from")
+        return
+    end
+
+    local cur = currentOf(row)
+    local n = 0
+    for _, f in ipairs(control.FIELDS) do
+        local want = clip[f.key]
+        if want ~= nil and want ~= cur[f.key] then
+            commitEdit(row, f.key, want)
+            n = n + 1
+        end
+    end
+    if n == 0 then
+        log(row.addr .. ": already matches " .. tostring(clip.addr))
+    else
+        log(string.format("%s: %d setting(s) queued from %s", row.addr, n,
+            tostring(clip.addr)))
+    end
+end
+
 local function handleKey(char, code)
     local wasFocused = nav.focus
     local action, changed = control.key(nav, {
@@ -891,7 +941,20 @@ local function handleKey(char, code)
         end
     end
 
-    if action == "open" then
+    if action == "copy" then
+        local row = view.miners[nav.module]
+        if row then
+            -- The four drivable parameters, which is what a module's config IS --
+            -- the same set the detail screen edits.
+            nav.clipboard = currentOf(row)
+            nav.clipboard.addr = row.addr
+            nav.clipboard.label = clipLabel(nav.clipboard)
+            log("copied " .. nav.clipboard.label .. "  -- V to paste, Q when done")
+        end
+    elseif action == "paste" then
+        local row = view.miners[nav.module]
+        if row then pasteInto(row, nav.clipboard) end
+    elseif action == "open" then
         nav.screen, nav.field, nav.edit = "detail", 1, nil
     elseif action == "close" then
         nav.screen, nav.edit = "dashboard", nil

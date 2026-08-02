@@ -322,6 +322,11 @@ end
 --   confirm  picker row awaiting a second ENTER
 --   field    1..#FIELDS              -- detail: which parameter is selected
 --   edit     nil | { field, value }  -- detail: the pending, uncommitted value
+--   clipboard nil | { addr, drone, distance, overdrive, plasma }
+--            -- a module's settings, copied with C and pasted with V. Holding
+--            -- them keeps COPY MODE open so one module can be pasted onto
+--            -- several; Q closes it rather than quitting, which is also why a
+--            -- stray Q cannot end the program mid-copy.
 --
 -- Letters are matched on the CHARACTER and navigation on the SCANCODE: a
 -- character is what the keyboard layout actually produced, while arrows, TAB and
@@ -330,7 +335,8 @@ control.KEY = {
     esc = 1, tab = 15, enter = 28, numEnter = 156,
     up = 200, down = 208, left = 203, right = 205,
 }
-control.CH = { space = 32, f = 102, l = 108, p = 112, q = 113, r = 114, s = 115 }
+control.CH = { space = 32, c = 99, f = 102, l = 108, p = 112, q = 113,
+               r = 114, s = 115, v = 118 }
 
 -- The parameters a module can be driven with, in the order they are listed.
 -- `list` fields cycle through a fixed set (the caller maps index -> thing);
@@ -495,12 +501,30 @@ function control.key(st, ctx, char, code)
     end
 
     if char == CH.p then st.focus = "plasma"; return nil, true end
+
+    -- Copy and paste a module's settings. The caller reads the cursor to know
+    -- which module, and does the work; all that lives here is the mode.
+    if char == CH.c then
+        if nMod <= 0 then return nil, false end
+        return "copy", true
+    end
+    if char == CH.v then
+        if not st.clipboard or nMod <= 0 then return nil, false end
+        return "paste", true
+    end
+
     -- Only when there is something to show: without --profile nothing is
     -- measured, and a screen of zeroes is worse than no screen.
     if char == CH.f and ctx.profiling then st.screen = "profile"; return nil, true end
     if char == CH.space then return "pause", true end
     if char == CH.l then return "log", true end
-    if char == CH.q then return "quit", true end
+    if char == CH.q then
+        -- Q closes copy mode before it closes the program: pasting onto several
+        -- modules means Q is the key at hand, and quitting by accident mid-copy
+        -- would be a poor reward for it.
+        if st.clipboard then st.clipboard = nil; return nil, true end
+        return "quit", true
+    end
     return nil, false
 end
 
@@ -508,7 +532,7 @@ end
 function control.newNav()
     return {
         screen = "dashboard", module = 1, focus = nil, cursor = 1,
-        confirm = nil, field = 1, edit = nil, view = "meteors",
+        confirm = nil, field = 1, edit = nil, view = "meteors", clipboard = nil,
     }
 end
 

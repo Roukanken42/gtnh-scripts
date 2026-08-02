@@ -26,6 +26,7 @@
 --   screen      "dashboard" | "detail" | "profile"
 --   profile     { cycles, elapsed, callCount, callTotal, spans, calls, note }
 --   moduleCursor integer            -- selected row in state.miners
+--   clipboard   nil | { addr, label }  -- the module a copy was taken from
 --   detail      { miner, view, field, fields, pool, yield, summary, rates,
 --                 edit, editHint, error }   -- see drawParams / drawPool
 --   miners      { { tierName, addr, state, stateKind, drone, distance,
@@ -315,7 +316,10 @@ local function hintFor(state)
     end
     -- The profile key is deliberately absent: it only does anything under
     -- --profile, and the hint bar is for the keys that always work.
-    return "[" .. UPDOWN .. "] module  [ENTER] details  [P] plasma"
+    if state.clipboard then
+        return "[" .. UPDOWN .. "] module  [V] paste  [C] copy another  [Q] done copying"
+    end
+    return "[" .. UPDOWN .. "] module  [ENTER] details  [C] copy  [P] plasma"
         .. "  [SPACE] pause  [L] log  [Q] quit"
 end
 
@@ -406,17 +410,24 @@ end
 -- Column offsets for the miners table, relative to the row's left edge. The
 -- first two columns are the selection gutter: the arrows drive this list, so it
 -- has to show which row they are on.
+-- The first THREE columns are the gutter: the selection arrow, the clipboard
+-- marker, and a space so a marked row does not read as "CT3".
 local MC = {
-    tier = 2, addr = 7, state = 17, drone = 28, dist = 38, par = 45,
-    od = 52, material = 58, bar = 77, level = 88, staged = 102, fluid = 111,
-    pending = 134,
+    tier = 3, addr = 8, state = 18, drone = 29, dist = 39, par = 46,
+    od = 53, material = 59, bar = 78, level = 89, staged = 103, fluid = 112,
+    pending = 135,
 }
 
 local function drawMiners(state, x, y, w, h)
     local list = state.miners or {}
     local focused = state.screen ~= "detail" and not state.focus
-    panel(x, y, w, h, "MODULES  " .. #list .. "  " .. MIDDOT .. "  ENTER for details",
-        focused)
+    local clip = state.clipboard
+    local title = "MODULES  " .. #list .. "  " .. MIDDOT .. "  ENTER for details"
+    if clip then
+        title = "MODULES  " .. #list .. "  " .. MIDDOT .. "  COPYING "
+            .. (clip.label or clip.addr or "")
+    end
+    panel(x, y, w, h, title, focused)
     local ix, inner = x + 2, w - 4
     local hy = y + 1
 
@@ -449,8 +460,12 @@ local function drawMiners(state, x, y, w, h)
                     #list - i + 1, #list - i + 1), C.faint, inner)
             break
         end
-        cell(ix, row, 0, 2, (state.moduleCursor == i) and ARROW or " ",
+        cell(ix, row, 0, 1, (state.moduleCursor == i) and ARROW or " ",
             focused and C.focus or C.faint, inner)
+        -- The module the clipboard was taken from, so a paste onto the wrong row
+        -- is visible before it is made rather than after.
+        cell(ix, row, 1, 1, (clip and clip.addr == m.addr) and "C" or " ",
+            C.accent2, inner)
         cell(ix, row, MC.tier, 4, m.tierName or "?", C.accent, inner)
         cell(ix, row, MC.addr, 9, m.addr or "", C.dim, inner)
         cell(ix, row, MC.state, 10, m.state or "",

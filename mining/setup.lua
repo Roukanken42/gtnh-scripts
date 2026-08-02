@@ -89,6 +89,10 @@ local PROBE_PLASMA_L = 8000
 local PROBE_KITS = 256
 -- How long to wait for a staged fluid to show up.
 local FLUID_TIMEOUT = 20
+-- How long to wait for a probe to LEAVE a side after its interface was cleared.
+-- Seeing it go is what proves that interface put it there, rather than it having
+-- been left behind by an earlier candidate.
+local VERIFY_TIMEOUT = 5
 -- How long to wait on a supply request for kits or plasma. A large plasma order
 -- arrives in pieces, so this is the settle window as well as the job window.
 local STOCK_TIMEOUT = 30
@@ -165,6 +169,19 @@ local function readSideStacks(tp, side)
         return (okAll and a) or {}
     end
     return res
+end
+
+-- Waits for the probe to LEAVE a transposer side after its interface was
+-- cleared. This is what separates "this interface put it there" from "it was
+-- already there": the second never goes away when we clear, because something
+-- else staged it. Returns true if it went.
+local function waitSideEmpty(tp, side, sees)
+    local deadline = computer.uptime() + VERIFY_TIMEOUT
+    while computer.uptime() < deadline do
+        if not sees(side) then return true end
+        os.sleep(POLL_INTERVAL)
+    end
+    return false
 end
 
 -- True if the transposer sees an item with `label` on `side` (any slot).
@@ -360,9 +377,17 @@ end
 -- "did a drone leave the local net" shortcut either -- a stocked item may still
 -- count as network inventory, and that test would then reject the RIGHT interface.
 local function detectInterface(tp, ifSides, interfaceComps, dbAddr, dbSlot, probe, net)
+    local function sees(side) return sideHasLabel(tp, side, probe.label) end
+
     for _, c in ipairs(interfaceComps) do
         local ok, p = pcall(component.proxy, c)
         if ok and p and p.setInterfaceConfiguration ~= nil then
+            -- Anything ALREADY showing cannot be this candidate's doing -- a
+            -- previous candidate's stock may not have gone back yet, and several
+            -- transposers can share one interface.
+            local stale = {}
+            for _, side in ipairs(ifSides) do stale[side] = sees(side) end
+
             local slot, staged, how = stageProbe(p, dbAddr, dbSlot)
 
             local foundSide = nil
@@ -370,7 +395,7 @@ local function detectInterface(tp, ifSides, interfaceComps, dbAddr, dbSlot, prob
                 local deadline = computer.uptime() + DETECT_PER_CANDIDATE
                 while computer.uptime() < deadline do
                     for _, side in ipairs(ifSides) do
-                        if sideHasLabel(tp, side, probe.label) then foundSide = side; break end
+                        if not stale[side] and sees(side) then foundSide = side; break end
                     end
                     if foundSide then break end
                     os.sleep(POLL_INTERVAL)
@@ -388,7 +413,15 @@ local function detectInterface(tp, ifSides, interfaceComps, dbAddr, dbSlot, prob
             if slot then
                 pcall(p.setInterfaceConfiguration, slot)   -- clear (drone back to net)
             end
-            if foundSide then return c, foundSide end
+            if foundSide then
+                -- Causality, not coincidence: clearing THIS interface has to take
+                -- the probe away again. Leftovers do not budge, and pairing on a
+                -- sighting alone is how a transposer ends up matched to an
+                -- interface it is not touching.
+                if waitSideEmpty(tp, foundSide, sees) then return c, foundSide end
+                detail("      %s..: side %d still held the probe after clearing -- "
+                    .. "not this interface", c:sub(1, 8), foundSide)
+            end
         end
     end
     return nil, nil
@@ -504,30 +537,49 @@ end
 -- the transposer can see it. The fluid mirror of detectInterface.
 -- Returns interfaceAddr, side.
 local function detectFluidInterface(tp, fluidIfSides, interfaceComps, dbAddr, dropSlot, plasmaName)
+    -- The reads are 1-based, the config is 0-based (see transport.lua).
+    local function sees(side)
+        local okf, f = pcall(tp.getFluidInTank, side, PROBE_FLUID_TANK + 1)
+        if not okf or type(f) ~= "table" then return false end
+        if f.label == nil and type(f[1]) == "table" then f = f[1] end
+        return f.label == plasmaName and (f.amount or 0) > 0
+    end
+
     for _, c in ipairs(interfaceComps) do
         local ok, p = pcall(component.proxy, c)
         if ok and p and p.setFluidInterfaceConfiguration ~= nil then
+            -- Anything ALREADY staged cannot be this candidate's doing. Clearing
+            -- an interface does not empty its tank instantly, and several
+            -- transposers can share one, so the residue of the PREVIOUS
+            -- transposer's successful probe is still sitting there when this one
+            -- starts -- which pairs it with whichever candidate happened to be
+            -- tried first.
+            local stale = {}
+            for _, side in ipairs(fluidIfSides) do stale[side] = sees(side) end
+
             pcall(p.setFluidInterfaceConfiguration, PROBE_FLUID_TANK, dbAddr, dropSlot)
 
             local foundSide = nil
             local deadline = computer.uptime() + DETECT_PER_CANDIDATE
             while computer.uptime() < deadline do
                 for _, side in ipairs(fluidIfSides) do
-                    -- the reads are 1-based, the config is 0-based (transport.lua)
-                    local okf, f = pcall(tp.getFluidInTank, side, PROBE_FLUID_TANK + 1)
-                    if okf and type(f) == "table" then
-                        if f.label == nil and type(f[1]) == "table" then f = f[1] end
-                        if f.label == plasmaName and (f.amount or 0) > 0 then
-                            foundSide = side; break
-                        end
-                    end
+                    if not stale[side] and sees(side) then foundSide = side; break end
                 end
                 if foundSide then break end
                 os.sleep(POLL_INTERVAL)
             end
 
             pcall(p.setFluidInterfaceConfiguration, PROBE_FLUID_TANK)   -- clear
-            if foundSide then return c, foundSide end
+            if foundSide then
+                -- Causality, not coincidence: clearing THIS interface has to take
+                -- the plasma away again. A leftover will not budge.
+                if waitSideEmpty(tp, foundSide, sees) then return c, foundSide end
+                detail("      %s..: side %d still held %s after clearing -- "
+                    .. "not this interface", c:sub(1, 8), foundSide, plasmaName)
+            else
+                -- Leave nothing behind for the next candidate to trip over.
+                waitSideEmpty(tp, fluidIfSides[1], sees)
+            end
         end
     end
     return nil, nil

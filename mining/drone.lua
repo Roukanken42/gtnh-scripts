@@ -15,8 +15,8 @@
 -- Respects cfg.dryRun: with it true (the default) nothing is moved, moves are
 -- only logged. Flip cfg.dryRun to false in config.lua once you trust it.
 
-local miners = require("miners")
-local drones = require("drones")
+local miners = require("lib.hw.miners")
+local drones = require("lib.gtnh.drones")
 local cfg = require("config")
 
 -- Cross-station settings handed to every station (see miners.attachStation).

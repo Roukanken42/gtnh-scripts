@@ -18,8 +18,8 @@
 --
 -- Costs, budgets and what you can actually make live in config.lua.
 
-local targetm = require("target")
-local drones = require("drones")
+local targetm = require("lib.calc.target")
+local drones = require("lib.gtnh.drones")
 local cfg = require("config")
 
 -- ---- arguments -------------------------------------------------------------
@@ -62,7 +62,7 @@ if primary == nil then usage(); return end
 
 local moduleTiers, fleet = nil, ""
 if not flags.all then
-    local ok, miners = pcall(require, "miners")
+    local ok, miners = pcall(require, "lib.hw.miners")
     if ok then
         local seen, list = {}, {}
         for _, m in ipairs(miners.discover()) do

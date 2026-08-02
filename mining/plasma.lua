@@ -23,12 +23,12 @@
 -- See config.lua for cfg.supply.hatchMeteors (how much to keep) and the per-
 -- station fluid fields.
 
-local miners = require("miners")
-local transport = require("transport")
-local dbslots = require("db")
-local supply = require("supply")
-local plasmas = require("plasmas")
-local localnet = require("localnet")
+local miners = require("lib.hw.miners")
+local transport = require("lib.hw.transport")
+local dbslots = require("lib.hw.db")
+local supply = require("lib.hw.supply")
+local plasmas = require("lib.gtnh.plasmas")
+local localnet = require("lib.hw.localnet")
 local computer = require("computer")
 local cfg = require("config")
 

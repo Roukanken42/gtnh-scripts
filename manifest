@@ -4,21 +4,22 @@
 inspect/main.lua
 install.lua
 ? mining/config.lua
-mining/db.lua
 mining/drone.lua
-mining/drones.lua
-mining/estimate.lua
-mining/localnet.lua
-mining/meteors.lua
-mining/miners.lua
+mining/lib/calc/estimate.lua
+mining/lib/calc/target.lua
+mining/lib/gtnh/drones.lua
+mining/lib/gtnh/meteors.lua
+mining/lib/gtnh/plasmas.lua
+mining/lib/hw/db.lua
+mining/lib/hw/localnet.lua
+mining/lib/hw/miners.lua
+mining/lib/hw/supply.lua
+mining/lib/hw/transport.lua
+mining/lib/stations.lua
 mining/plan.lua
 mining/plasma.lua
-mining/plasmas.lua
 mining/setup.lua
 mining/stock.lua
-mining/supply.lua
-mining/target.lua
-mining/transport.lua
 power/bignum.lua
 ? power/config.lua
 power/generators.lua

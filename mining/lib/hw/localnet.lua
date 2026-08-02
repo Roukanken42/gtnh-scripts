@@ -5,7 +5,7 @@
 -- both can reuse the stock query.
 
 local component = require("component")
-local drones = require("drones")
+local drones = require("lib.gtnh.drones")
 
 local localnet = {}
 

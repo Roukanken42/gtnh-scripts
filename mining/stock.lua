@@ -17,9 +17,9 @@
 --
 -- See config.lua for the supply interface address and the target levels.
 
-local supply = require("supply")
-local dbslots = require("db")
-local localnet = require("localnet")
+local supply = require("lib.hw.supply")
+local dbslots = require("lib.hw.db")
+local localnet = require("lib.hw.localnet")
 local cfg = require("config")
 
 local scfg = cfg.supply or {}

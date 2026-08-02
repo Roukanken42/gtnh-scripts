@@ -66,7 +66,7 @@ end
 local component = optional("component")
 local computer = optional("computer")
 
-local dbslots = require("db")
+local dbslots = require("lib.hw.db")
 
 local transport = {}
 

@@ -7,3 +7,6 @@
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Generated on the machine by `setup`, never in the repo
+mining/data/

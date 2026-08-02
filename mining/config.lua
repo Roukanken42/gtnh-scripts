@@ -4,7 +4,8 @@
 --
 -- The fiddly per-module addresses (transposer / ME interface / sides) are best
 -- filled in by running the `setup` script, which discovers them and writes them
--- to stations.lua next to this file. This config loads that file automatically.
+-- to data/stations.lua. This config loads that file automatically, at the very
+-- bottom, so it can fill in anything left unset here.
 
 local cfg = {}
 
@@ -201,8 +202,9 @@ cfg.supply = {
 -- unset and never clobbers something you set by hand. stations.lua is
 -- machine-specific and not in the repo; re-run `setup` to regenerate it.
 do
-    local ok, data = pcall(require, "stations")
-    if ok and type(data) == "table" then
+    local ok, stations = pcall(require, "lib.stations")
+    local data = ok and stations.load() or nil
+    if type(data) == "table" then
         if cfg.database == nil then cfg.database = data.database end
         if cfg.supply.interface == nil then cfg.supply.interface = data.supply end
         if type(data.stations) == "table" then

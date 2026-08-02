@@ -62,10 +62,10 @@
 -- parameter: the controller derives them from stock deficits the way
 -- pump/main.lua's computeNeedy does.
 
-local meteors = require("meteors")
-local plasmas = require("plasmas")
-local drones = require("drones")
-local estimate = require("estimate")
+local meteors = require("lib.gtnh.meteors")
+local plasmas = require("lib.gtnh.plasmas")
+local drones = require("lib.gtnh.drones")
+local estimate = require("lib.calc.estimate")
 
 local target = {}
 

@@ -11,8 +11,8 @@
 -- Unlike the pumps, mining modules have no threads -- just parallels.
 
 local component = require("component")
-local transport = require("transport")
-local drones = require("drones")
+local transport = require("lib.hw.transport")
+local drones = require("lib.gtnh.drones")
 
 -- =====================================================================
 -- Mining module identity + per-tier stats.

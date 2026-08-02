@@ -45,9 +45,9 @@
 -- computation requirement, so a module attached to one is cheaper than this
 -- says. Nothing in the data modules describes those discounts yet.
 
-local meteors = require("meteors")
-local plasmas = require("plasmas")
-local drones = require("drones")
+local meteors = require("lib.gtnh.meteors")
+local plasmas = require("lib.gtnh.plasmas")
+local drones = require("lib.gtnh.drones")
 
 local estimate = {}
 

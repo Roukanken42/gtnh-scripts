@@ -31,9 +31,9 @@
 -- component is required lazily so the pure half of this module -- classify, the
 -- kit arithmetic, plan -- can be exercised off-machine the way target.lua is.
 
-local drones = require("drones")
-local plasmas = require("plasmas")
-local estimate = require("estimate")
+local drones = require("lib.gtnh.drones")
+local plasmas = require("lib.gtnh.plasmas")
+local estimate = require("lib.calc.estimate")
 
 local supply = {}
 
@@ -362,7 +362,7 @@ end
 -- which for a renamed fake output points at a different craftable entirely -- so
 -- any caller that intends to REQUEST something must supply it.
 function supply.catalog(itf, handle)
-    if type(handle) == "string" then handle = require("db").open(handle) end
+    if type(handle) == "string" then handle = require("lib.hw.db").open(handle) end
 
     local usable, unknown = {}, {}
     for _, p in ipairs(supply.readPatterns(itf)) do

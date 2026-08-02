@@ -43,7 +43,6 @@
 -- require("setup") returns the helper functions (for debugging) without running.
 
 local component = require("component")
-local computer = require("computer")
 local miners = require("lib.hw.miners")
 local drones = require("lib.gtnh.drones")
 local localnet = require("lib.hw.localnet")
@@ -111,9 +110,7 @@ local prepare = discover.prepare
 local pickDatabase = discover.pickDatabase
 local waitIdle = discover.waitIdle
 local waitForNewMiner = discover.waitForNewMiner
-local minerActive = discover.minerActive
 
-local POLL_INTERVAL = discover.POLL_INTERVAL
 local PROBE_PLASMA_L = discover.PROBE_PLASMA_L
 local PROBE_FLUID_TANK = discover.PROBE_FLUID_TANK
 local PROBE_CFG_SLOT = discover.PROBE_CFG_SLOT
@@ -155,7 +152,14 @@ if not dbAddr then
 end
 local handle, dbErr = dbslots.open(dbAddr)
 if not handle then say("ERROR: " .. tostring(dbErr)); return discover end
-detail("Database %s..: %d slot(s)", dbAddr:sub(1, 8), handle:size())
+
+-- Start from an empty database. Setup owns this one -- it is the database it
+-- picked and the only thing that writes to it -- and clearing leftovers is the
+-- same clean slate it makes of the interfaces, buses and hatches. Without it, an
+-- entry from an older run sits in a slot forever, since nothing ever goes looking
+-- for it to tidy it up.
+handle:reset()
+detail("Database %s..: %d slot(s), cleared", dbAddr:sub(1, 8), handle:size())
 
 local dbSlot, derr = storeProbe(net, handle, probe)
 if not dbSlot then say("ERROR: " .. tostring(derr)); return discover end

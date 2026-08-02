@@ -101,7 +101,23 @@ function Db:slot(name)
     self.next = slot + 1
     self.named[name] = slot
     self.order[slot] = name
+
+    -- A slot just handed to a name belongs to nobody yet, so whatever a previous
+    -- run left in it goes. This is not tidiness: store() will not write over an
+    -- occupied slot, so a caller that stores into one silently gets nothing -- or
+    -- worse, keeps the stale entry and believes it succeeded. Every run then
+    -- leaks one more, which is how a database slowly fills with old drones.
+    self:clear(slot)
     return slot, true
+end
+
+-- Empties every slot and forgets every name, so the next allocation starts from
+-- one. For a program that owns the database and wants to begin from nothing --
+-- `setup` does, since establishing a clean slate is its whole job. Anything that
+-- merely shares the database should not call this.
+function Db:reset()
+    for slot = 1, self.slots do self:clear(slot) end
+    self.named, self.order, self.next = {}, {}, 1
 end
 
 -- A slot whose contents nobody keeps. Written and read back immediately, never

@@ -218,60 +218,86 @@ end
 
 -- ---- pure: deciding what to request -----------------------------------------
 
+-- What the local net holds for each catalog entry, keyed the way plan and the
+-- order book key things: the material for kits, the fluid name for plasma.
+function supply.levels(catalog, stock)
+    stock = stock or {}
+    local out = {}
+    for _, entry in ipairs(catalog or {}) do
+        if entry.kind == "kit" then
+            out[entry.material] = supply.kitsInStock(entry, stock.items)
+        elseif entry.kind == "plasma" then
+            out[entry.plasma.name] = supply.plasmaInStock(entry, stock)
+        end
+    end
+    return out
+end
+
 -- What to request to bring the local net back to its targets.
 --   catalog    entries from supply.classify
 --   stock      { items = { [label] = count }, fluids = { [name] = litres } }
 --   cfg        cfg.supply (target / plasma / plasmaPerCraft / lowWater / maxCrafts)
 --   satisfied  caller-owned latch table, carried across cycles for hysteresis
--- Returns a list of { entry, key, have, target, deficit, crafts }, plus a list of
--- notes for anything that has a target but cannot be acted on.
+--   onOrder    key -> amount already requested and not yet in stock
+-- Returns a list of { entry, key, have, coming, target, deficit, crafts }, plus a
+-- list of notes for anything that has a target but cannot be acted on.
 --
--- Hysteresis matches pump/main.lua's computeNeedy: once a material reaches its
--- target it stays "satisfied" until it drops below lowWater * target, so a slow
--- drain cannot make this re-request every cycle.
-function supply.plan(catalog, stock, cfg, satisfied)
+-- Two things stop this re-requesting forever.
+--
+-- HYSTERESIS, as pump/main.lua's computeNeedy does it: once a material reaches
+-- its target it stays "satisfied" until it drops below lowWater * target, so a
+-- slow drain cannot make this ask every cycle.
+--
+-- WHAT IS ALREADY COMING. A request is counted as though it had already landed,
+-- because it very nearly has. Without that the controller ordered the whole
+-- deficit again on every cycle until the goods showed up in a stock read -- and a
+-- fake-crafting job reports done the instant its inputs are pushed, well before
+-- either AE2 or the next stock read catches up. More is only ever asked for when
+-- the shortfall grows BEYOND what is on order.
+function supply.plan(catalog, stock, cfg, satisfied, onOrder)
     cfg = cfg or {}
     stock = stock or {}
     satisfied = satisfied or {}
+    onOrder = onOrder or {}
     local lowWater = cfg.lowWater or 0.9
     local work, notes = {}, {}
 
     local function consider(entry, key, have, target, perCraft)
         if not target or target <= 0 then return end
-        if have >= target then
+        local coming = onOrder[key] or 0
+        local effective = have + coming
+
+        if effective >= target then
             satisfied[key] = true
             return
         end
-        if satisfied[key] and have >= lowWater * target then return end
+        if satisfied[key] and effective >= lowWater * target then return end
         satisfied[key] = false
 
         if not perCraft or perCraft <= 0 then
-            notes[#notes + 1] = key .. ": short " .. (target - have)
+            notes[#notes + 1] = key .. ": short " .. (target - effective)
                 .. ", but how much one craft delivers is unknown"
             return
         end
-        local deficit = target - have
+        local deficit = target - effective
         local crafts = math.ceil(deficit / perCraft)
         if cfg.maxCrafts and crafts > cfg.maxCrafts then crafts = cfg.maxCrafts end
         work[#work + 1] = {
-            entry = entry, key = key, have = have, target = target,
+            entry = entry, key = key, have = have, coming = coming, target = target,
             deficit = deficit, crafts = crafts,
         }
     end
 
+    local levels = supply.levels(catalog, stock)
     for _, entry in ipairs(catalog) do
         if entry.kind == "kit" then
-            consider(entry, entry.material,
-                supply.kitsInStock(entry, stock.items),
-                cfg.target and cfg.target[entry.material],
-                entry.perCraft)
+            consider(entry, entry.material, levels[entry.material],
+                cfg.target and cfg.target[entry.material], entry.perCraft)
         elseif entry.kind == "plasma" then
             -- Target and stock are both litres, and so is perCraft (one drop per
             -- litre), so this needs no conversion at all.
-            consider(entry, entry.plasma.name,
-                supply.plasmaInStock(entry, stock),
-                cfg.plasma and cfg.plasma[entry.plasma.name],
-                entry.perCraft)
+            consider(entry, entry.plasma.name, levels[entry.plasma.name],
+                cfg.plasma and cfg.plasma[entry.plasma.name], entry.perCraft)
         end
     end
 

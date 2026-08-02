@@ -77,6 +77,11 @@ local ctx = cli.start({
         "Restock requests are capped -- by default 2 kit jobs and 1 plasma job at "
             .. "once -- because each one holds a crafting CPU on the main net until "
             .. "its inputs are pushed. The emptiest material goes first.",
+        "What has been requested counts towards the target as though it had already "
+            .. "arrived, so a slow craft is not ordered again on the next cycle. The "
+            .. "JOB column shows it as \"+N due\". An order nothing ever delivers is "
+            .. "written off after cfg.control.orderTtl seconds, so a failed craft "
+            .. "cannot block a material for good.",
         "SPACE pauses maintenance (the modules keep running); L shows the log; "
             .. "Q quits.",
         "Run with --profile when a cycle feels slow, then press F: it shows where "
@@ -494,15 +499,21 @@ local function runCycle()
     local work, notes = {}, {}
     local donePlan = profile.span("plan and request")
     if itf and #catalog > 0 then
+        -- Reconcile the order book against the stock BEFORE planning: an order
+        -- that has landed must stop counting towards the target, and one that
+        -- never will must stop blocking the material.
+        jobs:settle(supply.levels(catalog, stock), computer.uptime(), ccfg.orderTtl)
+
         local planCfg = {
             target = kitTargets, plasma = plasmaTargets,
             lowWater = scfg.lowWater, maxCrafts = scfg.maxCrafts,
         }
-        work, notes = supply.plan(catalog, stock, planCfg, satisfied)
+        work, notes = supply.plan(catalog, stock, planCfg, satisfied, jobs:onOrder())
         if not paused then
             local issued, blocked, errs = control.issue(itf, work, jobs, computer.uptime())
             for _, j in ipairs(issued) do
-                log(string.format("requested %s x%d", j.key, j.crafts))
+                log(string.format("requested %s x%d (%d on order)", j.key, j.crafts,
+                    math.floor(jobs:coming(j.key) + 0.5)))
             end
             for _, e in ipairs(errs) do log("request failed: " .. e) end
             if blocked > 0 and #issued > 0 then
@@ -536,6 +547,7 @@ local function runCycle()
         if target > 0 or have > 0 then
             kitView[#kitView + 1] = {
                 name = material, have = have, target = target,
+                coming = jobs:coming(material),
                 fill = target > 0 and math.min(1, have / target) or 1,
                 crafts = crafting[material], from = from[material],
                 -- supply.plan only ever walks the catalog, so a material with no
@@ -552,7 +564,7 @@ local function runCycle()
         local have = stock.fluids[p.name] or 0
         plasmaView[#plasmaView + 1] = {
             tier = p.tier, name = p.name, plasma = p,
-            have = have, target = target,
+            have = have, target = target, coming = jobs:coming(p.name),
             fill = target > 0 and math.min(1, have / target) or (have > 0 and 1 or 0),
             crafts = crafting[p.name], from = from[p.name],
             missing = (not patternFor[p.name]) and itf ~= nil or nil,
@@ -815,13 +827,13 @@ local function printCycle()
     for _, k in ipairs(view.kits) do
         if k.fill < 1 then
             log(string.format("  %-20s %d / %d kits%s", k.name, k.have, k.target,
-                k.crafts and (" (crafting x" .. k.crafts .. ")") or ""))
+                (k.coming or 0) > 0 and string.format(" (+%d on order)", k.coming) or ""))
         end
     end
     for _, p in ipairs(view.plasmas) do
         if p.target > 0 and p.fill < 1 then
             log(string.format("  %-20s %d / %d L%s", p.name, p.have, p.target,
-                p.crafts and (" (crafting x" .. p.crafts .. ")") or ""))
+                (p.coming or 0) > 0 and string.format(" (+%d on order)", p.coming) or ""))
         end
     end
 end

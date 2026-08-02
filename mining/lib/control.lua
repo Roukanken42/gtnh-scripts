@@ -43,6 +43,13 @@ control.KITS_PER_MINER = 256
 -- themselves hold one each; this is what refills them.
 control.HATCH_REFILLS = 4
 
+-- How long an unconfirmed order is believed in. A fake craft is instant and the
+-- goods should appear in the next stock read, so this only has to outlast that;
+-- past it the order is written off, because a craft can fail, be cancelled, or
+-- push into a network with nowhere to put it, and a material must not be blocked
+-- for good by an order nothing will ever deliver.
+control.ORDER_TTL = 120
+
 -- Top a hatch up once it falls below this fraction of its target (config.lua's
 -- cfg.supply.hatchRefill overrides). Same laziness as `plasma keep`: big, rare
 -- transfers rather than a trickle every cycle.
@@ -123,7 +130,74 @@ control.Jobs = Jobs
 -- Tracker for in-flight restock requests, with a cap per kind. `limits` is
 -- { kit = n, plasma = n }; a kind not listed is unlimited.
 function control.newJobs(limits)
-    return setmetatable({ limits = limits or control.JOBS, active = {} }, Jobs)
+    return setmetatable({ limits = limits or control.JOBS, active = {}, orders = {} }, Jobs)
+end
+
+-- ---- the order book ----------------------------------------------------------
+--
+-- An ORDER is goods requested and not yet seen in stock. It outlives the JOB that
+-- requested them, which is the whole point: a fake-crafting job reports done the
+-- moment its inputs are pushed, so guarding on "is a job running" stops guarding
+-- almost immediately, and the next cycle sees the same deficit and orders the lot
+-- again. And again.
+--
+--   units   how much was ordered, in the same unit as the target (kits, litres)
+--   base    the stock level when it was ordered, so a delivery can be recognised
+--   since   uptime, for the write-off
+
+-- Records what a request promises to deliver.
+function Jobs:order(key, units, have, at)
+    if not units or units <= 0 then return end
+    local o = self.orders[key]
+    if o then
+        -- A second order for the same thing adds to the first rather than
+        -- replacing it: both lots are still coming.
+        o.units = o.units + units
+        o.since = at or 0
+    else
+        self.orders[key] = { units = units, base = have or 0, since = at or 0 }
+    end
+end
+
+-- key -> amount still expected, for supply.plan.
+function Jobs:onOrder()
+    local out = {}
+    for key, o in pairs(self.orders) do out[key] = o.units end
+    return out
+end
+
+-- Drops orders that have arrived, and writes off ones that never will. `levels`
+-- is key -> current stock, as supply.levels gives it.
+function Jobs:settle(levels, at, ttl)
+    ttl = ttl or control.ORDER_TTL
+    for key, o in pairs(self.orders) do
+        local have = levels and levels[key]
+        if have then
+            if have < o.base then
+                -- The modules ate into it while the order was out. Consumption is
+                -- not a delivery, but the baseline has to follow it DOWN: measuring
+                -- a later rise from the original level would credit the order with
+                -- only the difference, decide half of it never came, and order that
+                -- half all over again.
+                o.base = have
+            end
+            local delivered = have - o.base
+            if delivered >= o.units then
+                self.orders[key] = nil
+            elseif delivered > 0 then
+                o.units = o.units - delivered
+                o.base = have
+            end
+        end
+        local still = self.orders[key]
+        if still and (at - still.since) > ttl then self.orders[key] = nil end
+    end
+end
+
+-- How much is on order for one key, for display.
+function Jobs:coming(key)
+    local o = self.orders[key]
+    return o and o.units or 0
 end
 
 -- Advances every job and drops the ones that have settled. Fake-crafting patterns
@@ -187,6 +261,9 @@ function control.issue(itf, work, jobs, at)
             local job, err = supply.request(itf, w.entry, w.crafts)
             if job then
                 issued[#issued + 1] = jobs:add(kind, w.key, job, w.crafts, at)
+                -- On the books immediately, so the next cycle counts it as good
+                -- as delivered rather than ordering the same shortfall again.
+                jobs:order(w.key, w.crafts * (w.entry.perCraft or 0), w.have, at)
             else
                 errs[#errs + 1] = w.key .. ": " .. tostring(err)
             end

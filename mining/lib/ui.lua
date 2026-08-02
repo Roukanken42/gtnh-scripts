@@ -32,8 +32,9 @@
 --                   parallels, parallelCap, overdrive, material, hatchLevel,
 --                   hatchCapacity, hatchTarget, hatchFluid, staged,
 --                   pending }, ... }   -- pending: a queued change, in words
---   kits        { { name, have, target, fill, crafts, from }, ... }  tier order
---   plasmas     { { tier, name, have, target, fill, crafts, from, active }, ... }
+--   kits        { { name, have, target, fill, crafts, coming, from }, ... } tier order
+--   plasmas     { { tier, name, have, target, fill, crafts, coming, from,
+--                   active }, ... }
 --   totals      { miners, mining, jobsKit, jobsPlasma, limitKit, limitPlasma }
 --   supplyErr   string | nil
 --   messages    { "HH:MM:SS  text", ... }   newest last
@@ -523,13 +524,18 @@ local function drawStockRow(x, y, inner, e, gutter, gutterColor)
         cell(x, y, SC.bar, 16, "", C.faint, inner)
     end
 
-    -- "Crafting": a restock job for this entry is in flight on the main net.
-    -- "no pattern" is the other reason a row can sit short and quiet.
+    -- Why a row that is short is not being acted on. "craft xN" while the job is
+    -- still on a CPU; "+N due" once it is off but the goods have not landed, which
+    -- is the state that used to look like nothing happening and get re-ordered
+    -- every cycle; "no pattern" when there is nothing that could deliver it.
     if e.missing then
         cell(x, y, SC.job, 11, "no pattern", C.crit, inner)
+    elseif (e.crafts or 0) > 0 then
+        cell(x, y, SC.job, 9, "craft x" .. e.crafts, C.accent2, inner)
+    elseif (e.coming or 0) > 0 then
+        cell(x, y, SC.job, 9, "+" .. human(e.coming) .. " due", C.accent, inner)
     else
-        cell(x, y, SC.job, 9, (e.crafts or 0) > 0 and ("craft x" .. e.crafts) or "",
-            C.accent2, inner)
+        cell(x, y, SC.job, 9, "", C.faint, inner)
     end
 end
 

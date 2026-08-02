@@ -171,6 +171,8 @@ function transport.new(spec)
         self.inputBusSide = spec.inputBusSide
         self.interfaceSlot = spec.interfaceSlot or 1
     end
+    -- Tank capacities, filled in on first use and never re-read (capacityOf).
+    self.capacities = {}
     self.stockTimeout = spec.stockTimeout or 10
     self.pollInterval = spec.pollInterval or 0.25
     self.dryRun = spec.dryRun or false
@@ -278,20 +280,77 @@ function Station:hasFluid()
     return self.fluidTransposer ~= nil
 end
 
+-- Capacity (mB) of a tank the fluid transposer can see, read ONCE and then
+-- remembered. A hatch does not change size, and asking again is not free: an
+-- OpenComputers component call that is not direct returns on the next tick, so
+-- re-reading six constants every cycle was costing the controller most of a
+-- second (see the profile that prompted this).
+function Station:capacityOf(side, tank0)
+    tank0 = tank0 or 0
+    if not self.fluidTransposer then return 0 end
+    local key = side * 16 + tank0
+    local known = self.capacities[key]
+    if known then return known end
+
+    local okC, capacity = pcall(self.fluidTransposer.getTankCapacity, side, tank0 + 1)
+    capacity = (okC and tonumber(capacity)) or 0
+    -- Only a real answer is kept. A zero here usually means the block was not
+    -- ready to answer, and caching that would leave the station believing its
+    -- hatch has no room for the rest of the run.
+    if capacity > 0 then self.capacities[key] = capacity end
+    return capacity
+end
+
 -- Level and capacity (mB) of a tank the fluid transposer can see. `tank0` is
 -- 0-based, matching transferFluid and the interface config; the read methods
 -- count from one, and this is the ONLY place that knows it.
 function Station:tank(side, tank0)
     if not self.fluidTransposer then return 0, 0 end
-    local t = (tank0 or 0) + 1
-    local okL, level = pcall(self.fluidTransposer.getTankLevel, side, t)
-    local okC, capacity = pcall(self.fluidTransposer.getTankCapacity, side, t)
-    return (okL and tonumber(level)) or 0, (okC and tonumber(capacity)) or 0
+    local okL, level = pcall(self.fluidTransposer.getTankLevel, side, (tank0 or 0) + 1)
+    return (okL and tonumber(level)) or 0, self:capacityOf(side, tank0)
+end
+
+-- Everything about the input hatch in ONE component call: level, capacity, and
+-- which fluid is in it. getFluidInTank already reports the amount (and usually
+-- the capacity), so asking getTankLevel and getTankCapacity as well was three
+-- calls -- three ticks -- for one tank.
+--
+-- Falls back to the separate reads if the build does not report an amount here.
+-- The test is `amount is a number`, not `amount is non-zero`: an empty hatch
+-- legitimately answers 0, and treating a missing field as empty would have the
+-- controller believe a full hatch needs filling.
+function Station:hatchInfo()
+    if not self.fluidTransposer then return 0, 0, nil end
+
+    local ok, f = pcall(self.fluidTransposer.getFluidInTank, self.inputHatchSide, 1)
+    if ok and type(f) == "table" then
+        -- Some builds hand back the tank list rather than the tank.
+        if f.amount == nil and f.label == nil and type(f[1]) == "table" then f = f[1] end
+
+        local level = tonumber(f.amount)
+        if level then
+            local capacity = tonumber(f.capacity)
+            if capacity and capacity > 0 then
+                self.capacities[self.inputHatchSide * 16] = capacity
+            else
+                capacity = self:capacityOf(self.inputHatchSide, 0)
+            end
+            local label = nil
+            if type(f.label) == "string" and f.label ~= "" and level > 0 then
+                label = f.label
+            end
+            return level, capacity, label
+        end
+    end
+
+    local level, capacity = self:tank(self.inputHatchSide, 0)
+    return level, capacity, nil
 end
 
 -- The module's input hatch: level, capacity.
 function Station:hatchTank()
-    return self:tank(self.inputHatchSide, 0)
+    local level, capacity = self:hatchInfo()
+    return level, capacity
 end
 
 -- The interface tank plasma is staged in: level, capacity (16,000 L).
@@ -304,12 +363,9 @@ end
 -- switch has actually taken effect yet.
 function Station:hatchFluid()
     if not self.fluidTransposer then return nil end
-    local ok, f = pcall(self.fluidTransposer.getFluidInTank, self.inputHatchSide, 1)
-    if not ok or type(f) ~= "table" then return nil end
-    -- Some builds hand back the tank list rather than the tank.
-    if f.label == nil and type(f[1]) == "table" then f = f[1] end
-    if type(f.label) ~= "string" or (f.amount or 0) <= 0 then return nil end
-    return f.label, f.amount
+    local level, _, label = self:hatchInfo()
+    if not label then return nil end
+    return label, level
 end
 
 -- Points this station's interface tank at a plasma, by database slot (see
@@ -354,9 +410,17 @@ end
 -- what the hatch can hold. Returns moved, err. Moving nothing is normal -- it
 -- means the hatch is already full enough, or the staging tank has not refilled
 -- yet.
-function Station:fillHatch(target)
+-- `level` may be supplied by a caller that has just read it, which is the normal
+-- case in the control loop: re-reading the hatch here made every top-up cost an
+-- extra tick for a number the caller already had.
+function Station:fillHatch(target, level)
     if not self:hasFluid() then return 0, "no fluid half configured" end
-    local level, capacity = self:hatchTank()
+    local capacity
+    if level == nil then
+        level, capacity = self:hatchInfo()
+    else
+        capacity = self:capacityOf(self.inputHatchSide, 0)
+    end
     if capacity > 0 and target > capacity then target = capacity end
     local want = target - level
     if want <= 0 then return 0 end

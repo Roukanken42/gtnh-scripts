@@ -245,6 +245,17 @@ cfg.control = {
     interval = 5,
     uiRefresh = 1,
 
+    -- How many cycles between the SLOW reads: which drone is in each bus, how
+    -- much plasma is staged, and what the local net holds. Every one of those
+    -- changes on a scale of minutes, while a component call that is not direct
+    -- costs a whole tick -- so asking every cycle spent most of a second to learn
+    -- nothing. The hatch level is still read every cycle, since topping up
+    -- decides on it, and an edit forces a full read on the spot.
+    --
+    -- The cost is staleness: with the defaults, a drone swapped by hand shows up
+    -- within 30s. Lower it if that matters more than the cycle time.
+    slowEvery = 6,
+
     -- Kits to keep in the local net per module running that material. One kit is
     -- one meteor, so this is roughly "how many meteors of runway each module
     -- has". Worth lowering for the expensive materials -- 256 Infinity kits is

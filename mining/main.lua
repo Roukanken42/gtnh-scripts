@@ -205,9 +205,27 @@ local nav = control.newNav()
 
 local MATERIALS = control.materialsByTier()
 
+-- How often the slow half of readFleet runs, in cycles. See readFleet.
+local slowEvery = math.max(ccfg.slowEvery or 6, 1)
+
+-- What the slow reads last saw, by module address, so a fast cycle can carry it
+-- forward instead of asking again.
+local slowSeen = {}
+
 -- What each module is doing, read fresh. Everything the dashboard shows about a
 -- miner comes from here, so a cheap UI repaint never touches hardware.
-local function readFleet()
+--
+-- Split by how fast the answer actually changes, because each read here is a
+-- component call and an indirect one costs a whole tick:
+--
+--   every cycle   the parameters and whether it is running -- both DIRECT, and
+--                 so free, which the profile settled -- and the input hatch,
+--                 which is the one thing topping up decides on.
+--   `full` only   which drone is in the bus, and how much is staged in the
+--                 interface tank. A drone changes when the player changes it, and
+--                 an edit forces a full read on the spot; the staged figure is
+--                 only ever displayed.
+local function readFleet(full)
     local rows = {}
     for _, m in ipairs(fleet) do
         local st = m.station
@@ -229,23 +247,32 @@ local function readFleet()
         -- The drone in the input bus is what the module mines with, and its
         -- material is what its kits are made of -- the whole demand, read off the
         -- hardware rather than configured twice.
-        if row.hasItems then
-            for _, s in ipairs(st:busStacks()) do
-                local d = drones.fromName(s.label)
-                -- "MK-X" rather than the full "Mining Drone MK-X": the column is
-                -- headed DRONE and every one of them starts the same way.
-                if d then
-                    row.drone, row.material = "MK-" .. d.roman, d.material
-                    row.droneTier = d.tier
-                    break
+        local seen = slowSeen[m.address]
+        if full then
+            seen = {}
+            slowSeen[m.address] = seen
+            if row.hasItems then
+                for _, s in ipairs(st:busStacks()) do
+                    local d = drones.fromName(s.label)
+                    -- "MK-X" rather than the full "Mining Drone MK-X": the column
+                    -- is headed DRONE and every one of them starts the same way.
+                    if d then
+                        seen.drone, seen.material = "MK-" .. d.roman, d.material
+                        seen.droneTier = d.tier
+                        break
+                    end
                 end
             end
+            if row.hasFluid then seen.staged = st:bufferTank() end
+        end
+        if seen then
+            row.drone, row.material = seen.drone, seen.material
+            row.droneTier, row.staged = seen.droneTier, seen.staged
         end
 
         if row.hasFluid then
-            row.hatchLevel, row.hatchCapacity = st:hatchTank()
-            row.hatchFluid = st:hatchFluid()
-            row.staged = st:bufferTank()
+            -- One call for all three: level, capacity and which fluid.
+            row.hatchLevel, row.hatchCapacity, row.hatchFluid = st:hatchInfo()
             local p = row.hatchFluid and plasmas.byName[row.hatchFluid]
             if p then
                 row.plasma = p
@@ -310,8 +337,11 @@ local function runCycle()
     if profile.enabled then profile.cycles = profile.cycles + 1 end
     local endCycle = profile.span("whole cycle")
 
+    -- The slow reads happen on the first cycle and every slowEvery-th after.
+    local full = (cycle % slowEvery) == 1 or slowEvery == 1
+
     local doneRead = profile.span("readFleet")
-    local rows = readFleet()
+    local rows = readFleet(full)
     doneRead()
     local stations = stationsOf(rows)
 
@@ -347,7 +377,7 @@ local function runCycle()
                 returned > 0 and string.format(", returned %d L", returned) or "",
                 failed > 0 and string.format(", %d station(s) failed", failed) or ""))
             activePlasma = p
-            rows = readFleet()
+            rows = readFleet(true)
         end
         doneSwitch()
     else
@@ -369,8 +399,17 @@ local function runCycle()
             end
         end
 
+        -- The levels readFleet just read, rather than reading them again.
+        local hatches = {}
+        for _, r in ipairs(rows) do
+            if r.station and r.hasFluid then
+                hatches[#hatches + 1] = {
+                    station = r.station, level = r.hatchLevel, capacity = r.hatchCapacity,
+                }
+            end
+        end
         local target = supply.hatchLitres(activePlasma, scfg)
-        local touched, moved = control.topUp(stations, target, scfg.hatchRefill)
+        local touched, moved = control.topUp(hatches, target, scfg.hatchRefill)
         if touched > 0 then
             log(string.format("topped up %d hatch(es), +%d L", touched, moved))
         end
@@ -385,7 +424,9 @@ local function runCycle()
     local kitTargets, plasmaTargets, from =
         control.demand(demandFleet, scfg, ccfg, activePlasma)
 
-    if net and #catalog > 0 then
+    -- Kits go one per meteor and meteors take tens of seconds, so re-reading the
+    -- whole net every cycle only buys staleness nobody can see.
+    if full and net and #catalog > 0 then
         local doneStock = profile.span("read local net stock")
         stock = supply.stock(catalog, net)
         doneStock()
@@ -768,9 +809,10 @@ local function handleKey(char, code)
         nav.edit = nil
         local row = view.miners[nav.module]
         if row and edit then commitEdit(row, edit.field, edit.value) end
-        -- The write changed the hardware; re-read it rather than showing the old
-        -- values until the next cycle comes round.
-        view.miners = readFleet()
+        -- The write changed the hardware -- including the drone, which is one of
+        -- the slow reads -- so take a full one rather than showing stale values
+        -- until the slow cadence comes round again.
+        view.miners = readFleet(true)
     elseif action == "apply-plasma" then
         local pick = view.plasmas[nav.confirm]
         nav.confirm, nav.focus = nil, nil
@@ -827,7 +869,11 @@ local function loop()
         local t = computer.uptime()
         if t >= nextCycle then
             runCycle()
-            nextCycle = computer.uptime() + interval
+            -- Scheduled from when this cycle STARTED, so the period is the
+            -- interval rather than the interval plus however long a cycle took.
+            -- Floored a little ahead of now, so a cycle that overruns cannot
+            -- schedule the next in the past and starve the repaint entirely.
+            nextCycle = math.max(t + interval, computer.uptime() + 0.25)
             if uiActive then
                 render()
                 nextRefresh = computer.uptime() + uiRefresh

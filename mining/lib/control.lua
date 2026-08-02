@@ -196,20 +196,24 @@ function control.wantsTopUp(level, capacity, target, refill)
     return level < want * (refill or control.HATCH_REFILL), want
 end
 
--- Tops up every station that has fallen below the refill threshold. ONE transfer
+-- Tops up every hatch that has fallen below the refill threshold. ONE transfer
 -- per station per cycle: the staging tank holds at most 16,000 L and refills from
 -- ME between cycles, so a larger target simply takes a few cycles. Station's own
 -- fillHatchTo would sleep until it got there, which is right for `plasma keep`
 -- and wrong for a loop that also has a screen to repaint.
+--
+-- `entries` are { station, level, capacity } -- the levels the CALLER has already
+-- read this cycle. Reading them again here was six component calls a cycle, and
+-- an indirect one costs a tick apiece.
 -- Returns the number of hatches touched and the litres moved.
-function control.topUp(stations, target, refill)
+function control.topUp(entries, target, refill)
     local touched, moved = 0, 0
-    for _, st in ipairs(stations or {}) do
-        if st:hasFluid() then
-            local level, capacity = st:hatchTank()
-            local wants, want = control.wantsTopUp(level, capacity, target, refill)
+    for _, e in ipairs(entries or {}) do
+        local st = e.station
+        if st and st:hasFluid() then
+            local wants, want = control.wantsTopUp(e.level or 0, e.capacity, target, refill)
             if wants then
-                local n = st:fillHatch(want) or 0
+                local n = st:fillHatch(want, e.level) or 0
                 if n > 0 then touched, moved = touched + 1, moved + n end
             end
         end

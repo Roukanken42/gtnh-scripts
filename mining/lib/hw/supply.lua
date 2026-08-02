@@ -546,27 +546,37 @@ end
 
 -- Current local-net stock for a catalog, in the shape supply.plan expects:
 --   { items = { [label] = count }, fluids = { [name] = litres } }
--- Only the labels the catalog actually mentions are looked up, so this stays a
--- handful of filtered queries rather than a whole-network dump.
+--
+-- ONE unfiltered sweep, not a filtered query per label. Nine kit patterns of two
+-- inputs each meant eighteen queries a cycle, and an OpenComputers component call
+-- that is not direct returns on the NEXT TICK -- so that was most of a second
+-- spent asking eighteen questions one sweep already answers. This is a dedicated
+-- mining subnet holding kits, drones and plasma, so the sweep is small.
 function supply.stock(catalog, net)
     local items, fluids = {}, {}
     if not net then return { items = items, fluids = fluids } end
 
+    -- Which labels are worth keeping out of the sweep. Seeding them at zero also
+    -- distinguishes "the catalog wants this and the net has none" from "nobody
+    -- asked", which is what plan() reads.
     for _, entry in ipairs(catalog) do
         -- Only item-bearing kinds are looked up here; plasma arrives as fluid.
         if entry.kind == "kit" or entry.kind == "drone" then
             for _, i in ipairs(entry.inputs) do
-                if items[i.name] == nil then
-                    items[i.name] = 0
-                    local ok, found = pcall(net.getItemsInNetwork, { label = i.name })
-                    if ok and type(found) == "table" then
-                        for _, it in ipairs(found) do
-                            -- re-check: the filter is not reliably exact
-                            if it and it.label == i.name then
-                                items[i.name] = items[i.name] + (it.size or 0)
-                            end
-                        end
-                    end
+                if items[i.name] == nil then items[i.name] = 0 end
+            end
+        end
+    end
+
+    if next(items) ~= nil then
+        local ok, found = pcall(net.getItemsInNetwork)
+        if ok and type(found) == "table" then
+            for _, it in ipairs(found) do
+                local label = it and it.label
+                -- Exact match on the label, as the filtered form re-checked: the
+                -- sweep reports everything, and only these are ours.
+                if label ~= nil and items[label] ~= nil then
+                    items[label] = items[label] + (it.size or 0)
                 end
             end
         end

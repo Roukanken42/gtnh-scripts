@@ -22,10 +22,17 @@
 --           wrapped once at the edge (profile.proxy) and everything downstream
 --           is counted without knowing it is being watched.
 --
--- Cheap enough to leave on: a closure and two adds against a call that is very
--- probably going to cost a whole tick.
+-- OFF unless asked for. The overhead is small next to a call that probably costs
+-- a whole tick, but it is not nothing -- a closure and a table per call -- and a
+-- controller that runs for days should not pay for an instrument nobody is
+-- reading. profile.enable() turns it on; until then span() hands back a no-op and
+-- proxy() hands back the proxy it was given, so every call site can stay exactly
+-- where it is.
 
 local profile = {}
+
+-- Nothing is measured until this is set. main.lua sets it for --profile.
+profile.enabled = false
 
 local computer
 do local ok, c = pcall(require, "computer"); computer = ok and c or nil end
@@ -69,9 +76,13 @@ local function record(into, order, name, dt, count)
     if dt > b.max then b.max = dt end
 end
 
+-- Shared, so a disabled span costs one comparison and no allocation.
+local function noop() end
+
 -- Starts a named phase. Returns the function that ends it, so a phase cannot be
 -- left open by an early return:  local done = profile.span("readFleet") ... done()
 function profile.span(name)
+    if not profile.enabled then return noop end
     local t0 = now()
     local calls0 = profile.callCount
     return function()
@@ -101,6 +112,7 @@ profile.callCount = 0
 profile.wrapped = setmetatable({}, { __mode = "k" })
 
 function profile.proxy(p, kind)
+    if not profile.enabled then return p end
     if type(p) ~= "table" then return p end
     if profile.wrapped[p] then return p end
     kind = kind or (p.type) or "component"
@@ -146,6 +158,13 @@ function profile.proxy(p, kind)
     })
     profile.wrapped[stub] = true
     return stub
+end
+
+-- Starts measuring. Called before anything is wrapped, since a proxy handed out
+-- while disabled is the bare proxy and stays that way.
+function profile.enable()
+    profile.enabled = true
+    profile.reset()
 end
 
 function profile.reset()

@@ -317,9 +317,9 @@ local function clampField(f, v)
 end
 
 -- Applies a keypress to `st`, mutated in place. `ctx` says what there is to
--- navigate: { modules = n, plasmas = n, cur = { drone, distance, overdrive,
--- plasma } } -- `cur` being the open module's live values, which is what an edit
--- starts from. Returns the action for the caller and whether anything changed, so
+-- navigate: { modules = n, plasmas = n, profiling = <bool>, cur = { drone,
+-- distance, overdrive, plasma } } -- `cur` being the open module's live values,
+-- which is what an edit starts from. Returns the action for the caller and whether anything changed, so
 -- a key that did nothing does not force a repaint.
 --
 -- Actions: "open" | "close" | "commit" | "apply-plasma" | "pause" | "log" | "quit".
@@ -430,7 +430,9 @@ function control.key(st, ctx, char, code)
     end
 
     if char == CH.p then st.focus = "plasma"; return nil, true end
-    if char == CH.f then st.screen = "profile"; return nil, true end
+    -- Only when there is something to show: without --profile nothing is
+    -- measured, and a screen of zeroes is worse than no screen.
+    if char == CH.f and ctx.profiling then st.screen = "profile"; return nil, true end
     if char == CH.space then return "pause", true end
     if char == CH.l then return "log", true end
     if char == CH.q then return "quit", true end

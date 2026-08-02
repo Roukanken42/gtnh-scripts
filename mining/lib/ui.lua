@@ -311,7 +311,9 @@ local function hintFor(state)
     elseif state.focus == "plasma" then
         return "[" .. UPDOWN .. "] choose   [ENTER] select   [ESC] cancel"
     end
-    return "[" .. UPDOWN .. "] module  [ENTER] details  [P] plasma  [F] profile"
+    -- The profile key is deliberately absent: it only does anything under
+    -- --profile, and the hint bar is for the keys that always work.
+    return "[" .. UPDOWN .. "] module  [ENTER] details  [P] plasma"
         .. "  [SPACE] pause  [L] log  [Q] quit"
 end
 

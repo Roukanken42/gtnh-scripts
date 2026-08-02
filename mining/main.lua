@@ -42,7 +42,8 @@ local ctx = cli.start({
     flags = {
         { "--no-ui", "no dashboard; print each cycle instead" },
         { "--once",  "one cycle, then exit (for checking a fresh setup)" },
-        { "--profile", "write mining-profile.txt on exit" },
+        { "--profile", "measure where the time goes; F shows it, and it is written"
+            .. " to mining-profile.txt on exit" },
     },
     notes = {
         "MANUAL mode. You set each module's drone, distance and overdrive yourself; "
@@ -73,15 +74,24 @@ local ctx = cli.start({
             .. "its inputs are pushed. The emptiest material goes first.",
         "SPACE pauses maintenance (the modules keep running); L shows the log; "
             .. "Q quits.",
-        "F opens the profile: where each cycle's time went, and how many component "
-            .. "calls it made. That second number is usually the answer -- an "
-            .. "OpenComputers call that is not direct returns on the NEXT TICK, so it "
-            .. "costs 50ms however trivial it is, and a cycle making a hundred of "
-            .. "them takes five seconds no matter how fast the blocks are. S writes "
-            .. "the report to a file, since the log only shows a few lines.",
+        "Run with --profile when a cycle feels slow, then press F: it shows where "
+            .. "each cycle's time went and how many component calls it made. That "
+            .. "second number is usually the answer -- an OpenComputers call that is "
+            .. "not direct returns on the NEXT TICK, so it costs 50ms however trivial "
+            .. "it is, and a cycle making a hundred of them takes five seconds no "
+            .. "matter how fast the blocks are. S writes the report to a file, since "
+            .. "the log only shows a few lines. Without the flag nothing is measured "
+            .. "and nothing is wrapped, so the controller pays no overhead for it.",
     },
 }, ...)
 if not ctx then return end
+
+-- Before anything is wrapped: a proxy handed out while profiling is off is the
+-- bare proxy, and stays that way for the life of the run.
+if ctx.flags.profile then
+    profile.enable()
+    profile.root = "whole cycle"
+end
 
 local scfg = cfg.supply or {}
 local ccfg = cfg.control or {}
@@ -176,10 +186,6 @@ net = watch(localnet.proxy(), "localnet")
 if not net then log("No local ME controller found -- stock levels are unreadable.") end
 
 -- ---- state -------------------------------------------------------------------
-
--- Names the span that wraps a whole cycle, so the profile can tell "all of it"
--- from "the phase to go and fix".
-profile.root = "whole cycle"
 
 local jobs = control.newJobs(jobLimits)
 local satisfied = {}            -- hysteresis latch, carried across cycles
@@ -301,7 +307,7 @@ local cycle = 0
 
 local function runCycle()
     cycle = cycle + 1
-    profile.cycles = profile.cycles + 1
+    if profile.enabled then profile.cycles = profile.cycles + 1 end
     local endCycle = profile.span("whole cycle")
 
     local doneRead = profile.span("readFleet")
@@ -740,6 +746,7 @@ local function handleKey(char, code)
     local action, changed = control.key(nav, {
         modules = #(view.miners or {}),
         plasmas = #(view.plasmas or {}),
+        profiling = profile.enabled,
         cur = (nav.screen == "detail") and view.miners[nav.module]
             and currentOf(view.miners[nav.module]) or nil,
     }, char, code)
@@ -797,6 +804,9 @@ local uiActive = (not ctx.flags["no-ui"]) and (not ctx.flags.once)
 
 log(string.format("Mining controller (MANUAL) -- %d module(s), %ds cycle%s",
     #fleet, interval, cfg.dryRun and "  [DRY RUN]" or ""))
+if profile.enabled then
+    log("Profiling on -- press F for the report, S to write it to a file.")
+end
 if #fleet == 0 then
     log("No mining modules discovered. Are the Adapters connected? (try `probe gt_machine`)")
 end

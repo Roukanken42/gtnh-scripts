@@ -20,14 +20,18 @@
 --        * kits arrive from the local net by themselves (they are chosen by the
 --          drone), so setup only makes sure the probe drone's kits are in stock;
 --        * plasma is placed by us, through the fluid half of a station.
---   4. PHASE A -- buses. Give every fluid hatch a little plasma, then drop a drone
+--   4. Everything a module could run on is cleared first: leftover drone and
+--      plasma staging on every interface, every input bus emptied, every input
+--      hatch drained. Anything left behind makes a module run before we feed it,
+--      and the first thing tested then gets the credit.
+--   5. PHASE A -- buses. Give every fluid hatch a little plasma, then drop a drone
 --      into one bus at a time and see which miner starts mining. That pairs each
 --      input bus with its miner.
---   5. PHASE B -- hatches. The reverse: put a drone in EVERY bus, empty every
+--   6. PHASE B -- hatches. The reverse: put a drone in EVERY bus, empty every
 --      hatch, then fill one hatch at a time and see which miner starts. That pairs
 --      each input hatch with its miner. The miners are stopped and allowed to
 --      settle in between, because isMachineActive lags.
---   6. Each (miner -> item transposer + fluid transposer + sides) becomes a station.
+--   7. Each (miner -> item transposer + fluid transposer + sides) becomes a station.
 --
 -- Run from this folder:
 --   setup              a one-screen summary: what was found, what was paired,
@@ -468,6 +472,69 @@ local function sweepInterfaces(scans, candidates, spec, what)
     return found
 end
 
+-- Empties every input bus and drains every input hatch before detection begins.
+-- Anything left in one makes its module runnable before we have fed it, and then
+-- the first thing tested gets the credit -- a false pairing that looks exactly
+-- like a correct one.
+--
+-- Contents go back through that transposer's PAIRED interface. A transposer that
+-- could not be paired is reported instead of guessed at: pushing items into an
+-- interface we have not identified could put them on the wrong network, and
+-- someone else's at that.
+-- Returns emptied, drained, stuck counts.
+local function purgeFeeds(scans, itemPairs, fluidPairs)
+    local emptied, drained, stuck = 0, 0, 0
+
+    for _, sc in ipairs(scans) do
+        local tag = sc.addr:sub(1, 8)
+
+        local m = itemPairs[sc.addr]
+        for _, busSide in ipairs(sc.busSides) do
+            local held = 0
+            for _, st in pairs(readSideStacks(sc.tp, busSide)) do
+                if type(st) == "table" then held = held + (st.size or 0) end
+            end
+            if held > 0 then
+                if m then
+                    -- getAllStacks is 0-indexed, transferItem takes 1-based slots.
+                    for i, st in pairs(readSideStacks(sc.tp, busSide)) do
+                        if type(st) == "table" and (st.size or 0) > 0 then
+                            pcall(sc.tp.transferItem, busSide, m.side, st.size, i + 1)
+                        end
+                    end
+                    emptied = emptied + 1
+                    detail("  %s.. bus side %d: returned %d item(s)", tag, busSide, held)
+                else
+                    stuck = stuck + 1
+                    say("  %s.. bus side %d holds %d item(s) and has no paired interface to "
+                        .. "return them through -- empty it by hand, or its module may be "
+                        .. "credited to the wrong bus.", tag, busSide, held)
+                end
+            end
+        end
+
+        local f = fluidPairs[sc.addr]
+        for _, hatchSide in ipairs(sc.hatchSides) do
+            local okL, level = pcall(sc.tp.getTankLevel, hatchSide, 1)
+            level = (okL and tonumber(level)) or 0
+            if level > 0 then
+                if f then
+                    pcall(sc.tp.transferFluid, hatchSide, f.side, level, 0)
+                    drained = drained + 1
+                    detail("  %s.. hatch side %d: drained %d L", tag, hatchSide, level)
+                else
+                    stuck = stuck + 1
+                    say("  %s.. hatch side %d holds %d L and has no paired fluid interface to "
+                        .. "drain into -- empty it by hand, or its module may be credited to "
+                        .. "the wrong hatch.", tag, hatchSide, level)
+                end
+            end
+        end
+    end
+
+    return emptied, drained, stuck
+end
+
 -- Miner state readers.
 local function minerActive(m)  -- currently mining
     local ok, v = pcall(m.proxy.isMachineActive)
@@ -508,22 +575,58 @@ local function waitForNewMiner(minerList, assigned, timeout)
     return nil
 end
 
--- Clean slate before detection: clear any leftover mining-drone stock configs on
--- the interfaces (so a pre-stocked drone can't fool detection), switch every
--- miner off, and wait for in-progress mining to finish (isMachineActive lags
--- after a miner is switched off). Only drone configs are cleared, so unrelated
--- interfaces are left alone. Returns each miner's original on/off state.
-local function prepare(interfaceComps, minerList)
+-- Clears anything a previous run may have left STAGED on an interface. A run that
+-- died partway through leaves a drone or a plasma sitting in a config, and a
+-- staged probe that nobody put there this time is exactly what makes a transposer
+-- pair with an interface it is not touching.
+--
+-- Only what setup itself stages is touched -- drone item configs and plasma fluid
+-- configs. An interface is very likely stocking things for the rest of the base,
+-- and clearing those would be a rude surprise.
+--
+-- Item slots are swept from 0, not 1: stageProbe tries a 0-based index too, since
+-- the fluid side of the same block turned out to count from zero.
+-- Returns how many item and fluid configs were cleared.
+local function clearStaging(interfaceComps)
+    local items, fluids = 0, 0
     for _, c in ipairs(interfaceComps) do
         local ok, p = pcall(component.proxy, c)
-        if ok and p and p.getInterfaceConfiguration ~= nil and p.setInterfaceConfiguration ~= nil then
-            for slot = 1, 9 do
-                local okc, cfg = pcall(p.getInterfaceConfiguration, slot)
-                if okc and type(cfg) == "table" and cfg.name == drones.ITEM_NAME then
-                    pcall(p.setInterfaceConfiguration, slot)
+        if ok and p then
+            if p.getInterfaceConfiguration ~= nil and p.setInterfaceConfiguration ~= nil then
+                for slot = 0, 9 do
+                    local okc, cfg = pcall(p.getInterfaceConfiguration, slot)
+                    if okc and type(cfg) == "table" and cfg.name == drones.ITEM_NAME then
+                        pcall(p.setInterfaceConfiguration, slot)
+                        items = items + 1
+                    end
+                end
+            end
+            if p.getFluidInterfaceConfiguration ~= nil
+                and p.setFluidInterfaceConfiguration ~= nil then
+                for tank = 0, 5 do
+                    local okc, cfg = pcall(p.getFluidInterfaceConfiguration, tank)
+                    if okc and type(cfg) == "table" then
+                        -- supply.plasmaOf unwraps the ae2fc "drop of X" form too.
+                        local label = cfg.label or cfg.name
+                        if label and supply.plasmaOf(label) then
+                            pcall(p.setFluidInterfaceConfiguration, tank)
+                            fluids = fluids + 1
+                        end
+                    end
                 end
             end
         end
+    end
+    return items, fluids
+end
+
+-- Clean slate before detection: clear leftover staging (above), switch every
+-- miner off, and wait for in-progress mining to finish (isMachineActive lags
+-- after a miner is switched off). Returns each miner's original on/off state.
+local function prepare(interfaceComps, minerList)
+    local items, fluids = clearStaging(interfaceComps)
+    if items + fluids > 0 then
+        detail("  cleared %d leftover item config(s) and %d fluid config(s)", items, fluids)
     end
 
     local wasOn = {}
@@ -563,6 +666,8 @@ local M = {
     stagePlasmaDrop = stagePlasmaDrop,
     minerActive = minerActive,
     minerOn = minerOn,
+    clearStaging = clearStaging,
+    purgeFeeds = purgeFeeds,
     prepare = prepare,
     pickDatabase = pickDatabase,
     INTERFACE_NAMES = INTERFACE_NAMES,
@@ -792,6 +897,16 @@ for _, sc in ipairs(scans) do
 end
 say("Paired %d transposer(s) to an interface, %d to a fluid interface",
     pairedItem, pairedFluid)
+
+-- Everything the modules could run on has to be gone before detection, and it has
+-- to happen BEFORE the hatches are primed -- otherwise this would drain what we
+-- just filled.
+step("Emptying buses and hatches...")
+do
+    local emptied, drained, stuck = purgeFeeds(scans, itemPairs, fluidPairs)
+    stepEnd("Emptied %d bus(es), drained %d hatch(es)%s", emptied, drained,
+        stuck > 0 and string.format(", %d left for you", stuck) or "")
+end
 if #feeds == 0 then say("No usable input buses found -- nothing to configure."); return M end
 
 -- Build a transport.Station for a feed. Slot is fixed here (we load buses one at
@@ -866,12 +981,6 @@ if #fluidStations > 0 then
         end
     end
     stepEnd("Primed %d of %d hatch(es) with %s", primed, #fluidStations, probePlasma.name)
-end
-
-step("Emptying input buses...")
-for _, feed in ipairs(feeds) do
-    local st = stationFor(feed)
-    if st then st:returnAll() end
 end
 
 -- Miners are already off (prepare); enable them so the one with a drone runs.

@@ -126,4 +126,49 @@ cfg.budget = {
 -- on. Leave nil to assume computation is never the limit.
 cfg.computation = nil
 
+-- ---- Keeping the local net stocked -----------------------------------------
+-- Consumables reach the local net through an ME Interface on the MAIN net that
+-- carries fake crafting patterns: requesting one pushes that pattern's INPUTS
+-- across. supply.lua reads those patterns to learn what is on offer, so nothing
+-- here has to name items -- only how much of each to keep.
+--
+-- Run `stock patterns` once after wiring the adapter to see what it found.
+
+cfg.supply = {
+    -- Adapter address of the supply interface. nil = autodetect (the one
+    -- me_interface that has patterns; the per-module station interfaces have none).
+    interface = nil,
+
+    -- KITS to keep in the local net, per drone material. One kit is 4 drill tips
+    -- + 4 rods, i.e. one meteor's worth. Materials are the ones in drones.lua:
+    -- Steel, Titanium, Tungstensteel, Naquadah, Naquadah Alloy, Neutronium,
+    -- Cosmic Neutronium, Infinity and Transcendent Metal (that last one only for
+    -- completeness -- target.lua treats it as unobtainable and never picks it).
+    -- Anything not listed here is simply not stocked.
+    target = {
+        -- ["Neutronium"] = 500,
+    },
+
+    -- Litres of plasma to keep in the local net, by fluid name.
+    plasma = {
+        -- ["Radon Plasma"] = 64000,
+    },
+
+    -- Litres one craft of a plasma pattern actually delivers. A pattern carries a
+    -- count of ae2fc "drops", which does not tell us its litre value -- so measure
+    -- it once (`stock plasma "Radon Plasma" 1`, watch the level) and record it
+    -- here. Until then plasma shortfalls are reported but never auto-requested.
+    plasmaPerCraft = {
+        -- ["Radon Plasma"] = 16000,
+    },
+
+    -- Refill only once stock falls below this fraction of target, then fill to
+    -- the top. Stops a slow drain from re-requesting every single cycle.
+    lowWater = 0.9,
+
+    -- Cap on how many crafts a single request may ask for. nil = the whole
+    -- deficit in one job.
+    maxCrafts = nil,
+}
+
 return cfg

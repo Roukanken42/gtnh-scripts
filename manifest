@@ -13,6 +13,8 @@ mining/miners.lua
 mining/plan.lua
 mining/plasmas.lua
 mining/setup.lua
+mining/stock.lua
+mining/supply.lua
 mining/target.lua
 mining/transport.lua
 power/bignum.lua

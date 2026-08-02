@@ -78,12 +78,21 @@ function supply.materialOf(label, materials)
     return nil
 end
 
--- The plasma an item label refers to, matching on prefix so the ae2fc "drop"
--- wrapper around a fluid still resolves. nil if none match.
+-- ae2fc carries a fluid through a pattern as an item labelled "drop of <Fluid>",
+-- and one drop is exactly one litre -- so a plasma input's COUNT is already its
+-- volume, and nothing has to be measured or configured.
+local DROP_PREFIX = "drop of "
+
+-- The plasma an item label refers to, unwrapping the drop form first. A bare
+-- fluid label still resolves, so this works either way. nil if none match.
 function supply.plasmaOf(label)
     if type(label) ~= "string" then return nil end
+    local name = label
+    if name:sub(1, #DROP_PREFIX):lower() == DROP_PREFIX then
+        name = name:sub(#DROP_PREFIX + 1)
+    end
     for _, p in ipairs(plasmas.list) do
-        if label:sub(1, #p.name) == p.name then return p end
+        if name:sub(1, #p.name) == p.name then return p end
     end
     return nil
 end
@@ -160,12 +169,15 @@ function supply.classify(pattern, materials)
         if entry.perCraft < 1 then
             return unknown("delivers less than one whole kit (" .. PER_KIT .. " of each) per craft")
         end
-    elseif plasma then
-        entry.kind, entry.plasma = "plasma", plasma
-        entry.perCraft = entry.inputs[1] and entry.inputs[1].count or 0
     else
-        entry.kind, entry.drone = "drone", drone
-        entry.perCraft = entry.inputs[1] and entry.inputs[1].count or 0
+        -- Both are counted straight off the inputs. For plasma that count is
+        -- litres, one drop apiece; the inputs cannot disagree on which plasma or
+        -- drone by this point, so summing them is safe.
+        local total = 0
+        for _, i in ipairs(entry.inputs) do total = total + i.count end
+        entry.perCraft = total
+        if plasma then entry.kind, entry.plasma = "plasma", plasma
+        else entry.kind, entry.drone = "drone", drone end
     end
     return entry
 end
@@ -179,6 +191,22 @@ function supply.kitsPerCraft(entry)
         n = math.min(n, math.floor((i.count or 0) / PER_KIT))
     end
     return (n == math.huge) and 0 or n
+end
+
+-- Litres of plasma the local net holds for a plasma pattern. Which side of the
+-- network it shows up on depends on whether the local net has an ae2fc Fluid
+-- Discretizer: with one, the drops are absorbed and it reads as fluid; without,
+-- they sit there as drop ITEMS. Both are checked and the LARGER wins -- a
+-- double-count would under-request and starve the modules, whereas the worst this
+-- can do is over-stock. `stock list` shows both so it is obvious which is real.
+function supply.plasmaInStock(entry, stock)
+    stock = stock or {}
+    local asFluid = (stock.fluids and stock.fluids[entry.plasma.name]) or 0
+    local asDrops = 0
+    for _, i in ipairs(entry.inputs) do
+        asDrops = asDrops + ((stock.items and stock.items[i.name]) or 0)
+    end
+    return math.max(asFluid, asDrops), asFluid, asDrops
 end
 
 -- Whole kits the local net currently holds for a kit pattern. `stock` maps item
@@ -241,14 +269,12 @@ function supply.plan(catalog, stock, cfg, satisfied)
                 cfg.target and cfg.target[entry.material],
                 entry.perCraft)
         elseif entry.kind == "plasma" then
-            -- Targets are in litres, but one craft delivers an ae2fc "drop" whose
-            -- litre value is not something the pattern tells us. Until it is
-            -- measured once and written to cfg.supply.plasmaPerCraft, this reports
-            -- the shortfall instead of guessing an amount.
+            -- Target and stock are both litres, and so is perCraft (one drop per
+            -- litre), so this needs no conversion at all.
             consider(entry, entry.plasma.name,
-                (stock.fluids and stock.fluids[entry.plasma.name]) or 0,
+                supply.plasmaInStock(entry, stock),
                 cfg.plasma and cfg.plasma[entry.plasma.name],
-                cfg.plasmaPerCraft and cfg.plasmaPerCraft[entry.plasma.name])
+                entry.perCraft)
         end
     end
 
@@ -380,7 +406,9 @@ function supply.stock(catalog, net)
     if not net then return { items = items, fluids = fluids } end
 
     for _, entry in ipairs(catalog) do
-        if entry.kind == "kit" or entry.kind == "drone" then
+        -- Plasma inputs are looked up too: without a Fluid Discretizer the drops
+        -- stay in the local net as items, and that is the only place they show up.
+        do
             for _, i in ipairs(entry.inputs) do
                 if items[i.name] == nil then
                     items[i.name] = 0

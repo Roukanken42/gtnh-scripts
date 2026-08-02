@@ -149,17 +149,11 @@ cfg.supply = {
         -- ["Neutronium"] = 500,
     },
 
-    -- Litres of plasma to keep in the local net, by fluid name.
+    -- Litres of plasma to keep in the local net, by fluid name. ae2fc carries a
+    -- fluid through a pattern as "drop of <Fluid>" at one drop per litre, so a
+    -- pattern's input count is already its volume -- nothing to measure.
     plasma = {
         -- ["Radon Plasma"] = 64000,
-    },
-
-    -- Litres one craft of a plasma pattern actually delivers. A pattern carries a
-    -- count of ae2fc "drops", which does not tell us its litre value -- so measure
-    -- it once (`stock plasma "Radon Plasma" 1`, watch the level) and record it
-    -- here. Until then plasma shortfalls are reported but never auto-requested.
-    plasmaPerCraft = {
-        -- ["Radon Plasma"] = 16000,
     },
 
     -- Refill only once stock falls below this fraction of target, then fill to

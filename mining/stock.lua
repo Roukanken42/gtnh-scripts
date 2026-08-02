@@ -8,7 +8,7 @@
 --   stock list               the same
 --   stock patterns           RAW pattern dump -- run this first, see below
 --   stock <material> [kits]  push kits of a drone material (default: 1)
---   stock plasma <name> [n]  push n crafts of a plasma pattern
+--   stock plasma <name> [L]  push litres of a plasma pattern
 --   stock auto               request whatever the targets say is missing
 --
 -- `stock patterns` is the one to run first on a fresh setup. Everything else
@@ -112,7 +112,15 @@ local function cmdList()
             have = supply.kitsInStock(entry, stock.items)
         elseif entry.kind == "plasma" then
             what, unit = entry.plasma.name, "L"
-            have = stock.fluids[entry.plasma.name] or 0
+            local asFluid, asDrops
+            have, asFluid, asDrops = supply.plasmaInStock(entry, stock)
+            -- Which of the two is populated says whether the local net has an
+            -- ae2fc Fluid Discretizer absorbing the drops.
+            if asFluid > 0 and asDrops > 0 then
+                what = what .. string.format(" (%dL+%dd)", asFluid, asDrops)
+            elseif asDrops > 0 then
+                what = what .. " (as drops)"
+            end
         else
             what, unit = entry.drone and entry.drone.name or entry.label, ""
             have = supply.kitsInStock(entry, stock.items)
@@ -152,19 +160,19 @@ local function cmdMaterial(name, kits)
     print("No kit pattern for '" .. name .. "'. Try `stock list`.")
 end
 
-local function cmdPlasma(name, crafts)
+local function cmdPlasma(name, litres)
     local catalog = supply.catalog(itf)
     for _, entry in ipairs(catalog) do
         if entry.kind == "plasma" and entry.plasma.name:lower():sub(1, #name) == name:lower() then
+            local crafts = math.max(1, math.ceil((litres or 0) / math.max(1, entry.perCraft)))
             local before = (supply.stock(catalog, net).fluids or {})[entry.plasma.name] or 0
-            print(string.format("Requesting %d craft(s) of %s (have %d L)",
-                crafts, entry.label, before))
+            print(string.format("Requesting %d craft(s) of %s -> %d L (have %d L)",
+                crafts, entry.label, crafts * entry.perCraft, before))
             if request(entry, crafts, entry.plasma.name) then
                 os.sleep(1)
                 local after = (supply.stock(catalog, net).fluids or {})[entry.plasma.name] or 0
-                print(string.format("  %d L -> %d L  (%+d L for %d craft(s))",
-                    before, after, after - before, crafts))
-                print("  Put litres-per-craft in cfg.supply.plasmaPerCraft to enable auto-stocking.")
+                print(string.format("  %d L -> %d L  (%+d L, expected %+d)",
+                    before, after, after - before, crafts * entry.perCraft))
             end
             return
         end
@@ -195,7 +203,7 @@ local function usage(msg)
     print("  stock                    what is on offer, and stock against target")
     print("  stock patterns           raw pattern dump (run this first)")
     print("  stock <material> [kits]  push kits of a drone material")
-    print("  stock plasma <name> [n]  push n crafts of a plasma pattern")
+    print("  stock plasma <name> [L]  push litres of a plasma pattern")
     print("  stock auto               request whatever the targets say is missing")
 end
 

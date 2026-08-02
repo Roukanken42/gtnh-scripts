@@ -259,7 +259,7 @@ end
 -- directly -- and a two-step confirm that is wrong in one direction is not
 -- noticed until it has drained nine hatches.
 --
---   screen   "dashboard" | "detail"
+--   screen   "dashboard" | "detail" | "profile"
 --   module   cursor in the module list; in "detail", which module is open
 --   focus    nil | "plasma"          -- dashboard: is the plasma picker open
 --   cursor   row in the plasma picker
@@ -274,7 +274,7 @@ control.KEY = {
     esc = 1, tab = 15, enter = 28, numEnter = 156,
     up = 200, down = 208, left = 203, right = 205,
 }
-control.CH = { space = 32, l = 108, p = 112, q = 113 }
+control.CH = { space = 32, f = 102, l = 108, p = 112, q = 113, r = 114, s = 115 }
 
 -- The parameters a module can be driven with, in the order they are listed.
 -- `list` fields cycle through a fixed set (the caller maps index -> thing);
@@ -356,6 +356,20 @@ function control.key(st, ctx, char, code)
         return nil, false
     end
 
+    -- ---- the profile screen ----
+    -- Read-only, so it needs no guarding: ESC leaves, S writes a file, R starts
+    -- the measurement again.
+    if st.screen == "profile" then
+        if code == KEY.esc or char == CH.q or char == CH.f then
+            st.screen = "dashboard"
+            return nil, true
+        end
+        if char == CH.s then return "save-profile", true end
+        if char == CH.r then return "reset-profile", true end
+        if char == CH.l then return "log", true end
+        return nil, false
+    end
+
     -- ---- detail: choosing a parameter ----
     if st.screen == "detail" then
         local n = #control.FIELDS
@@ -416,6 +430,7 @@ function control.key(st, ctx, char, code)
     end
 
     if char == CH.p then st.focus = "plasma"; return nil, true end
+    if char == CH.f then st.screen = "profile"; return nil, true end
     if char == CH.space then return "pause", true end
     if char == CH.l then return "log", true end
     if char == CH.q then return "quit", true end

@@ -23,7 +23,8 @@
 --   confirm     string               -- plasma name awaiting confirmation
 --   switching   string               -- plasma name being applied right now
 --   cycle / tick / updated
---   screen      "dashboard" | "detail"
+--   screen      "dashboard" | "detail" | "profile"
+--   profile     { cycles, elapsed, callCount, callTotal, spans, calls, note }
 --   moduleCursor integer            -- selected row in state.miners
 --   detail      { miner, view, field, fields, pool, yield, summary, rates,
 --                 edit, editHint, error }   -- see drawParams / drawPool
@@ -290,6 +291,9 @@ local UPDOWN = "\xE2\x86\x91\xE2\x86\x93"
 local LEFTRIGHT = "\xE2\x86\x90\xE2\x86\x92"
 
 local function hintFor(state)
+    if state.screen == "profile" then
+        return "[S] save  [R] reset  [L] log  [ESC] back"
+    end
     if state.screen == "detail" then
         local d = state.detail or {}
         if d.edit then
@@ -307,7 +311,8 @@ local function hintFor(state)
     elseif state.focus == "plasma" then
         return "[" .. UPDOWN .. "] choose   [ENTER] select   [ESC] cancel"
     end
-    return "[" .. UPDOWN .. "] module  [ENTER] details  [P] plasma  [SPACE] pause  [L] log  [Q] quit"
+    return "[" .. UPDOWN .. "] module  [ENTER] details  [P] plasma  [F] profile"
+        .. "  [SPACE] pause  [L] log  [Q] quit"
 end
 
 local function drawTitle(state)
@@ -718,6 +723,84 @@ local function drawYield(state, x, y, w, h)
     end
 end
 
+-- ---- the profile screen ------------------------------------------------------
+--
+-- Deliberately a screen rather than log lines: the log shows six at a time and
+-- scrolls, and this is a table you want to sit and read while the cycles tick
+-- over. `S` writes the same numbers to a file.
+
+local function drawProfileTable(x, y, w, h, title, list, headers, isCalls)
+    panel(x, y, w, h, title)
+    local ix, inner = x + 2, w - 4
+    local hy = y + 1
+    local C1, C2, C3, C4, C5 = 0, 36, 46, 58, 70
+
+    cell(ix, hy, C1, 34, headers[1], C.faint, inner)
+    cell(ix, hy, C2, 9, padL(headers[2], 8), C.faint, inner)
+    cell(ix, hy, C3, 11, padL(headers[3], 10), C.faint, inner)
+    cell(ix, hy, C4, 11, padL(headers[4], 10), C.faint, inner)
+    cell(ix, hy, C5, 11, padL(headers[5], 10), C.faint, inner)
+
+    if #list == 0 then
+        cell(ix, y + 3, 0, inner, "Nothing measured yet -- wait for a cycle.",
+            C.faint, inner)
+        return
+    end
+
+    -- Shade by share of the worst row, so the offender is visible without
+    -- reading a single number.
+    local worst = list[1].total
+    for i, r in ipairs(list) do
+        local row = y + 1 + i
+        if row > y + h - 2 then
+            cell(ix, y + h - 2, 0, inner,
+                string.format("... and %d more", #list - i + 1), C.faint, inner)
+            break
+        end
+        local share = worst > 0 and (r.total / worst) or 0
+        local col = fillColor(1 - share)   -- the biggest total is the reddest
+
+        cell(ix, row, C1, 34, r.name, C.text, inner)
+        cell(ix, row, C2, 9, padL(isCalls and string.format("%.0f", r.perCycle)
+            or tostring(r.n), 8), C.dim, inner)
+        cell(ix, row, C3, 11, padL(string.format("%.3fs", r.timePerCycle), 10), col, inner)
+        cell(ix, row, C4, 11, padL(string.format("%.2fs", r.total), 10), C.dim, inner)
+        cell(ix, row, C5, 11, padL(isCalls and string.format("%.3fs", r.avg)
+            or (r.calls and tostring(r.calls) or "-"), 10), C.dim, inner)
+    end
+end
+
+local function drawProfile(state, x, y, w, h)
+    local p = state.profile or {}
+    local headH = 5
+    panel(x, y, w, headH, "PROFILE  " .. MIDDOT .. "  [S] save to a file  [R] reset  [ESC] back")
+    local ix, inner = x + 2, w - 4
+
+    cell(ix, y + 1, 0, inner, string.format(
+        "%d cycle(s) over %.0fs   %d component call(s), %.2fs measured",
+        p.cycles or 0, p.elapsed or 0, p.callCount or 0, p.callTotal or 0),
+        C.text, inner)
+
+    -- The line that usually answers the question. An OC component call that is
+    -- not direct returns on the NEXT TICK, so it costs 50ms whatever it does --
+    -- meaning a cycle's duration is mostly a function of how many calls it makes,
+    -- not how heavy they are.
+    local perCycle = (p.cycles or 0) > 0 and (p.callCount / p.cycles) or 0
+    cell(ix, y + 2, 0, inner, string.format(
+        "%.0f call(s) per cycle   %.2fs if every one were indirect (50ms each)",
+        perCycle, perCycle * 0.05),
+        perCycle * 0.05 > 1 and C.crit or C.dim, inner)
+
+    cell(ix, y + 3, 0, inner, p.note or "", C.warn, inner)
+
+    local half = math.floor((h - headH - 2) / 2)
+    drawProfileTable(x, y + headH + 1, w, half, "PHASES", p.spans or {},
+        { "PHASE", "N", "PER CYCLE", "TOTAL", "CALLS" }, false)
+    drawProfileTable(x, y + headH + 1 + half + 1, w, h - headH - half - 2,
+        "COMPONENT CALLS", p.calls or {},
+        { "CALL", "N/CYCLE", "PER CYCLE", "TOTAL", "AVG" }, true)
+end
+
 local function drawLog(state, x, y, w, h)
     panel(x, y, w, h, "LOG")
     local msgs = state.messages or {}
@@ -742,6 +825,13 @@ function ui.render(state)
     local logH = state.showLog and 8 or 0
     local logY = H - logH + 1
     local contentH = state.showLog and (logY - contentY - 1) or (H - contentY + 1)
+
+    if state.screen == "profile" then
+        drawProfile(state, 2, contentY, W - 2, contentH)
+        if state.showLog then drawLog(state, 2, logY, W - 2, logH) end
+        if buffer then gpu.bitblt(0, 1, 1, W, H, buffer, 1, 1) end
+        return
+    end
 
     -- One module, close up. The parameter block is fixed; whichever table is
     -- selected takes the rest.

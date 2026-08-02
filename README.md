@@ -52,6 +52,8 @@ mining/
     control.lua          What the controller decides: what to stock, what to
                          request, and the plasma picker's keyboard.
     ui.lua               The dashboard. Renders a state table, decides nothing.
+    profile.lua          Where each cycle's time goes, and how many component
+                         calls it took to get there.
     cli.lua              Argument parsing, --help, and progress output.
     stations.lua         Where the generated station map lives.
   data/                  Generated on the machine by `setup`. Not in the repo.

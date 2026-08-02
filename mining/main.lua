@@ -23,6 +23,7 @@ local dbslots = require("lib.hw.db")
 local drones = require("lib.gtnh.drones")
 local plasmas = require("lib.gtnh.plasmas")
 local estimate = require("lib.calc.estimate")
+local profile = require("lib.profile")
 local ui = require("lib.ui")
 local cli = require("lib.cli")
 local cfg = require("config")
@@ -36,10 +37,12 @@ local ctx = cli.start({
         { "main",          "run the controller until stopped" },
         { "main --no-ui",  "run headless, logging to the console" },
         { "main --once",   "run a single maintenance cycle and exit" },
+        { "main --profile","write a timing report to a file on exit" },
     },
     flags = {
         { "--no-ui", "no dashboard; print each cycle instead" },
         { "--once",  "one cycle, then exit (for checking a fresh setup)" },
+        { "--profile", "write mining-profile.txt on exit" },
     },
     notes = {
         "MANUAL mode. You set each module's drone, distance and overdrive yourself; "
@@ -70,6 +73,12 @@ local ctx = cli.start({
             .. "its inputs are pushed. The emptiest material goes first.",
         "SPACE pauses maintenance (the modules keep running); L shows the log; "
             .. "Q quits.",
+        "F opens the profile: where each cycle's time went, and how many component "
+            .. "calls it made. That second number is usually the answer -- an "
+            .. "OpenComputers call that is not direct returns on the NEXT TICK, so it "
+            .. "costs 50ms however trivial it is, and a cycle making a hundred of "
+            .. "them takes five seconds no matter how fast the blocks are. S writes "
+            .. "the report to a file, since the log only shows a few lines.",
     },
 }, ...)
 if not ctx then return end
@@ -109,11 +118,27 @@ table.sort(fleet, function(a, b)
     return a.address < b.address
 end)
 
+-- Everything the controller talks to goes through a timing wrapper. It is put on
+-- here, at the one place that owns the proxies, so nothing downstream knows or
+-- cares -- and the profile screen can then say which component is costing the
+-- cycle without a single call site being instrumented by hand.
+local function watch(p, kind) return profile.proxy(p, kind) end
+
 for _, m in ipairs(fleet) do
+    m.proxy = watch(m.proxy, "miner")
     local spec = cfg.stations and cfg.stations[m.address]
     if spec then
         local ok, err = miners.attachStation(m, spec, shared)
-        if not ok then log("station " .. m.address:sub(1, 8) .. ": " .. tostring(err)) end
+        if not ok then
+            log("station " .. m.address:sub(1, 8) .. ": " .. tostring(err))
+        else
+            local st = m.station
+            st.transposer = watch(st.transposer, "transposer")
+            st.interface = watch(st.interface, "interface")
+            st.fluidTransposer = watch(st.fluidTransposer, "fluidTransposer")
+            st.fluidInterface = watch(st.fluidInterface, "fluidInterface")
+            if st.db then st.db.proxy = watch(st.db.proxy, "database") end
+        end
     end
 end
 
@@ -137,7 +162,7 @@ local function openSupply()
         supplyErr = tostring(how)
         return
     end
-    itf = found
+    itf = watch(found, "supply")
 
     local usable, unknown = supply.catalog(itf, dbHandle)
     catalog = usable
@@ -147,10 +172,14 @@ local function openSupply()
 end
 
 openSupply()
-net = localnet.proxy()
+net = watch(localnet.proxy(), "localnet")
 if not net then log("No local ME controller found -- stock levels are unreadable.") end
 
 -- ---- state -------------------------------------------------------------------
+
+-- Names the span that wraps a whole cycle, so the profile can tell "all of it"
+-- from "the phase to go and fix".
+profile.root = "whole cycle"
 
 local jobs = control.newJobs(jobLimits)
 local satisfied = {}            -- hysteresis latch, carried across cycles
@@ -272,12 +301,20 @@ local cycle = 0
 
 local function runCycle()
     cycle = cycle + 1
+    profile.cycles = profile.cycles + 1
+    local endCycle = profile.span("whole cycle")
+
+    local doneRead = profile.span("readFleet")
     local rows = readFleet()
+    doneRead()
     local stations = stationsOf(rows)
 
     -- Jobs first: a finished craft has already landed in the local net, so the
     -- stock read below sees it and the plan does not ask for it again.
-    for _, j in ipairs(jobs:poll()) do
+    local donePoll = profile.span("poll restock jobs")
+    local finishedJobs = jobs:poll()
+    donePoll()
+    for _, j in ipairs(finishedJobs) do
         if j.state == "done" then
             log(string.format("stocked %s (x%d)", j.key, j.crafts))
         else
@@ -288,6 +325,7 @@ local function runCycle()
     -- A plasma chosen in the UI is applied here, in the control thread, because
     -- draining hatches is slow and the key handler must stay responsive.
     if pendingPlasma then
+        local doneSwitch = profile.span("switch plasma")
         local p = pendingPlasma
         pendingPlasma = nil
         local slot, err = slotFor(p)
@@ -305,10 +343,12 @@ local function runCycle()
             activePlasma = p
             rows = readFleet()
         end
+        doneSwitch()
     else
         activePlasma = detectPlasma(rows) or activePlasma
     end
 
+    local doneHatch = profile.span("hatches")
     if not paused and activePlasma then
         -- Assert the staging config for any station that has none: a hatch can
         -- only be filled from a tank that is pointed at the right fluid, and a
@@ -329,6 +369,7 @@ local function runCycle()
             log(string.format("topped up %d hatch(es), +%d L", touched, moved))
         end
     end
+    doneHatch()
 
     -- What to stock, and what to ask for.
     local demandFleet = {}
@@ -339,10 +380,13 @@ local function runCycle()
         control.demand(demandFleet, scfg, ccfg, activePlasma)
 
     if net and #catalog > 0 then
+        local doneStock = profile.span("read local net stock")
         stock = supply.stock(catalog, net)
+        doneStock()
     end
 
     local work, notes = {}, {}
+    local donePlan = profile.span("plan and request")
     if itf and #catalog > 0 then
         local planCfg = {
             target = kitTargets, plasma = plasmaTargets,
@@ -360,9 +404,11 @@ local function runCycle()
             end
         end
     end
+    donePlan()
     for _, n in ipairs(notes) do log(n) end
 
     -- ---- assemble the view ----
+    local doneView = profile.span("assemble the view")
     local crafting = {}
     for _, j in ipairs(jobs:list()) do crafting[j.key] = (crafting[j.key] or 0) + j.crafts end
 
@@ -419,6 +465,8 @@ local function runCycle()
             limitKit = jobLimits.kit, limitPlasma = jobLimits.plasma,
         },
     }
+    doneView()
+    endCycle()
 end
 
 -- ---- the detail screen -------------------------------------------------------
@@ -602,6 +650,7 @@ local function render()
     ui.render({
         mode = "MANUAL", dryRun = cfg.dryRun, paused = paused, showLog = showLog,
         screen = nav.screen, moduleCursor = nav.module,
+        profile = (nav.screen == "profile") and profile.snapshot() or nil,
         detail = (nav.screen == "detail") and buildDetail(view.miners) or nil,
         focus = nav.focus, cursor = nav.cursor,
         confirm = nav.confirm and view.plasmas[nav.confirm]
@@ -638,6 +687,10 @@ end
 -- part that needs the fleet -- starting a switch, pausing, quitting.
 
 local quit = false
+
+-- Written next to the program, because the log panel shows six lines and this is
+-- a table worth reading whole.
+local PROFILE_FILE = "mining-profile.txt"
 
 -- Switches ONE module's plasma, as opposed to the fleet-wide picker: the hatch
 -- has to be emptied of the old fluid before it will take the new one, exactly as
@@ -718,6 +771,13 @@ local function handleKey(char, code)
             pendingPlasma = pick.plasma
             log("switching the fleet to " .. pick.name .. " ...")
         end
+    elseif action == "save-profile" then
+        local path, err = profile.save(PROFILE_FILE, "mining controller profile")
+        log(path and ("profile written to " .. path)
+            or ("could not write the profile: " .. tostring(err)))
+    elseif action == "reset-profile" then
+        profile.reset()
+        log("profile reset")
     elseif action == "pause" then
         paused = not paused
         log(paused and "PAUSED -- maintenance frozen; the modules keep running."
@@ -786,6 +846,15 @@ end
 
 local ok, err = pcall(loop)
 ui.shutdown()
+
+if ctx.flags.profile then
+    local path, perr = profile.save(PROFILE_FILE, "mining controller profile")
+    if path then
+        print("Profile written to " .. path .. ".")
+    else
+        print("Could not write the profile: " .. tostring(perr))
+    end
+end
 
 -- Nothing is put back on the way out. The modules are the player's -- they were
 -- running before this started and they keep running after, with whatever is in

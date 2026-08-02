@@ -18,6 +18,7 @@ mining/lib/hw/localnet.lua
 mining/lib/hw/miners.lua
 mining/lib/hw/supply.lua
 mining/lib/hw/transport.lua
+mining/lib/profile.lua
 mining/lib/stations.lua
 mining/lib/ui.lua
 mining/main.lua

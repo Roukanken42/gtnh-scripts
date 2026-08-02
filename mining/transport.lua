@@ -145,33 +145,43 @@ transport.Station = Station
 function transport.new(spec)
     local self = setmetatable({}, Station)
 
-    local tp, e1 = resolve(spec.transposer)
-    if not tp then return nil, "transposer: " .. e1 end
-    local itf, e2 = resolve(spec.interface)
-    if not itf then return nil, "interface: " .. e2 end
     local db, e3 = resolve(spec.database)
-    if not db then return nil, "database: " .. e3 end
-
-    if type(spec.interfaceSide) ~= "number" or type(spec.inputBusSide) ~= "number" then
-        return nil, "interfaceSide and inputBusSide must be side numbers"
-    end
-
-    self.transposer = tp
-    self.interface = itf
+    if not db then return nil, "database: " .. tostring(e3) end
     self.database = db
     self.dbAddress = db.address
-    self.interfaceSide = spec.interfaceSide
-    self.inputBusSide = spec.inputBusSide
-    self.interfaceSlot = spec.interfaceSlot or 1
+
+    -- Either half may be absent, but not both. A module in normal service has
+    -- both; setup.lua builds fluid-only handles while it is still working out
+    -- which hatch belongs to which miner.
+    local wantItem = spec.transposer ~= nil or spec.interface ~= nil
+    local wantFluid = spec.fluidTransposer ~= nil or spec.fluidInterface ~= nil
+    if not wantItem and not wantFluid then
+        return nil, "a station needs an item half, a fluid half, or both"
+    end
+
+    if wantItem then
+        local tp, e1 = resolve(spec.transposer)
+        if not tp then return nil, "transposer: " .. tostring(e1) end
+        local itf, e2 = resolve(spec.interface)
+        if not itf then return nil, "interface: " .. tostring(e2) end
+        if type(spec.interfaceSide) ~= "number" or type(spec.inputBusSide) ~= "number" then
+            return nil, "interfaceSide and inputBusSide must be side numbers"
+        end
+        self.transposer = tp
+        self.interface = itf
+        self.interfaceSide = spec.interfaceSide
+        self.inputBusSide = spec.inputBusSide
+        self.interfaceSlot = spec.interfaceSlot or 1
+    end
     self.stockTimeout = spec.stockTimeout or 10
     self.pollInterval = spec.pollInterval or 0.25
     self.dryRun = spec.dryRun or false
     self.label = spec.label or "station"
     self.log = spec.log or function() end
 
-    -- Fluid half. Optional as a whole, but all-or-nothing once any of it is given
-    -- -- a half-configured plasma feed would fail later and further from the cause.
-    if spec.fluidTransposer or spec.fluidInterface then
+    -- Fluid half. All-or-nothing once any of it is given -- a half-configured
+    -- plasma feed would fail later and further from the cause.
+    if wantFluid then
         local ftp, e4 = resolve(spec.fluidTransposer)
         if not ftp then return nil, "fluidTransposer: " .. tostring(e4) end
         local fitf, e5 = resolve(spec.fluidInterface)
@@ -193,9 +203,15 @@ function transport.new(spec)
     return self
 end
 
+-- True if this station has an item half (drones and kits).
+function Station:hasItems()
+    return self.transposer ~= nil
+end
+
 -- Ensures `label`'s metadata is in the database and returns its slot, storing it
 -- (once per run per database) if needed. nil + err if the item is not in ME.
 function Station:ensureDbSlot(filter, label)
+    if not self:hasItems() then return nil, "no item half configured" end
     local cache = cacheFor(self.dbAddress)
     if cache.byLabel[label] then return cache.byLabel[label] end
 
@@ -217,7 +233,7 @@ end
 
 -- Clears the interface's staging config (also returns any stocked item to ME).
 function Station:clearConfig()
-    if self.dryRun then return end
+    if not self:hasItems() or self.dryRun then return end
     pcall(self.interface.setInterfaceConfiguration, self.interfaceSlot)
 end
 
@@ -226,6 +242,7 @@ end
 -- takes 1-based slot numbers, so the slot is the array index + 1.
 function Station:busStacks()
     local out = {}
+    if not self:hasItems() then return out end
     for i, s in pairs(readStacks(self.transposer, self.inputBusSide)) do
         if type(s) == "table" and (s.size or 0) > 0 and (s.name or s.label) then
             out[#out + 1] = { slot = i + 1, label = s.label, name = s.name, size = s.size }
@@ -384,6 +401,11 @@ function Station:beginDrone(drone, count)
     count = count or 1
     local target = drone.name
     local job = { station = self, drone = drone, label = target, count = count }
+
+    if not self:hasItems() then
+        job.phase, job.ok, job.err = "error", false, "no item half configured"
+        return job
+    end
 
     if self.dryRun then
         self.log(string.format("[dry] %s: would load %d x %s", self.label, count, target))

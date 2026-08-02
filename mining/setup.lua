@@ -14,11 +14,19 @@
 --      transposer with its interface and tells us which side faces it. The
 --      network has interfaces on OTHER nets too, so this is time-boxed, and we
 --      use "did a drone leave the local net?" to skip non-local interfaces fast.
---   3. For every input bus a transposer reaches, we find its miner: empty the
---      buses, drop a drone in one, turn the miners on, and see which one starts
---      mining (isMachineActive => it has a drone). isMachineActive lags after a
---      miner is switched off, so already-found miners are ignored.
---   4. Each (miner -> transposer + interface + sides) becomes a station.
+--   3. A module only mines with a drone, KITS and PLASMA all present, so both
+--      detection phases below need the other two inputs already satisfied:
+--        * kits arrive from the local net by themselves (they are chosen by the
+--          drone), so setup only makes sure the probe drone's kits are in stock;
+--        * plasma is placed by us, through the fluid half of a station.
+--   4. PHASE A -- buses. Give every fluid hatch a little plasma, then drop a drone
+--      into one bus at a time and see which miner starts mining. That pairs each
+--      input bus with its miner.
+--   5. PHASE B -- hatches. The reverse: put a drone in EVERY bus, empty every
+--      hatch, then fill one hatch at a time and see which miner starts. That pairs
+--      each input hatch with its miner. The miners are stopped and allowed to
+--      settle in between, because isMachineActive lags.
+--   6. Each (miner -> item transposer + fluid transposer + sides) becomes a station.
 --
 -- Run from this folder:  setup
 -- require("setup") returns the helper functions (for debugging) without running.
@@ -32,6 +40,8 @@ local miners = require("miners")
 local drones = require("drones")
 local localnet = require("localnet")
 local transport = require("transport")
+local supply = require("supply")
+local plasmas = require("plasmas")
 
 local INPUT_BUS_NAME = "gt.blockmachines"
 local INTERFACE_NAMES = {
@@ -59,6 +69,21 @@ local SETTLE_TIMEOUT = 60
 -- surface to the transposer, so use 2.
 local PROBE_CFG_SLOT = 2
 local PROBE_DB_SLOT = 1
+
+-- Fluid probing. The interface tank we stage plasma through during detection
+-- (0-BASED, like every fluid-interface index -- see transport.lua), and the db
+-- slot its ae2fc drop goes in.
+local PROBE_FLUID_TANK = 0
+local PROBE_DROP_SLOT = 2
+-- Plasma put in a hatch to make a module runnable. One operation costs
+-- (consumed x parallels), at worst 825 x 8 for Helium, so this covers a few.
+local PROBE_PLASMA_L = 8000
+-- Kits to have in the local net before detecting. Detection runs a module flat
+-- out for up to MINER_TIMEOUT, and the probe is the LOWEST-tier drone, so these
+-- are the cheapest kits there are.
+local PROBE_KITS = 256
+-- How long to wait for a staged fluid to show up.
+local FLUID_TIMEOUT = 20
 
 -- ---- helpers -------------------------------------------------------------
 
@@ -89,20 +114,47 @@ local function sideHasLabel(tp, side, label)
     return false
 end
 
--- Classify a transposer's six sides: returns the interface-candidate sides and
--- the input-bus sides.
+-- How many tanks with REAL CAPACITY a side has. This is what tells an input HATCH
+-- from an input BUS: both report the same "gt.blockmachines" inventory name, and
+-- only the hatch has a tank. Capacity rather than level -- an empty hatch reads
+-- level 0 exactly like a bus does.
+local function tankCount(tp, side)
+    local ok, n = pcall(tp.getTankCount, side)
+    n = (ok and tonumber(n)) or 0
+    local real = 0
+    for t = 1, n do
+        local okc, cap = pcall(tp.getTankCapacity, side, t)
+        if okc and (tonumber(cap) or 0) > 0 then real = real + 1 end
+    end
+    return real
+end
+
+-- Classify a transposer's six sides:
+--   ifSides       ME interface (item staging)
+--   busSides      GT input bus
+--   hatchSides    GT input hatch (a bus with a tank)
+--   fluidIfSides  ME interface exposing tanks (fluid staging)
+-- One transposer cannot serve both items and fluids, so in practice a transposer
+-- comes back with either buses or hatches, not both.
 local function scanSides(tp)
-    local ifSides, busSides = {}, {}
+    local ifSides, busSides, hatchSides, fluidIfSides = {}, {}, {}, {}
     for side = 0, 5 do
         local ok, name = pcall(tp.getInventoryName, side)
         name = ok and name or nil
+        local tanks = tankCount(tp, side)
         if name == INPUT_BUS_NAME then
-            busSides[#busSides + 1] = side
+            if tanks > 0 then hatchSides[#hatchSides + 1] = side
+            else busSides[#busSides + 1] = side end
         elseif name and INTERFACE_NAMES[name] then
             ifSides[#ifSides + 1] = side
+            if tanks > 0 then fluidIfSides[#fluidIfSides + 1] = side end
+        elseif tanks > 0 then
+            -- Has a tank but no name we know: treat it as a hatch rather than
+            -- discarding it, and let detection decide.
+            hatchSides[#hatchSides + 1] = side
         end
     end
-    return ifSides, busSides
+    return ifSides, busSides, hatchSides, fluidIfSides
 end
 
 -- Stores the probe drone's metadata into the database via the local net (for use
@@ -154,6 +206,104 @@ local function detectInterface(tp, ifSides, interfaceComps, dbAddr, dbSlot, prob
     return nil, nil
 end
 
+-- ---- fluid-side probing ----------------------------------------------------
+
+-- Makes sure the probe drone's KITS are in the local net. A module eats 4 drill
+-- tips + 4 rods of the drone's material per meteor and will not run -- so cannot
+-- be detected -- without them. They reach the modules from the local net on their
+-- own, so setup only has to see that they are in stock. The exact item labels come
+-- from the supply interface's kit pattern rather than being guessed at.
+-- Returns true, or false + reason (which is a warning, not a hard stop: the kits
+-- may have been put there by hand).
+local function ensureKits(net, material, itf)
+    if not itf then return false, "no supply interface found to request kits from" end
+
+    local entry
+    for _, e in ipairs(supply.catalog(itf)) do
+        if e.kind == "kit" and e.material == material then entry = e; break end
+    end
+    if not entry then
+        return false, "the supply interface has no kit pattern for " .. material
+    end
+
+    local stock = supply.stock({ entry }, net)
+    local have = supply.kitsInStock(entry, stock.items)
+    if have >= PROBE_KITS then
+        return true, string.format("%d %s kit(s) in stock", have, material)
+    end
+
+    local crafts = math.ceil((PROBE_KITS - have) / math.max(1, entry.perCraft))
+    print(string.format("  stocking %s kits: %d of %d, requesting %d craft(s)...",
+        material, have, PROBE_KITS, crafts))
+    local job, err = supply.request(itf, entry, crafts)
+    if not job then return false, tostring(err) end
+
+    local deadline = computer.uptime() + 30
+    while computer.uptime() < deadline do
+        local state = supply.jobState(job)
+        if state ~= "computing" then break end
+        os.sleep(POLL_INTERVAL)
+    end
+    stock = supply.stock({ entry }, net)
+    have = supply.kitsInStock(entry, stock.items)
+    if have <= 0 then return false, "no " .. material .. " kits arrived" end
+    return true, string.format("%d %s kit(s) in stock", have, material)
+end
+
+-- Puts a plasma's ae2fc drop in the database, which is the only way to name a
+-- fluid to setFluidInterfaceConfiguration -- the local net holds plasma as fluid,
+-- never as drops, so it is lifted out of the supply interface's own pattern.
+-- Returns plasma, dbSlot, or nil + error.
+local function stagePlasmaDrop(itf, dbAddr)
+    if not itf then return nil, "no supply interface found to take a plasma drop from" end
+    local database = component.proxy(dbAddr)
+
+    -- Any plasma will do for detection; take the cheapest per litre to probe with.
+    local best
+    for _, e in ipairs(supply.catalog(itf)) do
+        if e.kind == "plasma" and (not best or e.plasma.tier < best.plasma.tier) then best = e end
+    end
+    if not best then return nil, "the supply interface has no plasma pattern" end
+
+    local ok, err = supply.storePlasmaDrop(itf, best, database, PROBE_DROP_SLOT)
+    if not ok then return nil, tostring(err) end
+    return best.plasma, PROBE_DROP_SLOT
+end
+
+-- Finds which me_interface a FLUID transposer stages through, and on which side:
+-- configure the probe plasma into each interface's tank in turn and watch whether
+-- the transposer can see it. The fluid mirror of detectInterface.
+-- Returns interfaceAddr, side.
+local function detectFluidInterface(tp, fluidIfSides, interfaceComps, dbAddr, dropSlot, plasmaName)
+    for _, c in ipairs(interfaceComps) do
+        local ok, p = pcall(component.proxy, c)
+        if ok and p and p.setFluidInterfaceConfiguration ~= nil then
+            pcall(p.setFluidInterfaceConfiguration, PROBE_FLUID_TANK, dbAddr, dropSlot)
+
+            local foundSide = nil
+            local deadline = computer.uptime() + DETECT_PER_CANDIDATE
+            while computer.uptime() < deadline do
+                for _, side in ipairs(fluidIfSides) do
+                    -- the reads are 1-based, the config is 0-based (transport.lua)
+                    local okf, f = pcall(tp.getFluidInTank, side, PROBE_FLUID_TANK + 1)
+                    if okf and type(f) == "table" then
+                        if f.label == nil and type(f[1]) == "table" then f = f[1] end
+                        if f.label == plasmaName and (f.amount or 0) > 0 then
+                            foundSide = side; break
+                        end
+                    end
+                end
+                if foundSide then break end
+                os.sleep(POLL_INTERVAL)
+            end
+
+            pcall(p.setFluidInterfaceConfiguration, PROBE_FLUID_TANK)   -- clear
+            if foundSide then return c, foundSide end
+        end
+    end
+    return nil, nil
+end
+
 -- Miner state readers.
 local function minerActive(m)  -- currently mining
     local ok, v = pcall(m.proxy.isMachineActive)
@@ -162,6 +312,36 @@ end
 local function minerOn(m)      -- allowed to work (soft on/off)
     local ok, v = pcall(m.proxy.isWorkAllowed)
     return ok and v == true
+end
+
+-- Waits for every miner to stop mining. isMachineActive lags after a miner is
+-- switched off, so without this a module still finishing an operation would be
+-- mistaken for the one we just fed. Returns true if they all settled.
+local function waitIdle(minerList)
+    local deadline = computer.uptime() + SETTLE_TIMEOUT
+    while computer.uptime() < deadline do
+        local anyActive = false
+        for _, m in ipairs(minerList) do
+            if minerActive(m) then anyActive = true; break end
+        end
+        if not anyActive then return true end
+        os.sleep(POLL_INTERVAL)
+    end
+    return false
+end
+
+-- Waits for a miner that has NOT already been identified to start mining -- the
+-- one we just gave its missing input to. Already-found miners are ignored
+-- because isMachineActive lags behind them being switched off.
+local function waitForNewMiner(minerList, assigned, timeout)
+    local deadline = computer.uptime() + (timeout or MINER_TIMEOUT)
+    while computer.uptime() < deadline do
+        for _, m in ipairs(minerList) do
+            if not assigned[m.address] and minerActive(m) then return m end
+        end
+        os.sleep(POLL_INTERVAL)
+    end
+    return nil
 end
 
 -- Clean slate before detection: clear any leftover mining-drone stock configs on
@@ -188,16 +368,7 @@ local function prepare(interfaceComps, minerList)
         m:setEnabled(false)
     end
 
-    local settled, deadline = false, computer.uptime() + SETTLE_TIMEOUT
-    while computer.uptime() < deadline do
-        local anyActive = false
-        for _, m in ipairs(minerList) do
-            if minerActive(m) then anyActive = true; break end
-        end
-        if not anyActive then settled = true; break end
-        os.sleep(POLL_INTERVAL)
-    end
-    if not settled then
+    if not waitIdle(minerList) then
         print("  WARNING: some miners are still finishing; detection may be off -- re-run if needed.")
     end
     return wasOn
@@ -218,6 +389,10 @@ local M = {
     scanSides = scanSides,
     storeProbe = storeProbe,
     detectInterface = detectInterface,
+    tankCount = tankCount,
+    ensureKits = ensureKits,
+    stagePlasmaDrop = stagePlasmaDrop,
+    detectFluidInterface = detectFluidInterface,
     minerActive = minerActive,
     minerOn = minerOn,
     prepare = prepare,
@@ -260,6 +435,30 @@ end
 local dbSlot, derr = storeProbe(net, dbAddr, probe)
 if not dbSlot then print("ERROR: " .. tostring(derr)); return M end
 
+-- 2b. Kits and plasma. A module needs a drone, kits AND plasma to mine, so both
+-- detection phases depend on the other two being available first.
+local supplyItf, supplyErr = supply.find(nil)
+if not supplyItf then print("WARNING: " .. tostring(supplyErr)) end
+local probeMaterial = (probeDrone.material) or (drones.get(probe.tier or 0) or {}).material
+if probeMaterial then
+    local okKits, kitMsg = ensureKits(net, probeMaterial, supplyItf)
+    print((okKits and "Kits OK: " or "WARNING: kits -- ") .. tostring(kitMsg))
+    if not okKits then
+        print("       detection needs them; continuing in case they are stocked by hand.")
+    end
+else
+    print("WARNING: unknown material for the probe drone; cannot check kits.")
+end
+
+local probePlasma, dropSlot = stagePlasmaDrop(supplyItf, dbAddr)
+if not probePlasma then
+    print("WARNING: no plasma to probe with (" .. tostring(dropSlot) .. ").")
+    print("         Input hatches cannot be matched to miners without it; buses still can.")
+    dropSlot = nil
+else
+    print(string.format("Probing plasma: %s (%d L per hatch).", probePlasma.name, PROBE_PLASMA_L))
+end
+
 local transposers = listByType("transposer")
 local interfaceComps = listByType("me_interface")
 local minerList = miners.discover()
@@ -270,29 +469,56 @@ print(string.format("Found %d transposer(s), %d interface(s), %d miner(s).",
 print("Preparing (clearing drone configs, stopping miners, waiting for idle)...")
 local wasOn = prepare(interfaceComps, minerList)
 
--- 3. Pair each transposer with its interface; collect its input buses.
-local feeds = {}   -- { transposer, interface, interfaceSide, inputBusSide }
+-- 3. Pair each transposer with its interface, and collect what it reaches.
+-- A transposer serves items OR fluids, never both, so it yields either input
+-- buses or input hatches.
+local feeds = {}        -- item: { transposer, interface, interfaceSide, inputBusSide }
+local fluidFeeds = {}   -- fluid: { transposer, interface, interfaceSide, inputHatchSide }
 for _, tpAddr in ipairs(transposers) do
     local tp = component.proxy(tpAddr)
-    local ifSides, busSides = scanSides(tp)
-    if #ifSides == 0 then
-        print(string.format("  %s..: no interface side -- skipped (each transposer needs one).",
-            tpAddr:sub(1, 8)))
-    elseif #busSides == 0 then
-        print(string.format("  %s..: no input bus -- skipped.", tpAddr:sub(1, 8)))
-    else
-        local ifAddr, ifSide = detectInterface(tp, ifSides, interfaceComps, dbAddr, dbSlot, probe, net)
-        if not ifAddr then
-            print(string.format("  %s..: could not detect its interface (timed out).",
-                tpAddr:sub(1, 8)))
+    local ifSides, busSides, hatchSides, fluidIfSides = scanSides(tp)
+    local tag = tpAddr:sub(1, 8)
+
+    if #busSides > 0 then
+        if #ifSides == 0 then
+            print(string.format("  %s..: input buses but no interface side -- skipped.", tag))
         else
-            print(string.format("  %s..: interface %s.. on side %d, %d input bus(es).",
-                tpAddr:sub(1, 8), ifAddr:sub(1, 8), ifSide, #busSides))
-            for _, busSide in ipairs(busSides) do
-                feeds[#feeds + 1] = {
-                    transposer = tpAddr, interface = ifAddr,
-                    interfaceSide = ifSide, inputBusSide = busSide,
-                }
+            local ifAddr, ifSide = detectInterface(tp, ifSides, interfaceComps, dbAddr, dbSlot, probe, net)
+            if not ifAddr then
+                print(string.format("  %s..: could not detect its interface (timed out).", tag))
+            else
+                print(string.format("  %s..: interface %s.. on side %d, %d input bus(es).",
+                    tag, ifAddr:sub(1, 8), ifSide, #busSides))
+                for _, busSide in ipairs(busSides) do
+                    feeds[#feeds + 1] = {
+                        transposer = tpAddr, interface = ifAddr,
+                        interfaceSide = ifSide, inputBusSide = busSide,
+                    }
+                end
+            end
+        end
+    end
+
+    if #hatchSides > 0 then
+        if not dropSlot then
+            print(string.format("  %s..: %d input hatch(es), but there is no plasma to probe with.",
+                tag, #hatchSides))
+        elseif #fluidIfSides == 0 then
+            print(string.format("  %s..: input hatches but no fluid interface side -- skipped.", tag))
+        else
+            local ifAddr, ifSide = detectFluidInterface(tp, fluidIfSides, interfaceComps,
+                dbAddr, dropSlot, probePlasma.name)
+            if not ifAddr then
+                print(string.format("  %s..: could not detect its fluid interface (timed out).", tag))
+            else
+                print(string.format("  %s..: fluid interface %s.. on side %d, %d input hatch(es).",
+                    tag, ifAddr:sub(1, 8), ifSide, #hatchSides))
+                for _, hatchSide in ipairs(hatchSides) do
+                    fluidFeeds[#fluidFeeds + 1] = {
+                        transposer = tpAddr, interface = ifAddr,
+                        interfaceSide = ifSide, inputHatchSide = hatchSide,
+                    }
+                end
             end
         end
     end
@@ -310,8 +536,62 @@ local function stationFor(feed)
     })
 end
 
--- 4. Identify the miner behind each input bus. Empty the buses, enable all
---    miners, then load one drone at a time and watch which miner starts.
+-- Fluid-only station: during detection a hatch has no miner yet, which is why
+-- transport.new allows a station with just one half.
+local function fluidStationFor(feed)
+    return transport.new({
+        database = dbAddr,
+        fluidTransposer = feed.transposer, fluidInterface = feed.interface,
+        fluidInterfaceSide = feed.interfaceSide, inputHatchSide = feed.inputHatchSide,
+        fluidTank = feed.fluidTank,
+    })
+end
+
+-- Tops a hatch up, giving the staging tank time to refill from ME in between.
+local function fillHatchTo(st, target)
+    local deadline = computer.uptime() + FLUID_TIMEOUT
+    while computer.uptime() < deadline do
+        if st:hatchTank() >= target then return true end
+        if (st:fillHatch(target) or 0) <= 0 then os.sleep(POLL_INTERVAL) end
+    end
+    return st:hatchTank() > 0
+end
+
+-- Hatches sharing one fluid interface need distinct tanks, exactly as buses
+-- sharing an interface need distinct slots. Assign them once; the same numbers
+-- go into stations.lua at the end.
+local fluidStations = {}
+do
+    local nextTank = {}
+    for i, feed in ipairs(fluidFeeds) do
+        local n = nextTank[feed.interface] or 0
+        nextTank[feed.interface] = n + 1
+        feed.fluidTank = n
+        if n > 5 then
+            print(string.format("WARNING: fluid interface %s.. has %d hatches (>6 tanks) -- "
+                .. "the extras cannot be staged.", feed.interface:sub(1, 8), n + 1))
+        end
+        fluidStations[i] = fluidStationFor(feed)
+    end
+end
+
+-- 4. PHASE A -- pair input BUSES with miners. Every hatch gets a little plasma so
+-- the only thing a module is still missing is its drone; then feed one bus at a
+-- time and watch which miner starts.
+if #fluidStations > 0 then
+    print(string.format("Priming %d hatch(es) with %s...", #fluidStations, probePlasma.name))
+    for i, st in ipairs(fluidStations) do
+        if st then
+            st:setPlasmaSource(dropSlot)
+            local okFill = fillHatchTo(st, PROBE_PLASMA_L)
+            local level = st:hatchTank()
+            print(string.format("  hatch %s../side%d: %d L%s",
+                fluidFeeds[i].transposer:sub(1, 8), fluidFeeds[i].inputHatchSide, level,
+                okFill and "" or "  (did not fill -- is that plasma in the local net?)"))
+        end
+    end
+end
+
 print("Emptying input buses...")
 for _, feed in ipairs(feeds) do
     local st = stationFor(feed)
@@ -321,13 +601,8 @@ end
 -- Miners are already off (prepare); enable them so the one with a drone runs.
 for _, m in ipairs(minerList) do m:setEnabled(true) end
 
--- TODO(next part): a mining module needs more than a drone to actually produce
--- (target/planet selection, output filters, ...). Once we know that API, capture
--- each module's extra config here alongside the bus->miner mapping so the
--- controller can drive it.
-
-print("Identifying miners...")
-local assigned = {}   -- miner address -> feed
+print("Identifying miners by input bus...")
+local assigned = {}   -- miner address -> item feed
 for _, feed in ipairs(feeds) do
     local st = stationFor(feed)
     if st then
@@ -336,15 +611,7 @@ for _, feed in ipairs(feeds) do
             print(string.format("  bus %s../side%d: could not load a probe drone (%s).",
                 feed.transposer:sub(1, 8), feed.inputBusSide, tostring(err)))
         else
-            local found
-            local deadline = computer.uptime() + MINER_TIMEOUT
-            while computer.uptime() < deadline do
-                for _, m in ipairs(minerList) do
-                    if not assigned[m.address] and minerActive(m) then found = m; break end
-                end
-                if found then break end
-                os.sleep(POLL_INTERVAL)
-            end
+            local found = waitForNewMiner(minerList, assigned)
             if found then
                 assigned[found.address] = feed
                 print(string.format("  miner %s.. <- transposer %s.. bus side %d",
@@ -358,10 +625,79 @@ for _, feed in ipairs(feeds) do
     end
 end
 
+-- 5. PHASE B -- pair input HATCHES with miners, the other way round: a drone in
+-- EVERY bus, every hatch empty, then fill one hatch at a time.
+local fluidAssigned = {}   -- miner address -> fluid feed
+if #fluidStations > 0 then
+    print("Settling miners between phases...")
+    for _, m in ipairs(minerList) do m:setEnabled(false) end
+    if not waitIdle(minerList) then
+        print("  WARNING: some miners are still finishing; hatch detection may be off.")
+    end
+
+    print("Draining hatches...")
+    for _, st in ipairs(fluidStations) do
+        if st then
+            st:clearPlasmaSource()   -- so the tank cannot refuse what we drain back
+            st:drainHatch()
+        end
+    end
+
+    print("Loading a drone into every bus...")
+    local busStations = {}
+    for i, feed in ipairs(feeds) do
+        local st = stationFor(feed)
+        busStations[i] = st
+        if st then
+            local ok, err = st:setDrone(probeDrone, 1)
+            if not ok then
+                print(string.format("  bus %s../side%d: %s",
+                    feed.transposer:sub(1, 8), feed.inputBusSide, tostring(err)))
+            end
+        end
+    end
+
+    for _, m in ipairs(minerList) do m:setEnabled(true) end
+
+    print("Identifying miners by input hatch...")
+    for i, st in ipairs(fluidStations) do
+        local feed = fluidFeeds[i]
+        if st then
+            st:setPlasmaSource(dropSlot)
+            if not fillHatchTo(st, PROBE_PLASMA_L) then
+                print(string.format("  hatch %s../side%d: would not fill -- skipped.",
+                    feed.transposer:sub(1, 8), feed.inputHatchSide))
+            else
+                local found = waitForNewMiner(minerList, fluidAssigned)
+                if found then
+                    fluidAssigned[found.address] = feed
+                    print(string.format("  miner %s.. <- transposer %s.. hatch side %d tank %d",
+                        found.address:sub(1, 8), feed.transposer:sub(1, 8),
+                        feed.inputHatchSide, feed.fluidTank))
+                else
+                    print(string.format("  hatch %s../side%d: no new miner started.",
+                        feed.transposer:sub(1, 8), feed.inputHatchSide))
+                end
+            end
+            -- Empty it again so the next hatch is the only plasma in play.
+            st:clearPlasmaSource()
+            st:drainHatch()
+        end
+    end
+
+    -- Give the drones back; the controller loads what it actually wants later.
+    for _, st in ipairs(busStations) do
+        if st then st:returnAll() end
+    end
+end
+
 -- Restore miners to their original on/off state, and tidy the probe metadata.
 for _, m in ipairs(minerList) do m:setEnabled(wasOn[m.address] == true) end
 local okdb, db = pcall(component.proxy, dbAddr)
-if okdb and db and db.clear then pcall(db.clear, PROBE_DB_SLOT) end
+if okdb and db and db.clear then
+    pcall(db.clear, PROBE_DB_SLOT)
+    pcall(db.clear, PROBE_DROP_SLOT)
+end
 
 -- 5. Build stations, assign a distinct interface slot per shared interface.
 local minerByAddr = {}
@@ -376,6 +712,23 @@ for addr, feed in pairs(assigned) do
         interfaceSide = feed.interfaceSide,
         inputBusSide = feed.inputBusSide,
     }
+end
+
+-- Merge in the plasma feed for every miner that got one. A miner found by hatch
+-- but not by bus has no station to attach to -- report it rather than inventing
+-- one, since it cannot be driven without its item half.
+for addr, feed in pairs(fluidAssigned) do
+    local st = stations[addr]
+    if st then
+        st.fluidTransposer = feed.transposer
+        st.fluidInterface = feed.interface
+        st.fluidInterfaceSide = feed.interfaceSide
+        st.inputHatchSide = feed.inputHatchSide
+        st.fluidTank = feed.fluidTank
+    else
+        print(string.format("WARNING: miner %s.. was found by its hatch but not by any bus; "
+            .. "its plasma feed cannot be recorded without one.", addr:sub(1, 8)))
+    end
 end
 
 local keys = {}
@@ -417,10 +770,23 @@ f:write(text)
 f:close()
 
 print(string.format("Wrote %d station(s) to %s", #keys, path))
+local withoutPlasma = 0
 for _, a in ipairs(keys) do
     local st = stations[a]
     print(string.format("  %s: transposer %s.. bus=side%d interface=side%d slot=%d",
         st.label, st.transposer:sub(1, 8), st.inputBusSide, st.interfaceSide, st.interfaceSlot))
+    if st.fluidTransposer then
+        print(string.format("      plasma:  transposer %s.. hatch=side%d interface=side%d tank=%d",
+            st.fluidTransposer:sub(1, 8), st.inputHatchSide, st.fluidInterfaceSide, st.fluidTank))
+    else
+        withoutPlasma = withoutPlasma + 1
+        print("      plasma:  none found -- this module cannot be fed plasma")
+    end
+end
+if withoutPlasma > 0 then
+    print(string.format("%d module(s) have no plasma feed. Each needs its OWN transposer "
+        .. "touching an input hatch and an ME fluid interface", withoutPlasma))
+    print("(one transposer cannot serve both items and fluids).")
 end
 print("Keep cfg.dryRun = true until you've watched a drone move, then flip it.")
 

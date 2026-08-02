@@ -398,8 +398,11 @@ local function evaluate(sums, targets, p, mode, ctx)
     -- candidate is infeasible -- kept, but listed separately.
     local violations
     local budget = ctx.budget
+    -- A cap of 0 (or absent) means no limit, not "none allowed". config.lua lists
+    -- every material and plasma so only numbers need editing, and an untouched
+    -- entry has to mean "I have not said" rather than gating everything off.
     local function over(what, used, cap)
-        if cap and used > cap then
+        if cap and cap > 0 and used > cap then
             violations = violations or {}
             violations[#violations + 1] = { resource = what, used = used, budget = cap }
         end

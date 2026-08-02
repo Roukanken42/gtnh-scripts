@@ -108,17 +108,34 @@ cfg.plasmaCost = {
 cfg.euCost = 1e-9
 
 -- What you can actually SUPPLY per second. A configuration that burns more than
--- any of these is reported as infeasible instead of being recommended. Leave a
--- material out (or the whole table empty) to leave it ungated.
+-- any of these is reported as infeasible rather than recommended.
+--
+-- Every entry is listed so you only ever change a number. 0 means NO LIMIT -- an
+-- untouched entry is "I have not said", not "none allowed".
 cfg.budget = {
+    -- Ingots per second you can produce, per drone material.
     ingots = {
-        -- ["Neutronium"] = 0.5,       -- ingots per second you can make
-        -- ["Cosmic Neutronium"] = 0.1,
+        ["Steel"]              = 0,
+        ["Titanium"]           = 0,
+        ["Tungstensteel"]      = 0,
+        ["Naquadah"]           = 0,
+        ["Naquadah Alloy"]     = 0,
+        ["Neutronium"]         = 0,
+        ["Cosmic Neutronium"]  = 0,
+        ["Infinity"]           = 0,
+        ["Transcendent Metal"] = 0,
     },
+
+    -- Litres per second you can produce, by plasma TIER (as cfg.plasmaCost).
     plasma = {
-        -- [5] = 200,                  -- litres per second you can make
+        [1] = 0,   -- Helium
+        [2] = 0,   -- Bismuth
+        [3] = 0,   -- Radon
+        [4] = 0,   -- Technetium
+        [5] = 0,   -- Plutonium-241
     },
-    eu = nil,                          -- EU per second the mining line may draw
+
+    eu = 0,        -- EU per second the mining line may draw
 }
 
 -- Computation the space elevator can feed a module. Meteors ask for a fixed
@@ -143,20 +160,29 @@ cfg.supply = {
     interface = nil,
 
     -- KITS to keep in the local net, per drone material. One kit is 4 drill tips
-    -- + 4 rods, i.e. one meteor's worth. Materials are the ones in drones.lua:
-    -- Steel, Titanium, Tungstensteel, Naquadah, Naquadah Alloy, Neutronium,
-    -- Cosmic Neutronium, Infinity and Transcendent Metal (that last one only for
-    -- completeness -- target.lua treats it as unobtainable and never picks it).
-    -- Anything not listed here is simply not stocked.
+    -- + 4 rods, i.e. one meteor's worth. 0 means DO NOT STOCK it, so filling in
+    -- only the materials your drones actually use is the normal state.
     target = {
-        -- ["Neutronium"] = 500,
+        ["Steel"]              = 0,
+        ["Titanium"]           = 0,
+        ["Tungstensteel"]      = 0,
+        ["Naquadah"]           = 0,
+        ["Naquadah Alloy"]     = 0,
+        ["Neutronium"]         = 0,
+        ["Cosmic Neutronium"]  = 0,
+        ["Infinity"]           = 0,
+        ["Transcendent Metal"] = 0,   -- listed for completeness; unobtainable above
     },
 
-    -- Litres of plasma to keep in the local net, by fluid name. ae2fc carries a
-    -- fluid through a pattern as "drop of <Fluid>" at one drop per litre, so a
-    -- pattern's input count is already its volume -- nothing to measure.
+    -- Litres of plasma to keep in the local net, by fluid name. 0 = do not stock.
+    -- ae2fc carries a fluid through a pattern as "drop of <Fluid>" at one drop per
+    -- litre, so a pattern's input count is already its volume -- nothing to measure.
     plasma = {
-        -- ["Radon Plasma"] = 64000,
+        ["Helium Plasma"]        = 0,
+        ["Bismuth Plasma"]       = 0,
+        ["Radon Plasma"]         = 0,
+        ["Technetium Plasma"]    = 0,
+        ["Plutonium-241 Plasma"] = 0,
     },
 
     -- `plasma keep` tops a hatch up once it falls below this fraction of its
@@ -184,8 +210,13 @@ cfg.supply = {
     hatchMeteors = 256,
 
     -- Per-plasma override in LITRES, when the meteor figure above does not suit.
+    -- 0 = use hatchMeteors.
     hatchLitres = {
-        -- ["Helium Plasma"] = 32000,
+        ["Helium Plasma"]        = 0,
+        ["Bismuth Plasma"]       = 0,
+        ["Radon Plasma"]         = 0,
+        ["Technetium Plasma"]    = 0,
+        ["Plutonium-241 Plasma"] = 0,
     },
 
     -- Refill only once stock falls below this fraction of target, then fill to

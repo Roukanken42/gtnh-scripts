@@ -30,9 +30,48 @@ into place, creating directories as needed.
 ```
 install.lua              Bootstrap installer, run on the OC machine.
 manifest                 Auto-generated list of files the installer downloads.
-tools/build-manifest.ps1 Regenerates `manifest` (run on the dev machine).
+tools/                   Dev-machine helpers -- see below.
 <program>/               One folder per program/machine (scripts, config, ...).
 ```
+
+Inside a program folder, the split is by what a file *is*:
+
+```
+mining/
+  setup.lua drone.lua    Programs you run. Every one takes --help and --verbose.
+  plan.lua stock.lua
+  plasma.lua
+  config.lua             The one file you edit. Never overwritten by `install`.
+  lib/
+    gtnh/                What the game gives us: meteor, plasma and drone data,
+                         extracted from GTNH and regenerable (see each header).
+    calc/                Pure maths over that data -- no components touched, so
+                         it runs in any Lua interpreter.
+    hw/                  Everything that talks to a component.
+    cli.lua              Argument parsing, --help, and progress output.
+    stations.lua         Where the generated station map lives.
+  data/                  Generated on the machine by `setup`. Not in the repo.
+```
+
+Anything shared, or that the controller will want later, belongs in `lib/`. A
+top-level script should be arguments, orchestration and output.
+
+## Checking your work
+
+The dev-machine tools catch the mistakes an OC machine only reports at runtime:
+
+```
+pwsh ./tools/build-manifest.ps1              regenerate `manifest` after adding files
+lua tools/check-requires.lua mining          every require() resolves to a real file
+lua tools/undefined-calls.lua mining/*.lua   nothing calls a function that isn't there
+luac -p mining/**/*.lua                      syntax
+```
+
+The first two matter because Lua resolves both a `require` and a bare function
+name only when the line actually runs. Move a module or delete a function and
+everything still compiles; it fails in-game, in whichever branch reaches it
+first. `lib/calc/` and most of `lib/hw/` also load in a plain interpreter, so
+their logic can be tested off-machine.
 
 ## Adding or changing scripts
 

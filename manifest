@@ -12,6 +12,7 @@ mining/lib/gtnh/drones.lua
 mining/lib/gtnh/meteors.lua
 mining/lib/gtnh/plasmas.lua
 mining/lib/hw/db.lua
+mining/lib/hw/discover.lua
 mining/lib/hw/localnet.lua
 mining/lib/hw/miners.lua
 mining/lib/hw/supply.lua

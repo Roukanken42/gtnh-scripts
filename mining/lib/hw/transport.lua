@@ -66,6 +66,18 @@ end
 local component = optional("component")
 local computer = optional("computer")
 
+-- Monotonic seconds, and a yield. computer.uptime() and os.sleep() on the
+-- machine; off it, os.clock() and doing nothing -- there is no hardware to wait
+-- on in a test, so a loop that polls simply runs to its conclusion.
+local function now()
+    if computer then return computer.uptime() end
+    return os.clock()
+end
+
+local function pause(seconds)
+    if os.sleep then os.sleep(seconds) end
+end
+
 local dbslots = require("lib.hw.db")
 
 local transport = {}
@@ -354,6 +366,26 @@ function Station:fillHatch(target)
         return want
     end
     return self:moveFluid(self.fluidInterfaceSide, self.inputHatchSide, want, self.fluidTank)
+end
+
+-- Fills the hatch to `target`, waiting for the staging tank to refill from ME in
+-- between. fillHatch moves what the interface is holding right now, which is at
+-- most one 16,000 L tankful, so anything larger needs several passes.
+--
+-- The drain does NOT need this and is a single call: an interface passes whatever
+-- is pushed into it straight to the network, and only limits what it can hand
+-- OUT. Returns total moved.
+function Station:fillHatchTo(target, timeout)
+    if not self:hasFluid() then return 0, "no fluid half configured" end
+    local moved, deadline = 0, now() + (timeout or 15)
+    while now() < deadline do
+        if (self:hatchTank()) >= target then break end
+        local n = self:fillHatch(target)
+        moved = moved + (n or 0)
+        if self.dryRun then break end
+        if (n or 0) <= 0 then pause(0.25) end   -- staging tank still refilling
+    end
+    return moved
 end
 
 -- Empties the module's hatch back through the interface into the network. Needed

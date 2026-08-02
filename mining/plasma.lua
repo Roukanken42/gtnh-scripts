@@ -127,24 +127,10 @@ local function plasmaDbSlot(p)
     return supply.storePlasmaDrop(itf, entry, handle)
 end
 
--- Fills a station's hatch to `target`, waiting for the staging tank to refill
--- from ME between transfers. Returns total moved.
---
--- This direction has to loop and the drain does not, which is not an oversight:
--- an interface only HOLDS 16,000 L to hand out, so a hatch bigger than that is
--- filled a tankful at a time, but it absorbs anything pushed into it straight
--- into the network, so a drain goes in one call however full the hatch is.
+-- Fills a station's hatch to `target`. The looping lives on the station itself
+-- (see Station:fillHatchTo), because setup needs exactly the same thing.
 local function fillUp(m, target, timeout)
-    local moved, deadline = 0, computer.uptime() + (timeout or 15)
-    while computer.uptime() < deadline do
-        local level = m.station:hatchTank()
-        if level >= target then break end
-        local n = m.station:fillHatch(target)
-        moved = moved + (n or 0)
-        if cfg.dryRun then break end
-        if (n or 0) <= 0 then os.sleep(0.5) end   -- staging tank still refilling
-    end
-    return moved
+    return m.station:fillHatchTo(target, timeout)
 end
 
 -- ---- commands --------------------------------------------------------------

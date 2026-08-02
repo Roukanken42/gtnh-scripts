@@ -122,6 +122,11 @@ end
 
 -- Fills a station's hatch to `target`, waiting for the staging tank to refill
 -- from ME between transfers. Returns total moved.
+--
+-- This direction has to loop and the drain does not, which is not an oversight:
+-- an interface only HOLDS 16,000 L to hand out, so a hatch bigger than that is
+-- filled a tankful at a time, but it absorbs anything pushed into it straight
+-- into the network, so a drain goes in one call however full the hatch is.
 local function fillUp(m, target, timeout)
     local moved, deadline = 0, computer.uptime() + (timeout or 15)
     while computer.uptime() < deadline do
@@ -131,23 +136,6 @@ local function fillUp(m, target, timeout)
         moved = moved + (n or 0)
         if cfg.dryRun then break end
         if (n or 0) <= 0 then os.sleep(0.5) end   -- staging tank still refilling
-    end
-    return moved
-end
-
--- Empties a hatch back into the network. Loops for the same reason fillUp does,
--- in reverse: it drains through an interface tank that holds only 16,000 L, so a
--- large hatch needs several passes with time in between for the network to take
--- each one. Clear the staging config first, or the tank will refuse fluid that is
--- not what it was told to stock. Returns total moved.
-local function drainDown(m, timeout)
-    local moved, deadline = 0, computer.uptime() + (timeout or 20)
-    while computer.uptime() < deadline do
-        if m.station:hatchTank() <= 0 then break end
-        local n = m.station:drainHatch()
-        moved = moved + (n or 0)
-        if cfg.dryRun then break end
-        if (n or 0) <= 0 then os.sleep(0.5) end   -- interface tank still emptying
     end
     return moved
 end
@@ -199,11 +187,10 @@ local function cmdSet(name)
         local tag = m.address:sub(1, 8)
         local have, label = hatchPlasma(m)
 
-        -- A hatch holds one fluid: the old one has to go before the new is taken,
-        -- and all of it -- a partial drain leaves the hatch refusing the new plasma.
+        -- A hatch holds one fluid: the old one has to go before the new is taken.
         if label and label ~= p.name then
             m.station:clearPlasmaSource()
-            local drained = drainDown(m)
+            local drained = m.station:drainHatch()
             print(string.format("  %s  drained %d L of %s", tag, drained, label))
         end
 
@@ -275,7 +262,7 @@ local function cmdKeep(name)
         local _, label = hatchPlasma(m)
         if label and label ~= p.name then
             m.station:clearPlasmaSource()
-            local drained = drainDown(m)
+            local drained = m.station:drainHatch()
             print(string.format("  %s  drained %d L of %s", m.address:sub(1, 8), drained, label))
         end
         local ok, serr = m.station:setPlasmaSource(slot)
@@ -326,7 +313,7 @@ local function cmdKeep(name)
 
     local returned, left = 0, 0
     for _, m in ipairs(fluid) do
-        returned = returned + drainDown(m)
+        returned = returned + (m.station:drainHatch() or 0)
         local remaining = m.station:hatchTank()
         if remaining > 0 then
             left = left + remaining
@@ -346,7 +333,7 @@ local function cmdDrain()
     -- hatch drains through it.
     for _, m in ipairs(fluid) do m.station:clearPlasmaSource() end
     for _, m in ipairs(fluid) do
-        local drained = drainDown(m)
+        local drained = m.station:drainHatch()
         local left = m.station:hatchTank()
         print(string.format("  %s  drained %d L%s%s", m.address:sub(1, 8), drained,
             left > 0 and string.format(", %d L left", left) or "",

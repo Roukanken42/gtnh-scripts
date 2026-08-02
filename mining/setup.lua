@@ -198,13 +198,22 @@ end
 -- with setInterfaceConfiguration). Returns the db slot, or nil + error.
 local function storeProbe(net, dbAddr, probe)
     if net.store == nil then return nil, "local net has no store()" end
-    pcall(net.store, { label = probe.label }, dbAddr, PROBE_DB_SLOT, 1)
+    local okStore, res = pcall(net.store, { label = probe.label }, dbAddr, PROBE_DB_SLOT, 1)
+    if not okStore then return nil, "store() errored: " .. tostring(res) end
+
     local okp, db = pcall(component.proxy, dbAddr)
-    if okp and db and db.get then
-        local okg, st = pcall(db.get, PROBE_DB_SLOT)
-        if okg and type(st) == "table" and (st.name or st.label) then return PROBE_DB_SLOT end
+    if not (okp and db and db.get) then return nil, "database " .. tostring(dbAddr) .. " unreachable" end
+    local okg, st = pcall(db.get, PROBE_DB_SLOT)
+    if not (okg and type(st) == "table" and (st.name or st.label)) then
+        return nil, "database did not accept the probe drone"
     end
-    return nil, "database did not accept the probe drone"
+    -- The ME filter is not reliably exact, so confirm what landed is the drone
+    -- itself: staging the wrong metadata would fail later and much less clearly.
+    local got = st.label or st.name
+    if got ~= probe.label then
+        return nil, "database slot holds '" .. tostring(got) .. "', not " .. probe.label
+    end
+    return PROBE_DB_SLOT
 end
 
 -- The interfaces whose OWN network holds `label`. Only those can possibly stage
@@ -251,6 +260,56 @@ local function interfacesHoldingFluid(interfaceComps, label)
     return out
 end
 
+-- Confirms a database slot really holds `label`, so a stage that fails can be
+-- blamed on the interface rather than on metadata that was never written.
+-- Returns true + what is there, or false + why not.
+local function dbSlotHolds(dbAddr, dbSlot, label)
+    local ok, db = pcall(component.proxy, dbAddr)
+    if not ok or not db or db.get == nil then return false, "no database component" end
+    local okg, stack = pcall(db.get, dbSlot)
+    if not okg or type(stack) ~= "table" then return false, "slot " .. dbSlot .. " is empty" end
+    local got = stack.label or stack.name
+    if label and got ~= label then
+        return false, "slot " .. dbSlot .. " holds '" .. tostring(got) .. "'"
+    end
+    return true, tostring(got)
+end
+
+-- Which interface config slot actually accepts a stocking request. The item slots
+-- have already caught us out once -- there is a note that slot 1's item does not
+-- surface to the transposer -- and the fluid side of the same block turned out to
+-- be 0-based, so the base is not something to assume. The first slot that reads
+-- back what we wrote is remembered and used for every later interface.
+local CFG_SLOT_CANDIDATES = { PROBE_CFG_SLOT, 1, 3, 0 }
+local knownCfgSlot = nil
+
+-- Stages the probe into an interface and says exactly what happened. Returns
+-- slot, ok, detail -- slot is nil when nothing could be written at all.
+local function stageProbe(p, dbAddr, dbSlot)
+    local tried = knownCfgSlot and { knownCfgSlot } or CFG_SLOT_CANDIDATES
+    local lastWhy = "no config slot accepted it"
+
+    for _, slot in ipairs(tried) do
+        local ok, res = pcall(p.setInterfaceConfiguration, slot, dbAddr, dbSlot, 1)
+        if not ok then
+            lastWhy = "slot " .. slot .. " errored (" .. tostring(res) .. ")"
+        elseif res == false then
+            lastWhy = "slot " .. slot .. " refused the request"
+        else
+            -- Read it back: a call that returns true but leaves the slot empty is
+            -- the failure actually seen in the field.
+            local okc, cfg = pcall(p.getInterfaceConfiguration, slot)
+            if okc and type(cfg) == "table" and (cfg.name or cfg.label) then
+                knownCfgSlot = slot
+                return slot, true, tostring(cfg.label or cfg.name)
+            end
+            lastWhy = "slot " .. slot .. " set but reads back empty"
+            pcall(p.setInterfaceConfiguration, slot)
+        end
+    end
+    return nil, false, lastWhy
+end
+
 -- Finds which me_interface a transposer feeds: stock the probe drone on each
 -- candidate in turn and see whether the transposer can see it, which confirms it
 -- is the ADJACENT one. Returns interfaceAddr, side.
@@ -264,19 +323,32 @@ local function detectInterface(tp, ifSides, interfaceComps, dbAddr, dbSlot, prob
     for _, c in ipairs(interfaceComps) do
         local ok, p = pcall(component.proxy, c)
         if ok and p and p.setInterfaceConfiguration ~= nil then
-            pcall(p.setInterfaceConfiguration, PROBE_CFG_SLOT, dbAddr, dbSlot, 1)
+            local slot, staged, how = stageProbe(p, dbAddr, dbSlot)
 
             local foundSide = nil
-            local deadline = computer.uptime() + DETECT_PER_CANDIDATE
-            while computer.uptime() < deadline do
-                for _, side in ipairs(ifSides) do
-                    if sideHasLabel(tp, side, probe.label) then foundSide = side; break end
+            if staged then
+                local deadline = computer.uptime() + DETECT_PER_CANDIDATE
+                while computer.uptime() < deadline do
+                    for _, side in ipairs(ifSides) do
+                        if sideHasLabel(tp, side, probe.label) then foundSide = side; break end
+                    end
+                    if foundSide then break end
+                    os.sleep(POLL_INTERVAL)
                 end
-                if foundSide then break end
-                os.sleep(POLL_INTERVAL)
+                if not foundSide then
+                    print(string.format("      %s..: staged %s in slot %d, no side saw it",
+                        c:sub(1, 8), how, slot))
+                end
+            else
+                -- Previously discarded, which made a refused write look exactly
+                -- like a transposer that simply is not adjacent.
+                print(string.format("      %s..: could not stage the probe -- %s",
+                    c:sub(1, 8), how))
             end
 
-            pcall(p.setInterfaceConfiguration, PROBE_CFG_SLOT)   -- clear (drone back to net)
+            if slot then
+                pcall(p.setInterfaceConfiguration, slot)   -- clear (drone back to net)
+            end
             if foundSide then return c, foundSide end
         end
     end
@@ -509,6 +581,8 @@ local M = {
     sideHasLabel = sideHasLabel,
     scanSides = scanSides,
     storeProbe = storeProbe,
+    dbSlotHolds = dbSlotHolds,
+    stageProbe = stageProbe,
     detectInterface = detectInterface,
     interfacesHolding = interfacesHolding,
     interfacesHoldingFluid = interfacesHoldingFluid,
@@ -641,6 +715,15 @@ end
 -- Narrow the interfaces before probing them. Only a network that HOLDS the probe
 -- can stage it, so this is the difference between testing three interfaces and
 -- testing every one in the base at seconds apiece.
+-- The probe's metadata has to still be in the database: everything since
+-- storeProbe has also been writing to it, and a cleared slot would make every
+-- interface look like it refused.
+local okDb, dbWhat = dbSlotHolds(dbAddr, dbSlot, probe.label)
+print(string.format("Probe metadata in database slot %d: %s", dbSlot, dbWhat))
+if not okDb then
+    print("  Nothing can be staged without it -- no input bus will be paired.")
+end
+
 local itemCandidates = interfacesHolding(interfaceComps, probe.label)
 print(string.format("Interfaces that can stage %s: %d of %d.",
     probe.label, #itemCandidates, #interfaceComps))

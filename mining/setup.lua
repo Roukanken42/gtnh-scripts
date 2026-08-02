@@ -9,11 +9,12 @@
 --      Controller (component me_controller); the drones live there. We take the
 --      LOWEST-tier drone in stock as a probe -- a low drone runs in any module,
 --      a high one won't run a low-tier module.
---   2. For each transposer, we stock that probe drone on each me_interface in
---      turn and watch whether the transposer can see it -- that pairs the
---      transposer with its interface and tells us which side faces it. The base
---      has interfaces on OTHER nets too, so the list is first narrowed to the
---      ones whose own network actually holds the probe; only those can stage it.
+--   2. To pair transposers with interfaces we stage that probe drone in each
+--      me_interface ONCE and ask every transposer whether it can see it, rather
+--      than the other way round: staging costs seconds of ME stocking, reading a
+--      transposer side costs one call. The base has interfaces on OTHER nets too,
+--      so the list is first narrowed to the ones whose own network holds the
+--      probe; only those can stage it at all.
 --   3. A module only mines with a drone, KITS and PLASMA all present, so both
 --      detection phases below need the other two inputs already satisfied:
 --        * kits arrive from the local net by themselves (they are chosen by the
@@ -367,222 +368,104 @@ local function stageProbe(p, dbAddr, dbSlot)
     return nil, false, lastWhy
 end
 
--- Finds which me_interface a transposer feeds: stock the probe drone on each
--- candidate in turn and see whether the transposer can see it, which confirms it
--- is the ADJACENT one. Returns interfaceAddr, side.
+-- Pairs transposers with the interface that feeds them, for ALL of them at once.
 --
--- `interfaceComps` is expected to be pre-narrowed by interfacesHolding. There is
--- no overall time budget: running out of it is indistinguishable from "nothing
--- feeds this transposer", and that silence is expensive to debug. There is no
--- "did a drone leave the local net" shortcut either -- a stocked item may still
--- count as network inventory, and that test would then reject the RIGHT interface.
-local function detectInterface(tp, ifSides, interfaceComps, dbAddr, dbSlot, probe, net)
-    local function sees(side) return sideHasLabel(tp, side, probe.label) end
+-- The loops are the other way round from the obvious shape, because the two
+-- halves cost wildly different amounts: staging a probe in an ME interface takes
+-- seconds of stocking, while asking a transposer what it can see is one component
+-- call. So each interface is staged ONCE and every still-unpaired transposer is
+-- asked about it -- the expensive half becomes O(interfaces) instead of
+-- O(transposers x interfaces), and transposers sharing an interface are all
+-- paired by the same staging.
+--
+-- `candidates` is expected to be pre-narrowed by interfacesHolding. There is no
+-- overall time budget: running out of one is indistinguishable from "nothing
+-- feeds this transposer", and that silence is expensive to debug.
+--
+-- Every sighting is bracketed by two checks, because a sighting alone proves
+-- nothing. Anything visible BEFORE the candidate is staged is recorded as stale
+-- and ignored -- clearing an interface does not empty it instantly, so residue
+-- from the previous candidate may still be sitting there. And a sighting is only
+-- accepted once clearing that interface makes it GO AWAY again; something another
+-- interface staged will not budge. Skipping either is how a transposer ends up
+-- paired with an interface it is not touching.
+--
+-- `spec` carries what differs between items and fluids:
+--   sidesOf(scan)    which of that transposer's sides are worth watching
+--   sees(tp, side)   is the probe visible there
+--   supports(proxy)  can this interface stage that kind of probe
+--   stage(proxy)     put the probe in -> token, ok, detail
+--   clear(proxy, token)
+-- Returns { [transposerAddress] = { interface = addr, side = n } }.
+local function sweepInterfaces(scans, candidates, spec, what)
+    local found, foundCount, remaining = {}, 0, 0
+    for _, sc in ipairs(scans) do
+        if #spec.sidesOf(sc) > 0 then remaining = remaining + 1 end
+    end
+    if remaining == 0 then return found end
+    local total = remaining
 
-    for _, c in ipairs(interfaceComps) do
-        local ok, p = pcall(component.proxy, c)
-        if ok and p and p.setInterfaceConfiguration ~= nil then
-            -- Anything ALREADY showing cannot be this candidate's doing -- a
-            -- previous candidate's stock may not have gone back yet, and several
-            -- transposers can share one interface.
+    for _, c in ipairs(candidates) do
+        if remaining == 0 then break end
+        local okProxy, p = pcall(component.proxy, c)
+        if okProxy and p and spec.supports(p) then
+            -- Only transposers still looking, and only those with a side to look at.
+            local waiting = {}
+            for _, sc in ipairs(scans) do
+                if not found[sc.addr] and #spec.sidesOf(sc) > 0 then waiting[#waiting + 1] = sc end
+            end
+
             local stale = {}
-            for _, side in ipairs(ifSides) do stale[side] = sees(side) end
+            for _, sc in ipairs(waiting) do
+                stale[sc] = {}
+                for _, side in ipairs(spec.sidesOf(sc)) do
+                    stale[sc][side] = spec.sees(sc.tp, side)
+                end
+            end
 
-            local slot, staged, how = stageProbe(p, dbAddr, dbSlot)
-
-            local foundSide = nil
+            local token, staged, how = spec.stage(p)
+            local hits, hitCount = {}, 0
             if staged then
                 local deadline = computer.uptime() + DETECT_PER_CANDIDATE
-                while computer.uptime() < deadline do
-                    for _, side in ipairs(ifSides) do
-                        if not stale[side] and sees(side) then foundSide = side; break end
+                while computer.uptime() < deadline and hitCount < #waiting do
+                    for _, sc in ipairs(waiting) do
+                        if not hits[sc] then
+                            for _, side in ipairs(spec.sidesOf(sc)) do
+                                if not stale[sc][side] and spec.sees(sc.tp, side) then
+                                    hits[sc] = side
+                                    hitCount = hitCount + 1
+                                    break
+                                end
+                            end
+                        end
                     end
-                    if foundSide then break end
-                    os.sleep(POLL_INTERVAL)
-                end
-                if not foundSide then
-                    detail("      %s..: staged %s in slot %d, no side saw it",
-                        c:sub(1, 8), how, slot)
+                    if hitCount < #waiting then os.sleep(POLL_INTERVAL) end
                 end
             else
-                -- Previously discarded, which made a refused write look exactly
-                -- like a transposer that simply is not adjacent.
-                detail("      %s..: could not stage the probe -- %s", c:sub(1, 8), how)
+                detail("      %s..: could not stage the probe -- %s", c:sub(1, 8), tostring(how))
             end
 
-            if slot then
-                pcall(p.setInterfaceConfiguration, slot)   -- clear (drone back to net)
-            end
-            if foundSide then
-                -- Causality, not coincidence: clearing THIS interface has to take
-                -- the probe away again. Leftovers do not budge, and pairing on a
-                -- sighting alone is how a transposer ends up matched to an
-                -- interface it is not touching.
-                if waitSideEmpty(tp, foundSide, sees) then return c, foundSide end
-                detail("      %s..: side %d still held the probe after clearing -- "
-                    .. "not this interface", c:sub(1, 8), foundSide)
-            end
-        end
-    end
-    return nil, nil
-end
+            spec.clear(p, token)
 
--- ---- fluid-side probing ----------------------------------------------------
-
--- Makes sure the probe drone's KITS are in the local net. A module eats 4 drill
--- tips + 4 rods of the drone's material per meteor and will not run -- so cannot
--- be detected -- without them. They reach the modules from the local net on their
--- own, so setup only has to see that they are in stock. The exact item labels come
--- from the supply interface's kit pattern rather than being guessed at.
--- Returns true, or false + reason (which is a warning, not a hard stop: the kits
--- may have been put there by hand).
-local function ensureKits(net, material, itf, handle)
-    if not itf then return false, "no supply interface found to request kits from" end
-
-    -- Resolved against the database so the request targets the fake pattern's real
-    -- (renamed) output rather than the base item its slot reports.
-    local entry
-    for _, e in ipairs(supply.catalog(itf, handle)) do
-        if e.kind == "kit" and e.material == material then entry = e; break end
-    end
-    if not entry then
-        return false, "the supply interface has no kit pattern for " .. material
-    end
-
-    local stock = supply.stock({ entry }, net)
-    local have = supply.kitsInStock(entry, stock.items)
-    if have >= PROBE_KITS then
-        return true, string.format("%d %s kit(s) in stock", have, material)
-    end
-
-    local crafts = math.ceil((PROBE_KITS - have) / math.max(1, entry.perCraft))
-    step("Kits: %d of %d %s, requesting %d craft(s)...", have, PROBE_KITS, material, crafts)
-    local job, err = supply.request(itf, entry, crafts)
-    if not job then return false, tostring(err) end
-
-    local deadline = computer.uptime() + STOCK_TIMEOUT
-    while computer.uptime() < deadline do
-        local state = supply.jobState(job)
-        if state ~= "computing" then break end
-        os.sleep(POLL_INTERVAL)
-    end
-    stock = supply.stock({ entry }, net)
-    have = supply.kitsInStock(entry, stock.items)
-    if have <= 0 then return false, "no " .. material .. " kits arrived" end
-    return true, string.format("%d %s kit(s) in stock", have, material)
-end
-
--- Makes sure the local net actually HOLDS the plasma we mean to probe with. A
--- fluid interface can only stage what its network has, so without this every
--- hatch stays empty and every hatch-to-miner pairing fails -- and fails silently,
--- because an unfilled hatch looks exactly like a wrong side.
--- Returns true, or false + reason.
-local function ensurePlasma(net, entry, itf, litres)
-    if not entry then return false, "no plasma pattern to stock from" end
-    local function have()
-        return supply.plasmaInStock(entry, supply.stock({ entry }, net))
-    end
-
-    local now = have()
-    if now >= litres then
-        return true, string.format("%d L of %s in the local net", now, entry.plasma.name)
-    end
-
-    local crafts = math.ceil((litres - now) / math.max(1, entry.perCraft))
-    step("Plasma: %d of %d L, requesting %d craft(s)...", now, litres, crafts)
-    local job, err = supply.request(itf, entry, crafts)
-    if not job then return false, tostring(err) end
-
-    local deadline = computer.uptime() + STOCK_TIMEOUT
-    while computer.uptime() < deadline do
-        if supply.jobState(job) ~= "computing" then break end
-        os.sleep(POLL_INTERVAL)
-    end
-    -- The fluid can take a while to land after the job itself reports done, and a
-    -- large request arrives in pieces.
-    deadline = computer.uptime() + STOCK_TIMEOUT
-    while computer.uptime() < deadline and have() < litres do os.sleep(POLL_INTERVAL) end
-
-    now = have()
-    if now <= 0 then return false, "no " .. entry.plasma.name .. " arrived" end
-    if now < litres then
-        -- Partial is not success: the hatches it does not cover stay empty, and an
-        -- empty hatch is indistinguishable from a wrong side during detection.
-        return false, string.format("only %d of %d L of %s", now, litres, entry.plasma.name)
-    end
-    return true, string.format("%d L of %s in the local net", now, entry.plasma.name)
-end
-
--- Puts a plasma's ae2fc drop in the database, which is the only way to name a
--- fluid to setFluidInterfaceConfiguration -- the local net holds plasma as fluid,
--- never as drops, so it is lifted out of the supply interface's own pattern.
--- Returns plasma, dbSlot, or nil + error.
-local function stagePlasmaDrop(itf, handle)
-    if not itf then return nil, "no supply interface found to take a plasma drop from" end
-
-    -- Any plasma will do for detection; take the cheapest per litre to probe with.
-    local best
-    for _, e in ipairs(supply.catalog(itf, handle)) do
-        if e.kind == "plasma" and (not best or e.plasma.tier < best.plasma.tier) then best = e end
-    end
-    if not best then return nil, "the supply interface has no plasma pattern" end
-
-    local slot, err = supply.storePlasmaDrop(itf, best, handle)
-    if not slot then return nil, tostring(err) end
-    return best, slot
-end
-
--- Finds which me_interface a FLUID transposer stages through, and on which side:
--- configure the probe plasma into each interface's tank in turn and watch whether
--- the transposer can see it. The fluid mirror of detectInterface.
--- Returns interfaceAddr, side.
-local function detectFluidInterface(tp, fluidIfSides, interfaceComps, dbAddr, dropSlot, plasmaName)
-    -- The reads are 1-based, the config is 0-based (see transport.lua).
-    local function sees(side)
-        local okf, f = pcall(tp.getFluidInTank, side, PROBE_FLUID_TANK + 1)
-        if not okf or type(f) ~= "table" then return false end
-        if f.label == nil and type(f[1]) == "table" then f = f[1] end
-        return f.label == plasmaName and (f.amount or 0) > 0
-    end
-
-    for _, c in ipairs(interfaceComps) do
-        local ok, p = pcall(component.proxy, c)
-        if ok and p and p.setFluidInterfaceConfiguration ~= nil then
-            -- Anything ALREADY staged cannot be this candidate's doing. Clearing
-            -- an interface does not empty its tank instantly, and several
-            -- transposers can share one, so the residue of the PREVIOUS
-            -- transposer's successful probe is still sitting there when this one
-            -- starts -- which pairs it with whichever candidate happened to be
-            -- tried first.
-            local stale = {}
-            for _, side in ipairs(fluidIfSides) do stale[side] = sees(side) end
-
-            pcall(p.setFluidInterfaceConfiguration, PROBE_FLUID_TANK, dbAddr, dropSlot)
-
-            local foundSide = nil
-            local deadline = computer.uptime() + DETECT_PER_CANDIDATE
-            while computer.uptime() < deadline do
-                for _, side in ipairs(fluidIfSides) do
-                    if not stale[side] and sees(side) then foundSide = side; break end
+            for _, sc in ipairs(waiting) do
+                local side = hits[sc]
+                if side then
+                    if waitSideEmpty(sc.tp, side, function(x) return spec.sees(sc.tp, x) end) then
+                        found[sc.addr] = { interface = c, side = side }
+                        foundCount = foundCount + 1
+                        remaining = remaining - 1
+                        detail("      %s..: %s %s.. on side %d",
+                            sc.addr:sub(1, 8), what, c:sub(1, 8), side)
+                    else
+                        detail("      %s..: side %d still held the probe after clearing %s.. -- "
+                            .. "not that interface", sc.addr:sub(1, 8), side, c:sub(1, 8))
+                    end
                 end
-                if foundSide then break end
-                os.sleep(POLL_INTERVAL)
             end
-
-            pcall(p.setFluidInterfaceConfiguration, PROBE_FLUID_TANK)   -- clear
-            if foundSide then
-                -- Causality, not coincidence: clearing THIS interface has to take
-                -- the plasma away again. A leftover will not budge.
-                if waitSideEmpty(tp, foundSide, sees) then return c, foundSide end
-                detail("      %s..: side %d still held %s after clearing -- "
-                    .. "not this interface", c:sub(1, 8), foundSide, plasmaName)
-            else
-                -- Leave nothing behind for the next candidate to trip over.
-                waitSideEmpty(tp, fluidIfSides[1], sees)
-            end
+            step("Pairing %s... %d/%d", what, foundCount, total)
         end
     end
-    return nil, nil
+    return found
 end
 
 -- Miner state readers.
@@ -670,7 +553,7 @@ local M = {
     scanSides = scanSides,
     storeProbe = storeProbe,
     stageProbe = stageProbe,
-    detectInterface = detectInterface,
+    sweepInterfaces = sweepInterfaces,
     interfacesHolding = interfacesHolding,
     interfacesHoldingFluid = interfacesHoldingFluid,
     tankCount = tankCount,
@@ -678,7 +561,6 @@ local M = {
     ensureKits = ensureKits,
     ensurePlasma = ensurePlasma,
     stagePlasmaDrop = stagePlasmaDrop,
-    detectFluidInterface = detectFluidInterface,
     minerActive = minerActive,
     minerOn = minerOn,
     prepare = prepare,
@@ -832,61 +714,83 @@ if #itemCandidates == 0 then
     say("  so no input bus can be paired. Is the local net's interface adaptered?")
 end
 
-local pairedItem, pairedFluid = 0, 0
-for _, s in ipairs(scans) do
-    local tpAddr, tp = s.addr, s.tp
-    local ifSides, busSides = s.ifSides, s.busSides
-    local hatchSides, fluidIfSides = s.hatchSides, s.fluidIfSides
-    local tag = tpAddr:sub(1, 8)
+-- Both sweeps go interface-first: staging is the expensive half, so it happens
+-- once per interface rather than once per transposer per interface.
+local itemPairs = sweepInterfaces(scans, itemCandidates, {
+    sidesOf = function(sc) return sc.ifSides end,
+    sees = function(tp, side) return sideHasLabel(tp, side, probe.label) end,
+    supports = function(p) return p.setInterfaceConfiguration ~= nil end,
+    stage = function(p) return stageProbe(p, dbAddr, dbSlot) end,
+    clear = function(p, slot)
+        if slot then pcall(p.setInterfaceConfiguration, slot) end   -- drone back to net
+    end,
+}, "interfaces")
+stepEnd()
 
-    if #busSides > 0 then
-        if #ifSides == 0 then
+local fluidPairs = {}
+if dropSlot and probePlasma then
+    fluidPairs = sweepInterfaces(scans, fluidCandidates, {
+        sidesOf = function(sc) return sc.fluidIfSides end,
+        -- The reads are 1-based, the config is 0-based (see transport.lua).
+        sees = function(tp, side)
+            local okf, f = pcall(tp.getFluidInTank, side, PROBE_FLUID_TANK + 1)
+            if not okf or type(f) ~= "table" then return false end
+            if f.label == nil and type(f[1]) == "table" then f = f[1] end
+            return f.label == probePlasma.name and (f.amount or 0) > 0
+        end,
+        supports = function(p) return p.setFluidInterfaceConfiguration ~= nil end,
+        stage = function(p)
+            local ok = pcall(p.setFluidInterfaceConfiguration, PROBE_FLUID_TANK, dbAddr, dropSlot)
+            return PROBE_FLUID_TANK, ok, ok and "staged" or "setFluidInterfaceConfiguration failed"
+        end,
+        clear = function(p) pcall(p.setFluidInterfaceConfiguration, PROBE_FLUID_TANK) end,
+    }, "fluid interfaces")
+    stepEnd()
+end
+
+-- Turn the pairings into feeds, one per bus and one per hatch.
+local pairedItem, pairedFluid = 0, 0
+for _, sc in ipairs(scans) do
+    local tag = sc.addr:sub(1, 8)
+
+    if #sc.busSides > 0 then
+        local m = itemPairs[sc.addr]
+        if #sc.ifSides == 0 then
             say("  %s..: input buses but no interface side -- skipped.", tag)
+        elseif not m then
+            say("  %s..: could not detect its interface.", tag)
         else
-            local ifAddr, ifSide = detectInterface(tp, ifSides, itemCandidates, dbAddr, dbSlot, probe, net)
-            if not ifAddr then
-                say("  %s..: could not detect its interface.", tag)
-            else
-                pairedItem = pairedItem + 1
-                detail("  %s..: interface %s.. on side %d, %d input bus(es).",
-                    tag, ifAddr:sub(1, 8), ifSide, #busSides)
-                for _, busSide in ipairs(busSides) do
-                    feeds[#feeds + 1] = {
-                        transposer = tpAddr, interface = ifAddr,
-                        interfaceSide = ifSide, inputBusSide = busSide,
-                    }
-                end
+            pairedItem = pairedItem + 1
+            for _, busSide in ipairs(sc.busSides) do
+                feeds[#feeds + 1] = {
+                    transposer = sc.addr, interface = m.interface,
+                    interfaceSide = m.side, inputBusSide = busSide,
+                }
             end
         end
     end
 
-    if #hatchSides > 0 then
+    if #sc.hatchSides > 0 then
+        local m = fluidPairs[sc.addr]
         if not dropSlot then
             say("  %s..: %d input hatch(es), but there is no plasma to probe with.",
-                tag, #hatchSides)
-        elseif #fluidIfSides == 0 then
+                tag, #sc.hatchSides)
+        elseif #sc.fluidIfSides == 0 then
             say("  %s..: input hatches but no fluid interface side -- skipped.", tag)
+        elseif not m then
+            say("  %s..: could not detect its fluid interface.", tag)
         else
-            local ifAddr, ifSide = detectFluidInterface(tp, fluidIfSides, fluidCandidates,
-                dbAddr, dropSlot, probePlasma.name)
-            if not ifAddr then
-                say("  %s..: could not detect its fluid interface.", tag)
-            else
-                pairedFluid = pairedFluid + 1
-                detail("  %s..: fluid interface %s.. on side %d, %d input hatch(es).",
-                    tag, ifAddr:sub(1, 8), ifSide, #hatchSides)
-                for _, hatchSide in ipairs(hatchSides) do
-                    fluidFeeds[#fluidFeeds + 1] = {
-                        transposer = tpAddr, interface = ifAddr,
-                        interfaceSide = ifSide, inputHatchSide = hatchSide,
-                    }
-                end
+            pairedFluid = pairedFluid + 1
+            for _, hatchSide in ipairs(sc.hatchSides) do
+                fluidFeeds[#fluidFeeds + 1] = {
+                    transposer = sc.addr, interface = m.interface,
+                    interfaceSide = m.side, inputHatchSide = hatchSide,
+                }
             end
         end
     end
-    step("Pairing transposers... %d item, %d fluid", pairedItem, pairedFluid)
 end
-stepEnd("Paired %d transposer(s) to an interface, %d to a fluid interface",
+say("Paired %d transposer(s) to an interface, %d to a fluid interface",
     pairedItem, pairedFluid)
 if #feeds == 0 then say("No usable input buses found -- nothing to configure."); return M end
 

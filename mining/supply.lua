@@ -193,20 +193,11 @@ function supply.kitsPerCraft(entry)
     return (n == math.huge) and 0 or n
 end
 
--- Litres of plasma the local net holds for a plasma pattern. Which side of the
--- network it shows up on depends on whether the local net has an ae2fc Fluid
--- Discretizer: with one, the drops are absorbed and it reads as fluid; without,
--- they sit there as drop ITEMS. Both are checked and the LARGER wins -- a
--- double-count would under-request and starve the modules, whereas the worst this
--- can do is over-stock. `stock list` shows both so it is obvious which is real.
+-- Litres of plasma the local net holds for a plasma pattern. The drop form only
+-- exists on the main net, where the Fluid Discretizer needs it to satisfy the
+-- pattern; what arrives here is always the fluid itself.
 function supply.plasmaInStock(entry, stock)
-    stock = stock or {}
-    local asFluid = (stock.fluids and stock.fluids[entry.plasma.name]) or 0
-    local asDrops = 0
-    for _, i in ipairs(entry.inputs) do
-        asDrops = asDrops + ((stock.items and stock.items[i.name]) or 0)
-    end
-    return math.max(asFluid, asDrops), asFluid, asDrops
+    return (stock and stock.fluids and stock.fluids[entry.plasma.name]) or 0
 end
 
 -- Whole kits the local net currently holds for a kit pattern. `stock` maps item
@@ -406,9 +397,8 @@ function supply.stock(catalog, net)
     if not net then return { items = items, fluids = fluids } end
 
     for _, entry in ipairs(catalog) do
-        -- Plasma inputs are looked up too: without a Fluid Discretizer the drops
-        -- stay in the local net as items, and that is the only place they show up.
-        do
+        -- Only item-bearing kinds are looked up here; plasma arrives as fluid.
+        if entry.kind == "kit" or entry.kind == "drone" then
             for _, i in ipairs(entry.inputs) do
                 if items[i.name] == nil then
                     items[i.name] = 0

@@ -112,15 +112,7 @@ local function cmdList()
             have = supply.kitsInStock(entry, stock.items)
         elseif entry.kind == "plasma" then
             what, unit = entry.plasma.name, "L"
-            local asFluid, asDrops
-            have, asFluid, asDrops = supply.plasmaInStock(entry, stock)
-            -- Which of the two is populated says whether the local net has an
-            -- ae2fc Fluid Discretizer absorbing the drops.
-            if asFluid > 0 and asDrops > 0 then
-                what = what .. string.format(" (%dL+%dd)", asFluid, asDrops)
-            elseif asDrops > 0 then
-                what = what .. " (as drops)"
-            end
+            have = supply.plasmaInStock(entry, stock)
         else
             what, unit = entry.drone and entry.drone.name or entry.label, ""
             have = supply.kitsInStock(entry, stock.items)

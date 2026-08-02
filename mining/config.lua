@@ -175,6 +175,16 @@ cfg.supply = {
         -- ["Radon Plasma"] = 64000,
     },
 
+    -- `plasma keep` tops a hatch up once it falls below this fraction of its
+    -- target, and then fills it right back to the top. The gap between the two is
+    -- the batch size, so a LOW value means big, infrequent transfers -- which is
+    -- the point: moving fluid costs a component call, and the hatch holds plenty.
+    hatchRefill = 0.5,
+
+    -- Seconds between checks in `plasma keep`. Only reads tank levels, so this is
+    -- cheap; the refill itself is rare.
+    hatchPoll = 5,
+
     -- How much plasma to keep in each module's INPUT HATCH, in meteors' worth.
     -- Expressing it per-meteor makes it scale itself with the plasma tier: 64
     -- meteors is 52,800 L of Helium but only 9,600 L of Plutonium-241, since a
@@ -182,8 +192,12 @@ cfg.supply = {
     -- more -- the interface keeps another 16,000 L staged behind it.
     --
     -- Note a module running 8 parallels chews through this eight times faster
-    -- than one running 1, so raise it if the feed cycle is slow.
-    hatchMeteors = 64,
+    -- than one running 1, so raise it if the feed cycle is slow. Clamped to what
+    -- the hatch can actually hold.
+    --
+    -- Sized for `plasma keep` to be lazy: a few hundred meteors means it tops a
+    -- hatch up every few minutes rather than every few seconds.
+    hatchMeteors = 256,
 
     -- Per-plasma override in LITRES, when the meteor figure above does not suit.
     hatchLitres = {

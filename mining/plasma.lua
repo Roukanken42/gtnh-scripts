@@ -7,12 +7,17 @@
 --   plasma                  what each module's hatch holds, and against what target
 --   plasma list             the same
 --   plasma <name>           switch every module to that plasma and fill
+--   plasma keep [name]      keep every hatch topped up until interrupted
 --   plasma fill             top the hatches up with whatever they already hold
 --   plasma drain            empty the hatches back into the network
 --
 -- Switching is not instant. A GT hatch holds ONE fluid, so a module already
 -- holding the old plasma has to be drained before it will take the new one --
 -- that is done for you here, but the staging tank then has to refill from ME.
+--
+-- `keep` is the one that runs: it holds every hatch full so a mining setup can be
+-- driven by hand, without the controller. It clears its staging on the way out,
+-- however it is stopped.
 --
 -- See config.lua for cfg.supply.hatchMeteors (how much to keep) and the per-
 -- station fluid fields.
@@ -212,6 +217,93 @@ local function cmdFill()
     end
 end
 
+-- Keeps every hatch topped up until interrupted. Meant for running a mining setup
+-- by hand: pick a plasma once and the modules stay fed without the controller.
+--
+-- Refills are deliberately lazy. A hatch is left alone until it drops below
+-- cfg.supply.hatchRefill of its target and is then filled right back to the top,
+-- so each transfer moves a large batch and the loop spends almost all its time
+-- just reading tank levels.
+local function cmdKeep(name)
+    local p
+    if name then
+        p = findPlasma(name)
+        if not p then
+            print("No plasma matches '" .. tostring(name) .. "'. Known:")
+            for _, x in ipairs(plasmas.list) do
+                print(string.format("  %d  %-22s %d L per meteor", x.tier, x.name, x.consumed))
+            end
+            return
+        end
+    else
+        -- No name: carry on with whatever the hatches already hold.
+        for _, m in ipairs(fluid) do
+            local hp = hatchPlasma(m)
+            if hp then p = hp; break end
+        end
+        if not p then
+            print("No plasma in any hatch to continue with -- name one: plasma keep <name>")
+            return
+        end
+    end
+
+    local slot, err = plasmaDbSlot(p)
+    if not slot then print("Cannot stage " .. p.name .. ": " .. tostring(err)); return end
+
+    -- Point every station at it, clearing out anything different first: a GT hatch
+    -- holds one fluid and will refuse the new one until the old is gone.
+    for _, m in ipairs(fluid) do
+        local _, label = hatchPlasma(m)
+        if label and label ~= p.name then
+            m.station:clearPlasmaSource()
+            local drained = m.station:drainHatch()
+            print(string.format("  %s  drained %d L of %s", m.address:sub(1, 8), drained, label))
+        end
+        local ok, serr = m.station:setPlasmaSource(slot)
+        if not ok then print(string.format("  %s  FAIL %s", m.address:sub(1, 8), tostring(serr))) end
+    end
+
+    local target = targetFor(p)
+    local refill = scfg.hatchRefill or 0.5
+    local poll = scfg.hatchPoll or 5
+    print(string.format("Keeping %d hatch(es) at %d L of %s, topping up below %d%%.",
+        #fluid, target, p.name, math.floor(refill * 100)))
+    print("Press q (or Ctrl-C) to stop.")
+
+    local event = require("event")
+    local topped = 0
+
+    local function loop()
+        while true do
+            for _, m in ipairs(fluid) do
+                local level, capacity = m.station:hatchTank()
+                local want = (capacity > 0) and math.min(target, capacity) or target
+                if level < want * refill then
+                    local moved = fillUp(m, want)
+                    topped = topped + 1
+                    print(string.format("[%s] %s  %d -> %d L (+%d)", os.date("%H:%M:%S"),
+                        m.address:sub(1, 8), level, m.station:hatchTank(), moved))
+                end
+            end
+            -- Waiting on the event queue rather than sleeping keeps q responsive.
+            local _, _, ch = event.pull(poll, "key_down")
+            if ch == 113 then return end   -- 'q'
+        end
+    end
+
+    local ok, lerr = pcall(loop)
+
+    -- Clean up whatever this command set, however it ended. Each station has up to
+    -- 16,000 L staged in an interface tank; leaving those configured would hold
+    -- that fluid out of the network indefinitely. The hatches keep what they have
+    -- -- that is fuel the modules are about to burn, not something to hand back.
+    for _, m in ipairs(fluid) do m.station:clearPlasmaSource() end
+    print(string.format("Stopped after %d top-up(s); staging cleared, hatches left full.", topped))
+
+    -- An interrupt is how this is meant to end; anything else is a real error.
+    if not ok and not tostring(lerr):find("interrupt") then error(lerr, 0) end
+end
+
 local function cmdDrain()
     for _, m in ipairs(fluid) do
         m.station:clearPlasmaSource()
@@ -226,6 +318,7 @@ local function usage(msg)
     print("Usage:")
     print("  plasma              what each hatch holds, and against what target")
     print("  plasma <name>       switch every module to that plasma and fill")
+    print("  plasma keep [name]  keep every hatch topped up until interrupted")
     print("  plasma fill         top the hatches up with what they already hold")
     print("  plasma drain        empty the hatches back into the network")
     print(string.format("Config: hatchMeteors=%s, dryRun=%s",
@@ -239,6 +332,8 @@ local a1 = args[1]
 
 if a1 == nil or a1 == "list" or a1 == "ls" then
     cmdList()
+elseif a1 == "keep" then
+    cmdKeep(args[2])
 elseif a1 == "fill" then
     cmdFill()
 elseif a1 == "drain" then

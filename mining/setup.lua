@@ -11,9 +11,9 @@
 --      a high one won't run a low-tier module.
 --   2. For each transposer, we stock that probe drone on each me_interface in
 --      turn and watch whether the transposer can see it -- that pairs the
---      transposer with its interface and tells us which side faces it. The
---      network has interfaces on OTHER nets too, so this is time-boxed, and we
---      use "did a drone leave the local net?" to skip non-local interfaces fast.
+--      transposer with its interface and tells us which side faces it. The base
+--      has interfaces on OTHER nets too, so the list is first narrowed to the
+--      ones whose own network actually holds the probe; only those can stage it.
 --   3. A module only mines with a drone, KITS and PLASMA all present, so both
 --      detection phases below need the other two inputs already satisfied:
 --        * kits arrive from the local net by themselves (they are chosen by the
@@ -54,11 +54,11 @@ local SIDE_LABEL = {
 }
 
 local POLL_INTERVAL = 0.5
--- Interface + side detection is time-boxed: the network has interfaces that are
--- NOT on the local mining net, and we don't want to wait on every one.
-local DETECT_PER_CANDIDATE = 3   -- s to watch one interface for the probe drone
-local DETECT_BUDGET = 30         -- s total to find a single transposer's interface
-local DETECT_LOCAL_HINT = 1.5    -- s: if no drone has left the local net by now, skip
+-- How long to watch one candidate interface for the probe to appear. There is no
+-- overall budget: candidates are narrowed to the networks that actually hold the
+-- probe first (see interfacesHolding), so the list is short by the time we get
+-- here, and giving up early looks exactly like "nothing feeds this transposer".
+local DETECT_PER_CANDIDATE = 3
 -- How long to wait for a miner to start mining once its bus has a drone.
 local MINER_TIMEOUT = 15
 -- How long to wait for already-running miners to actually stop after we switch
@@ -207,32 +207,72 @@ local function storeProbe(net, dbAddr, probe)
     return nil, "database did not accept the probe drone"
 end
 
--- Finds which me_interface a transposer feeds: stock the probe drone on each
--- interface in turn and see whether the transposer can see it. A drone leaving
--- the local net confirms the interface is local; the transposer seeing it
--- confirms it is the ADJACENT one. Time-boxed. Returns interfaceAddr, side.
-local function detectInterface(tp, ifSides, interfaceComps, dbAddr, dbSlot, probe, net)
-    local budget = computer.uptime() + DETECT_BUDGET
+-- The interfaces whose OWN network holds `label`. Only those can possibly stage
+-- the probe, so this turns a base full of ME interfaces into the handful worth
+-- probing: each survivor costs seconds to test, each rejection costs one call.
+-- An interface always reports its own network, whichever that is.
+local function interfacesHolding(interfaceComps, label)
+    local out = {}
     for _, c in ipairs(interfaceComps) do
-        if computer.uptime() >= budget then break end
+        local ok, p = pcall(component.proxy, c)
+        if ok and p and p.getItemsInNetwork ~= nil then
+            local okItems, items = pcall(p.getItemsInNetwork, { label = label })
+            if okItems and type(items) == "table" then
+                for _, it in ipairs(items) do
+                    -- re-checked: the ME filter is not reliably exact
+                    if it and it.label == label and (it.size or 0) > 0 then
+                        out[#out + 1] = c
+                        break
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
+-- The same, for a fluid.
+local function interfacesHoldingFluid(interfaceComps, label)
+    local out = {}
+    for _, c in ipairs(interfaceComps) do
+        local ok, p = pcall(component.proxy, c)
+        if ok and p and p.getFluidsInNetwork ~= nil then
+            local okF, fluids = pcall(p.getFluidsInNetwork)
+            if okF and type(fluids) == "table" then
+                for _, f in ipairs(fluids) do
+                    if f and f.label == label and (f.amount or 0) > 0 then
+                        out[#out + 1] = c
+                        break
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
+-- Finds which me_interface a transposer feeds: stock the probe drone on each
+-- candidate in turn and see whether the transposer can see it, which confirms it
+-- is the ADJACENT one. Returns interfaceAddr, side.
+--
+-- `interfaceComps` is expected to be pre-narrowed by interfacesHolding. There is
+-- no overall time budget: running out of it is indistinguishable from "nothing
+-- feeds this transposer", and that silence is expensive to debug. There is no
+-- "did a drone leave the local net" shortcut either -- a stocked item may still
+-- count as network inventory, and that test would then reject the RIGHT interface.
+local function detectInterface(tp, ifSides, interfaceComps, dbAddr, dbSlot, probe, net)
+    for _, c in ipairs(interfaceComps) do
         local ok, p = pcall(component.proxy, c)
         if ok and p and p.setInterfaceConfiguration ~= nil then
-            local before = localnet.countOf(probe.label, net)
             pcall(p.setInterfaceConfiguration, PROBE_CFG_SLOT, dbAddr, dbSlot, 1)
 
-            local foundSide, start = nil, computer.uptime()
-            local candEnd = start + DETECT_PER_CANDIDATE
-            while computer.uptime() < candEnd do
+            local foundSide = nil
+            local deadline = computer.uptime() + DETECT_PER_CANDIDATE
+            while computer.uptime() < deadline do
                 for _, side in ipairs(ifSides) do
                     if sideHasLabel(tp, side, probe.label) then foundSide = side; break end
                 end
                 if foundSide then break end
-                -- Skip fast if this interface clearly isn't stocking from the
-                -- local net (i.e. not on it) after a short grace period.
-                if computer.uptime() - start > DETECT_LOCAL_HINT
-                    and localnet.countOf(probe.label, net) >= before then
-                    break
-                end
                 os.sleep(POLL_INTERVAL)
             end
 
@@ -470,6 +510,8 @@ local M = {
     scanSides = scanSides,
     storeProbe = storeProbe,
     detectInterface = detectInterface,
+    interfacesHolding = interfacesHolding,
+    interfacesHoldingFluid = interfacesHoldingFluid,
     tankCount = tankCount,
     inventorySize = inventorySize,
     ensureKits = ensureKits,
@@ -596,6 +638,24 @@ if hatchTotal > 0 and plasmaEntry then
     end
 end
 
+-- Narrow the interfaces before probing them. Only a network that HOLDS the probe
+-- can stage it, so this is the difference between testing three interfaces and
+-- testing every one in the base at seconds apiece.
+local itemCandidates = interfacesHolding(interfaceComps, probe.label)
+print(string.format("Interfaces that can stage %s: %d of %d.",
+    probe.label, #itemCandidates, #interfaceComps))
+if #itemCandidates == 0 then
+    print("  None. Every interface's network was asked and none reported that drone,")
+    print("  so no input bus can be paired. Is the local net's interface adaptered?")
+end
+
+local fluidCandidates = interfaceComps
+if probePlasma then
+    fluidCandidates = interfacesHoldingFluid(interfaceComps, probePlasma.name)
+    print(string.format("Interfaces that can stage %s: %d of %d.",
+        probePlasma.name, #fluidCandidates, #interfaceComps))
+end
+
 for _, s in ipairs(scans) do
     local tpAddr, tp = s.addr, s.tp
     local ifSides, busSides = s.ifSides, s.busSides
@@ -606,7 +666,7 @@ for _, s in ipairs(scans) do
         if #ifSides == 0 then
             print(string.format("  %s..: input buses but no interface side -- skipped.", tag))
         else
-            local ifAddr, ifSide = detectInterface(tp, ifSides, interfaceComps, dbAddr, dbSlot, probe, net)
+            local ifAddr, ifSide = detectInterface(tp, ifSides, itemCandidates, dbAddr, dbSlot, probe, net)
             if not ifAddr then
                 print(string.format("  %s..: could not detect its interface (timed out).", tag))
             else
@@ -629,7 +689,7 @@ for _, s in ipairs(scans) do
         elseif #fluidIfSides == 0 then
             print(string.format("  %s..: input hatches but no fluid interface side -- skipped.", tag))
         else
-            local ifAddr, ifSide = detectFluidInterface(tp, fluidIfSides, interfaceComps,
+            local ifAddr, ifSide = detectFluidInterface(tp, fluidIfSides, fluidCandidates,
                 dbAddr, dropSlot, probePlasma.name)
             if not ifAddr then
                 print(string.format("  %s..: could not detect its fluid interface (timed out).", tag))

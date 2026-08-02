@@ -18,6 +18,7 @@
 -- See config.lua for the supply interface address and the target levels.
 
 local supply = require("supply")
+local transport = require("transport")
 local localnet = require("localnet")
 local cfg = require("config")
 
@@ -37,6 +38,24 @@ if not net then
 end
 
 -- ---- helpers ---------------------------------------------------------------
+
+-- The catalog, built once. A database and a scratch slot are passed so each
+-- pattern's REAL output item is read back: a fake pattern's output is usually a
+-- renamed item, and the pattern slot only reports the underlying type. Without
+-- this, "Mining Kit: Steel" reads as "Steel Drill Tip" and a request would craft
+-- drill tips into main-net storage instead of pushing anything across.
+local catalogCache, unknownCache
+local function getCatalog()
+    if not catalogCache then
+        local scratch = cfg.database and transport.reserveDbSlot(cfg.database) or nil
+        catalogCache, unknownCache = supply.catalog(itf, cfg.database, scratch)
+        if not cfg.database then
+            print("WARNING: no database configured -- pattern outputs cannot be resolved,")
+            print("         so nothing can be requested. Run `setup`, or set cfg.database.")
+        end
+    end
+    return catalogCache, unknownCache
+end
 
 local function describeInputs(entry)
     local parts = {}
@@ -84,19 +103,42 @@ local function cmdPatterns()
     local raw = supply.readPatterns(itf)
     print(string.format("Interface %s: %d pattern(s) found in %d slots probed.",
         itf.address:sub(1, 8), #raw, supply.MAX_PATTERN_SLOTS))
+
+    local database = cfg.database
+    local scratch = database and require("transport").reserveDbSlot(database) or nil
+    if database then
+        local ok, p = pcall(require("component").proxy, database)
+        database = ok and p or nil
+    end
+
     for _, p in ipairs(raw) do
         local entry = supply.classify(p)
+        if database and entry.kind ~= "unknown" then
+            local ok, err = supply.resolveOutput(itf, entry, database, scratch)
+            if not ok then entry.outputError = err end
+        end
         print(string.format("  [%2d] %-34s %s", p.index, tostring(entry.label), entry.kind))
         print("       in : " .. describeInputs(entry))
+        -- A renamed fake output reads back from the pattern slot as its BASE item.
+        -- When these differ, the slot name is a real craftable in its own right and
+        -- requesting it would craft that instead of pushing anything.
+        if entry.slotLabel and entry.slotLabel ~= entry.label then
+            print("       out: " .. entry.label .. "  (slot reports the base item: "
+                .. entry.slotLabel .. ")")
+        end
+        if entry.outputError then print("       out: UNRESOLVED -- " .. entry.outputError) end
         if entry.reason then print("       why: " .. entry.reason) end
     end
     if #raw == 0 then
         print("  Nothing. Is the adapter on the interface that holds the patterns?")
     end
+    if not database then
+        print("  (no database configured, so real output labels could not be read)")
+    end
 end
 
 local function cmdList()
-    local catalog, unknown = supply.catalog(itf)
+    local catalog, unknown = getCatalog()
     if #catalog == 0 and #unknown == 0 then
         print("The supply interface has no patterns. Try `stock patterns`.")
         return
@@ -139,7 +181,7 @@ local function cmdList()
 end
 
 local function cmdMaterial(name, kits)
-    local catalog = supply.catalog(itf)
+    local catalog = getCatalog()
     for _, entry in ipairs(catalog) do
         if entry.kind == "kit" and entry.material:lower() == name:lower() then
             local crafts = math.max(1, math.ceil(kits / math.max(1, entry.perCraft)))
@@ -153,7 +195,7 @@ local function cmdMaterial(name, kits)
 end
 
 local function cmdPlasma(name, litres)
-    local catalog = supply.catalog(itf)
+    local catalog = getCatalog()
     for _, entry in ipairs(catalog) do
         if entry.kind == "plasma" and entry.plasma.name:lower():sub(1, #name) == name:lower() then
             local crafts = math.max(1, math.ceil((litres or 0) / math.max(1, entry.perCraft)))
@@ -173,7 +215,7 @@ local function cmdPlasma(name, litres)
 end
 
 local function cmdAuto()
-    local catalog = supply.catalog(itf)
+    local catalog = getCatalog()
     local stock = supply.stock(catalog, net)
     -- A fresh latch each run: the hysteresis in supply.plan is for the
     -- controller's loop, where the table persists across cycles.

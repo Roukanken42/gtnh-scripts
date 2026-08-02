@@ -75,6 +75,9 @@ local PROBE_DB_SLOT = 1
 -- slot its ae2fc drop goes in.
 local PROBE_FLUID_TANK = 0
 local PROBE_DROP_SLOT = 2
+-- Scratch slot for reading a pattern's real output back; kept apart from the drop
+-- slot so resolving a catalog cannot overwrite the staged plasma.
+local PROBE_SCRATCH_SLOT = 3
 -- Plasma put in a hatch to make a module runnable. One operation costs
 -- (consumed x parallels), at worst 825 x 8 for Helium, so this covers a few.
 local PROBE_PLASMA_L = 8000
@@ -215,11 +218,13 @@ end
 -- from the supply interface's kit pattern rather than being guessed at.
 -- Returns true, or false + reason (which is a warning, not a hard stop: the kits
 -- may have been put there by hand).
-local function ensureKits(net, material, itf)
+local function ensureKits(net, material, itf, dbAddr)
     if not itf then return false, "no supply interface found to request kits from" end
 
+    -- Resolved against the database so the request targets the fake pattern's real
+    -- (renamed) output rather than the base item its slot reports.
     local entry
-    for _, e in ipairs(supply.catalog(itf)) do
+    for _, e in ipairs(supply.catalog(itf, dbAddr, PROBE_SCRATCH_SLOT)) do
         if e.kind == "kit" and e.material == material then entry = e; break end
     end
     if not entry then
@@ -260,7 +265,7 @@ local function stagePlasmaDrop(itf, dbAddr)
 
     -- Any plasma will do for detection; take the cheapest per litre to probe with.
     local best
-    for _, e in ipairs(supply.catalog(itf)) do
+    for _, e in ipairs(supply.catalog(itf, database, PROBE_SCRATCH_SLOT)) do
         if e.kind == "plasma" and (not best or e.plasma.tier < best.plasma.tier) then best = e end
     end
     if not best then return nil, "the supply interface has no plasma pattern" end
@@ -441,7 +446,7 @@ local supplyItf, supplyErr = supply.find(nil)
 if not supplyItf then print("WARNING: " .. tostring(supplyErr)) end
 local probeMaterial = (probeDrone.material) or (drones.get(probe.tier or 0) or {}).material
 if probeMaterial then
-    local okKits, kitMsg = ensureKits(net, probeMaterial, supplyItf)
+    local okKits, kitMsg = ensureKits(net, probeMaterial, supplyItf, dbAddr)
     print((okKits and "Kits OK: " or "WARNING: kits -- ") .. tostring(kitMsg))
     if not okKits then
         print("       detection needs them; continuing in case they are stocked by hand.")
@@ -697,6 +702,7 @@ local okdb, db = pcall(component.proxy, dbAddr)
 if okdb and db and db.clear then
     pcall(db.clear, PROBE_DB_SLOT)
     pcall(db.clear, PROBE_DROP_SLOT)
+    pcall(db.clear, PROBE_SCRATCH_SLOT)
 end
 
 -- 5. Build stations, assign a distinct interface slot per shared interface.

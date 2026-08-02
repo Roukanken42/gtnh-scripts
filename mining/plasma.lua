@@ -92,7 +92,11 @@ local function plasmaDbSlot(p)
     local itf, err = supply.find(scfg.interface)
     if not itf then return nil, "supply interface: " .. tostring(err) end
 
-    local catalog = supply.catalog(itf)
+    -- Resolved against the database: a fake pattern's output is a renamed item and
+    -- the pattern slot only reports its base type, so requesting by that would
+    -- craft the wrong thing (see supply.resolveOutput).
+    local scratch = transport.reserveDbSlot(cfg.database)
+    local catalog = supply.catalog(itf, cfg.database, scratch)
     local entry
     for _, e in ipairs(catalog) do
         if e.kind == "plasma" and e.plasma.tier == p.tier then entry = e; break end

@@ -127,7 +127,11 @@ function supply.classify(pattern, materials)
     materials = materials or supply.MATERIALS
     local outputs = slots(pattern.outputs)
     local entry = {
+        -- The item TYPE's name, which is all a pattern slot reports. For a renamed
+        -- fake output this is NOT what to request against -- supply.resolveOutput
+        -- replaces it with the real label and moves this to entry.slotLabel.
         label = outputs[1] and outputs[1].name,
+        outputIndex = outputs[1] and outputs[1].index,
         index = pattern.index,
         inputs = slots(pattern.inputs),
     }
@@ -336,12 +340,27 @@ end
 -- Everything the supply interface can push, classified. Returns the usable
 -- entries and, separately, the ones that could not be identified (each with a
 -- .reason) so they can be shown rather than silently dropped.
-function supply.catalog(itf)
+--
+-- Pass `database` (a proxy) and a scratch `dbSlot` to resolve each pattern's true
+-- output item. Without it, entry.label is only the output item TYPE's name, which
+-- for a renamed fake output points at a different craftable entirely -- so any
+-- caller that intends to REQUEST something must supply them.
+function supply.catalog(itf, database, dbSlot)
+    if type(database) == "string" then
+        local ok, p = pcall(components().proxy, database)
+        database = ok and p or nil
+    end
     local usable, unknown = {}, {}
     for _, p in ipairs(supply.readPatterns(itf)) do
         local entry = supply.classify(p)
         if entry.kind == "unknown" then unknown[#unknown + 1] = entry
-        else usable[#usable + 1] = entry end
+        else
+            if database and dbSlot then
+                local ok, err = supply.resolveOutput(itf, entry, database, dbSlot)
+                if not ok then entry.outputError = err end
+            end
+            usable[#usable + 1] = entry
+        end
     end
     table.sort(usable, function(a, b)
         if a.kind ~= b.kind then return a.kind < b.kind end
@@ -358,52 +377,121 @@ function supply.request(itf, entry, crafts)
     if not entry or not entry.label then return nil, "entry has no requestable output" end
     crafts = math.max(1, math.floor(crafts or 1))
 
-    local ok, list = pcall(itf.getCraftables, { label = entry.label })
-    if not ok or type(list) ~= "table" then
-        return nil, "getCraftables failed for '" .. entry.label .. "'"
+    -- Without a resolved output we only have the item TYPE's name, which may name
+    -- a completely different craftable -- a real "Steel Drill Tip" recipe rather
+    -- than the fake pattern that pushes drill tips across. Refuse rather than
+    -- craft the wrong thing into main-net storage.
+    if not entry.output then
+        return nil, "the output of pattern " .. tostring(entry.index) .. " has not been resolved"
+            .. (entry.outputError and (" (" .. entry.outputError .. ")") or "")
+            .. " -- catalog() needs a database to tell a renamed fake output from its base item"
     end
+    local want = entry.output
+
+    local ok, list = pcall(itf.getCraftables, { label = want.label })
+    if not ok or type(list) ~= "table" then
+        return nil, "getCraftables failed for '" .. tostring(want.label) .. "'"
+    end
+
+    -- Match on the whole identity. A renamed fake output shares its name and
+    -- damage with the plain item, so the label is what separates them -- and the
+    -- filter's matching is not reliably exact, hence the re-check.
+    local found
     for _, c in ipairs(list) do
         local okStack, stack = pcall(c.getItemStack)
-        if okStack and type(stack) == "table" and stack.label == entry.label then
-            local okReq, job = pcall(c.request, crafts)
-            if not okReq then return nil, "request failed: " .. tostring(job) end
-            return job
+        if okStack and type(stack) == "table"
+            and stack.label == want.label
+            and (want.name == nil or stack.name == want.name)
+            and (want.damage == nil or stack.damage == want.damage) then
+            if found then
+                return nil, "'" .. tostring(want.label) .. "' matches more than one craftable"
+                    .. " -- give the fake pattern's output a name nothing else crafts"
+            end
+            found = c
         end
     end
-    return nil, "'" .. entry.label .. "' is not craftable on the supply network"
+    if not found then
+        return nil, "'" .. tostring(want.label) .. "' is not craftable on the supply network"
+    end
+
+    local okReq, job = pcall(found.request, crafts)
+    if not okReq then return nil, "request failed: " .. tostring(job) end
+    return job
 end
 
--- Writes a plasma pattern's ae2fc DROP into a database slot, which is the form
--- setFluidInterfaceConfiguration wants -- and the only place to get one, since
--- the local net holds plasma as fluid and never as drops.
+-- Copies one slot of a pattern into a database and hands back what landed there.
+-- This is the only way to see a pattern slot's REAL item: getInterfacePattern
+-- reports a slot's `name` as the item TYPE's localized name, which for a renamed
+-- item is not its display label at all.
 --
--- storeInterfacePatternInput addresses inputs by slot index, and nothing says
--- whether that counts from 0 or 1, so the pattern's own key is tried first and
--- the neighbours after; the database is read back each time to see which took
--- (store() is silent on failure, exactly as Station:ensureDbSlot found for items).
--- Returns true, or false + error.
-function supply.storePlasmaDrop(itf, entry, database, dbSlot)
-    if not entry or entry.kind ~= "plasma" then return false, "not a plasma pattern" end
-    if itf.storeInterfacePatternInput == nil then
-        return false, "interface has no storeInterfacePatternInput"
-    end
-    local input = entry.inputs[1]
-    if not input then return false, "plasma pattern has no input to store" end
+-- The store methods address slots by index and nothing says whether that counts
+-- from 0 or 1, so the pattern's own key is tried first and its neighbours after;
+-- the database is read back each time to see which took, because store() is
+-- silent on failure (exactly as Station:ensureDbSlot found for items).
+-- Returns the stack, or nil + error.
+local function storePatternSlot(itf, method, patternIndex, slotIndex, database, dbSlot)
+    if itf[method] == nil then return nil, "interface has no " .. method end
 
-    local base = input.index or 1
+    local base = slotIndex or 1
     for _, idx in ipairs({ base, base + 1, base - 1 }) do
         pcall(database.clear, dbSlot)
-        local ok = pcall(itf.storeInterfacePatternInput, entry.index, idx, database.address, dbSlot)
+        local ok = pcall(itf[method], patternIndex, idx, database.address, dbSlot)
         if ok then
             local okGet, stack = pcall(database.get, dbSlot)
             if okGet and type(stack) == "table" and (stack.name or stack.label) then
-                return true
+                return stack
             end
         end
     end
     pcall(database.clear, dbSlot)
-    return false, "could not store the drop for " .. entry.plasma.name
-        .. " (pattern " .. tostring(entry.index) .. ")"
+    return nil, method .. " found nothing at pattern " .. tostring(patternIndex)
+        .. " slot " .. tostring(base)
+end
+
+supply.storePatternSlot = storePatternSlot
+
+-- Writes a plasma pattern's ae2fc DROP into a database slot, which is the form
+-- setFluidInterfaceConfiguration wants -- and the only place to get one, since
+-- the local net holds plasma as fluid and never as drops.
+-- Returns true, or false + error.
+function supply.storePlasmaDrop(itf, entry, database, dbSlot)
+    if not entry or entry.kind ~= "plasma" then return false, "not a plasma pattern" end
+    local input = entry.inputs[1]
+    if not input then return false, "plasma pattern has no input to store" end
+
+    local stack, err = storePatternSlot(itf, "storeInterfacePatternInput",
+        entry.index, input.index, database, dbSlot)
+    if not stack then
+        return false, "could not store the drop for " .. entry.plasma.name .. ": " .. tostring(err)
+    end
+    return true
+end
+
+-- Resolves a pattern's true OUTPUT item -- the thing a craft request has to be
+-- made against. Needed because a fake pattern's output is usually a renamed item,
+-- and the pattern slot only reports the underlying type: a "Mining Kit: Steel"
+-- output reads back as "Steel Drill Tip", which is also a perfectly real craftable
+-- on the main net. Requesting that would craft drill tips into main-net storage
+-- and push nothing anywhere.
+--
+-- Fills entry.output = { label, name, damage, hasTag } and repoints entry.label at
+-- the true label, keeping the type's name in entry.slotLabel for display.
+-- Returns true, or false + error.
+function supply.resolveOutput(itf, entry, database, dbSlot)
+    if not entry or not entry.outputIndex then return false, "entry has no output slot" end
+    local stack, err = storePatternSlot(itf, "storeInterfacePatternOutput",
+        entry.index, entry.outputIndex, database, dbSlot)
+    if not stack then return false, tostring(err) end
+
+    entry.output = {
+        label = stack.label, name = stack.name,
+        damage = stack.damage, hasTag = stack.hasTag,
+    }
+    if type(stack.label) == "string" and stack.label ~= "" then
+        entry.slotLabel = entry.label
+        entry.label = stack.label
+    end
+    return true
 end
 
 -- Litres of plasma a module's input hatch should hold. Expressed in METEORS'

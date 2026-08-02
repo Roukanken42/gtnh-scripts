@@ -126,23 +126,6 @@ cfg.budget = {
 -- on. Leave nil to assume computation is never the limit.
 cfg.computation = nil
 
--- ---- What `setup` discovered -----------------------------------------------
--- Merged last so it can fill in anything left unset above, and never clobbers
--- something you set by hand. stations.lua is machine-specific and not in the repo;
--- re-run `setup` to regenerate it.
-do
-    local ok, data = pcall(require, "stations")
-    if ok and type(data) == "table" then
-        if cfg.database == nil then cfg.database = data.database end
-        if cfg.supply.interface == nil then cfg.supply.interface = data.supply end
-        if type(data.stations) == "table" then
-            for addr, st in pairs(data.stations) do
-                if cfg.stations[addr] == nil then cfg.stations[addr] = st end
-            end
-        end
-    end
-end
-
 -- ---- Keeping the local net stocked -----------------------------------------
 -- Consumables reach the local net through an ME Interface on the MAIN net that
 -- carries fake crafting patterns: requesting one pushes that pattern's INPUTS
@@ -212,5 +195,22 @@ cfg.supply = {
     -- deficit in one job.
     maxCrafts = nil,
 }
+
+-- ---- What `setup` discovered -----------------------------------------------
+-- Dead last, after every cfg table above exists: it fills in whatever was left
+-- unset and never clobbers something you set by hand. stations.lua is
+-- machine-specific and not in the repo; re-run `setup` to regenerate it.
+do
+    local ok, data = pcall(require, "stations")
+    if ok and type(data) == "table" then
+        if cfg.database == nil then cfg.database = data.database end
+        if cfg.supply.interface == nil then cfg.supply.interface = data.supply end
+        if type(data.stations) == "table" then
+            for addr, st in pairs(data.stations) do
+                if cfg.stations[addr] == nil then cfg.stations[addr] = st end
+            end
+        end
+    end
+end
 
 return cfg

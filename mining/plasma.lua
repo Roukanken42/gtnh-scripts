@@ -1,27 +1,6 @@
--- Manual plasma tool -- drives each module's plasma feed and shows what is in
--- the hatches. The controller will do this on its own; until then this is how
--- you exercise the fluid half of a station (ME fluid interface -> transposer ->
--- input hatch) and watch a switch actually take.
---
--- Run from this folder:
---   plasma                  what each module's hatch holds, and against what target
---   plasma list             the same
---   plasma <name>           switch every module to that plasma and fill
---   plasma keep [name]      keep every hatch topped up until interrupted
---   plasma fill             top the hatches up with whatever they already hold
---   plasma drain            empty the hatches back into the network
---
--- Switching is not instant. A GT hatch holds ONE fluid, so a module already
--- holding the old plasma has to be drained before it will take the new one --
--- that is done for you here, but the staging tank then has to refill from ME.
---
--- `keep` is the one that runs: it holds every hatch full so a mining setup can be
--- driven by hand, without the controller. However it is stopped it hands
--- everything back -- staging cleared, hatches drained -- because keeping fluid in
--- the hatches is precisely what running it is for.
---
--- See config.lua for cfg.supply.hatchMeteors (how much to keep) and the per-
--- station fluid fields.
+-- Manual plasma tool: drives each module's plasma feed and shows what is in the
+-- hatches. Exercises the fluid half of a station -- ME fluid interface,
+-- transposer, input hatch. See `plasma --help`.
 
 local miners = require("lib.hw.miners")
 local transport = require("lib.hw.transport")
@@ -30,7 +9,35 @@ local supply = require("lib.hw.supply")
 local plasmas = require("lib.gtnh.plasmas")
 local localnet = require("lib.hw.localnet")
 local computer = require("computer")
+local cli = require("lib.cli")
 local cfg = require("config")
+
+local ctx = cli.start({
+    name = "plasma",
+    summary = "Drive each module's plasma feed, and see what the hatches hold.",
+    usage = {
+        { "plasma",             "what each hatch holds, and against what target" },
+        { "plasma list",        "the same" },
+        { "plasma <name>",      "switch every module to that plasma and fill" },
+        { "plasma keep [name]", "hold every hatch full until stopped" },
+        { "plasma fill",        "top the hatches up with what they already hold" },
+        { "plasma drain",       "empty the hatches back into the network" },
+    },
+    notes = {
+        "`keep` is the one that runs: it holds every hatch full so a mining setup "
+            .. "can be driven by hand, without the controller. Press q or Ctrl-C to "
+            .. "stop it. However it ends it hands everything back -- staging "
+            .. "cleared, hatches drained -- because keeping fluid in the hatches is "
+            .. "precisely what running it is for.",
+        "Switching is not instant. A GT hatch holds ONE fluid, so a module already "
+            .. "holding the old plasma is drained before it will take the new one, "
+            .. "and the staging tank then has to refill from ME.",
+        "How much to keep (cfg.supply.hatchMeteors, in meteors' worth, so it scales "
+            .. "itself with the plasma tier) and the per-station fluid fields live "
+            .. "in config.lua.",
+    },
+}, ...)
+if not ctx then return end
 
 local scfg = cfg.supply or {}
 
@@ -341,34 +348,18 @@ local function cmdDrain()
     end
 end
 
-local function usage(msg)
-    if msg then print(msg) end
-    print("Usage:")
-    print("  plasma              what each hatch holds, and against what target")
-    print("  plasma <name>       switch every module to that plasma and fill")
-    print("  plasma keep [name]  keep every hatch topped up until interrupted")
-    print("                      (returns the fluid to the network on the way out)")
-    print("  plasma fill         top the hatches up with what they already hold")
-    print("  plasma drain        empty the hatches back into the network")
-    print(string.format("Config: hatchMeteors=%s, dryRun=%s",
-        tostring(scfg.hatchMeteors or 64), tostring(cfg.dryRun)))
-end
-
 -- ---- dispatch --------------------------------------------------------------
 
-local args = { ... }
-local a1 = args[1]
+local a1 = ctx.args[1]
 
 if a1 == nil or a1 == "list" or a1 == "ls" then
     cmdList()
 elseif a1 == "keep" then
-    cmdKeep(args[2])
+    cmdKeep(ctx.args[2])
 elseif a1 == "fill" then
     cmdFill()
 elseif a1 == "drain" then
     cmdDrain()
-elseif a1 == "help" or a1 == "-h" then
-    usage()
 else
     cmdSet(a1)
 end

@@ -52,6 +52,30 @@ local dbslots = require("lib.hw.db")
 local supply = require("lib.hw.supply")
 local stationfile = require("lib.stations")
 local meteors = require("lib.gtnh.meteors")
+local cli = require("lib.cli")
+
+local ctx = cli.start({
+    name = "setup",
+    summary = "Work out how to feed every mining module, with no questions asked.",
+    usage = {
+        { "setup", "discover everything and write data/stations.lua" },
+    },
+    notes = {
+        "Discovery needs a module to START mining, and a module only mines with a "
+            .. "drone, KITS and PLASMA all present. So setup stocks the probe "
+            .. "drone's kits, stages plasma itself, and points each module at a "
+            .. "distance where something is actually in range.",
+        "It runs in two passes. PHASE A primes every hatch and feeds one bus at a "
+            .. "time, pairing buses with miners; PHASE B puts a drone in every bus "
+            .. "and fills one hatch at a time, pairing hatches with miners.",
+        "Everything it touches is put back: interface staging cleared, buses "
+            .. "emptied, hatches drained, and each module's own parameters restored "
+            .. "before its on/off state is.",
+        "Safe to re-run. It regenerates data/stations.lua from scratch, and "
+            .. "config.lua is never written -- anything you set there wins.",
+    },
+}, ...)
+if not ctx then return end
 
 local INPUT_BUS_NAME = "gt.blockmachines"
 local INTERFACE_NAMES = {
@@ -107,53 +131,13 @@ local STAGING_L = 16000
 -- A default run is meant to fit on one screen: the narrative, the result, and
 -- anything that went wrong. Detail that only matters once something HAS gone
 -- wrong -- per-side classification, per-candidate probe outcomes, the database
--- slot map -- is behind --verbose.
-local verbose = false
-for _, a in ipairs({ ... }) do
-    if a == "-v" or a == "--verbose" then verbose = true end
-end
+-- slot map -- is behind --verbose. lib/cli.lua does the work.
+local verbose = ctx.flags.verbose
 
-local term = nil
-do local okT, t = pcall(require, "term"); term = okT and t or nil end
-
-local function fmt(f, ...)
-    if select("#", ...) > 0 then return string.format(f, ...) end
-    return f
-end
-
--- A step line rewrites itself in place, so "3/9 primed" does not become nine
--- lines of scroll. `stepping` tracks whether one is still open, because anything
--- printed on top of it would land mid-line.
-local stepping = false
-
-local function say(f, ...)
-    if stepping then io.write("\n"); stepping = false end
-    print(fmt(f, ...))
-end
-
-local function detail(f, ...)
-    if verbose then say(f, ...) end
-end
-
--- With --verbose each update is printed instead: the detail lines in between
--- would scroll a self-rewriting line away anyway.
-local function step(f, ...)
-    local line = fmt(f, ...)
-    if verbose or not term then say(line); return end
-    local ok = pcall(function()
-        local _, y = term.getCursor()
-        term.setCursor(1, y)
-        term.clearLine()
-        io.write(line)
-    end)
-    if ok then stepping = true else print(line) end
-end
-
--- Closes a step line, optionally replacing it with its final form.
-local function stepEnd(f, ...)
-    if f then step(f, ...) end
-    if stepping then io.write("\n"); stepping = false end
-end
+local function say(f, ...) cli.say(f, ...) end
+local function detail(f, ...) if verbose then cli.say(f, ...) end end
+local function step(f, ...) cli.step(ctx, f, ...) end
+local function stepEnd(f, ...) cli.stepEnd(ctx, f, ...) end
 
 -- ---- helpers -------------------------------------------------------------
 

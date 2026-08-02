@@ -1,46 +1,45 @@
--- Manual targeter tool -- asks target.lua what to set a mining module to, and
--- prints the answer. The controller will do this on its own; until then this is
--- how you interrogate the search by hand (and how you sanity-check a cost table
--- after tuning it).
---
--- Run from this folder:
---   plan <material> [rate]          cheapest way to get <material>, optionally at
---                                   a demanded rate in items/second
---   plan <material> [rate] +<material>[:weight] ...
---                                   add secondary targets that may nudge the pick
---   plan ... --fast                 ignore the demanded rate; run flat out
---   plan ... --all                  search every module tier, not just the ones
---                                   this network actually has
---
--- <material> is an oredict name ("oreEndstoneIron") or a bare material ("Iron").
--- The bare form can span prefixes -- oreEndstonePlatinum and dustPlatinum are
--- different items -- and the header says so when it happens.
---
--- Costs, budgets and what you can actually make live in config.lua.
+-- Manual targeter tool: asks lib/calc/target.lua what to set a mining module to,
+-- and prints the answer. This is how you interrogate the search by hand, and how
+-- you sanity-check a cost table after tuning it. See `plan --help`.
 
 local targetm = require("lib.calc.target")
 local drones = require("lib.gtnh.drones")
+local cli = require("lib.cli")
 local cfg = require("config")
+
+local ctx = cli.start({
+    name = "plan",
+    summary = "Find the cheapest module configuration that serves a demand.",
+    usage = {
+        { "plan <material>",            "rank configurations by cost per item" },
+        { "plan <material> <rate>",     "and cover that many items per second" },
+        { "plan <material> +<mat>[:w]", "add a secondary target that may nudge the pick" },
+    },
+    flags = {
+        { "--fast", "run flat out, ignoring the demanded rate" },
+        { "--all",  "search every module tier, not just the ones on this network" },
+    },
+    notes = {
+        "<material> is an oredict name (oreEndstoneIron) or a bare material "
+            .. "(Iron). The bare form can span prefixes -- oreEndstonePlatinum and "
+            .. "dustPlatinum are different items -- and the output says so when it "
+            .. "happens.",
+        "A secondary target defaults to weight 0.5; write +Gold:0.2 to change it. "
+            .. "Weights only matter relative to each other: a secondary pulls the "
+            .. "choice when its weighted rate outweighs the primary it costs.",
+        "Costs, budgets and what you can actually make live in config.lua. Run "
+            .. "this after tuning them to see what changed.",
+    },
+}, ...)
+if not ctx then return end
 
 -- ---- arguments -------------------------------------------------------------
 
-local args = { ... }
+local flags = ctx.flags
+local demand, primary = {}, nil
 
-local function usage(msg)
-    if msg then print(msg) end
-    print("Usage:")
-    print("  plan <material> [rate]                cheapest source of <material>")
-    print("  plan <material> [rate] +<mat>[:w]     with secondary targets")
-    print("  plan ... --fast                       flat out, ignore the rate")
-    print("  plan ... --all                        search every module tier")
-    print("Materials are oredict names (oreEndstoneIron) or bare (Iron).")
-end
-
-local demand, flags, primary = {}, {}, nil
-for _, a in ipairs(args) do
-    if a:sub(1, 2) == "--" then
-        flags[a:sub(3)] = true
-    elseif a:sub(1, 1) == "+" then
+for _, a in ipairs(ctx.args) do
+    if a:sub(1, 1) == "+" then
         local name, w = a:match("^%+([^:]+):?(.*)$")
         demand[name] = { weight = tonumber(w) or 0.5, rate = 0 }
     elseif primary == nil then
@@ -49,12 +48,12 @@ for _, a in ipairs(args) do
     elseif tonumber(a) then
         demand[primary].rate = tonumber(a)
     else
-        usage("Unrecognized argument '" .. a .. "'.")
+        cli.usage(ctx, "Unrecognized argument '" .. a .. "'.")
         return
     end
 end
 
-if primary == nil then usage(); return end
+if primary == nil then cli.help(ctx.spec); return end
 
 -- ---- which modules ---------------------------------------------------------
 -- Search the tiers this network actually has, so the answer is one you can act
@@ -93,7 +92,7 @@ local result, err = targetm.search(demand, {
 })
 print("")
 
-if not result then usage("Error: " .. tostring(err)); return end
+if not result then cli.usage(ctx, "Error: " .. tostring(err)); return end
 
 -- ---- output ----------------------------------------------------------------
 

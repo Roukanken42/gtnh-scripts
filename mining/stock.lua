@@ -1,26 +1,36 @@
--- Manual supply tool -- shows what the main net can push into the local mining
--- net, and pushes it. The controller will do this on its own; until then this is
--- how you exercise the whole path (adapter -> patterns -> craft request -> local
--- net) and check a target table after editing it.
---
--- Run from this folder:
---   stock                    what is on offer, and stock against target
---   stock list               the same
---   stock patterns           RAW pattern dump -- run this first, see below
---   stock <material> [kits]  push kits of a drone material (default: 1)
---   stock plasma <name> [L]  push litres of a plasma pattern
---   stock auto               request whatever the targets say is missing
---
--- `stock patterns` is the one to run first on a fresh setup. Everything else
--- depends on getInterfacePattern returning what the docs say it does -- if the
--- dump looks wrong, nothing built on top of it will behave.
---
--- See config.lua for the supply interface address and the target levels.
+-- Manual supply tool: shows what the main net can push into the local mining net,
+-- and pushes it. Exercises the whole path -- adapter, patterns, craft request,
+-- local net -- before there is a controller. See `stock --help`.
 
 local supply = require("lib.hw.supply")
 local dbslots = require("lib.hw.db")
 local localnet = require("lib.hw.localnet")
+local cli = require("lib.cli")
 local cfg = require("config")
+
+local ctx = cli.start({
+    name = "stock",
+    summary = "See what the main net can push into the local mining net, and push it.",
+    usage = {
+        { "stock",                   "what is on offer, and stock against target" },
+        { "stock list",              "the same" },
+        { "stock patterns",          "raw pattern dump -- run this one first" },
+        { "stock <material> [kits]", "push kits of a drone material (default 1)" },
+        { "stock plasma <name> [L]", "push litres of a plasma pattern" },
+        { "stock auto",              "request whatever the targets say is missing" },
+    },
+    notes = {
+        "`stock patterns` is the one to run first on a fresh setup. Everything "
+            .. "else rests on getInterfacePattern returning what the docs say it "
+            .. "does -- if that dump looks wrong, nothing built on top of it will "
+            .. "behave.",
+        "Consumables cross from the main net through fake crafting patterns: "
+            .. "requesting one pushes that pattern's INPUTS over. The output is a "
+            .. "cosmetic handle, so what a pattern is FOR is read off its inputs.",
+        "The supply interface address and the target levels live in config.lua.",
+    },
+}, ...)
+if not ctx then return end
 
 local scfg = cfg.supply or {}
 
@@ -238,20 +248,9 @@ local function cmdAuto()
     for _, n in ipairs(notes) do print("note: " .. n) end
 end
 
-local function usage(msg)
-    if msg then print(msg) end
-    print("Usage:")
-    print("  stock                    what is on offer, and stock against target")
-    print("  stock patterns           raw pattern dump (run this first)")
-    print("  stock <material> [kits]  push kits of a drone material")
-    print("  stock plasma <name> [L]  push litres of a plasma pattern")
-    print("  stock auto               request whatever the targets say is missing")
-end
-
 -- ---- dispatch --------------------------------------------------------------
 
-local args = { ... }
-local a1, a2, a3 = args[1], args[2], args[3]
+local a1, a2, a3 = ctx.args[1], ctx.args[2], ctx.args[3]
 
 if a1 == nil or a1 == "list" or a1 == "ls" then
     cmdList()
@@ -261,10 +260,8 @@ elseif a1 == "auto" then
     cmdAuto()
 elseif a1 == "plasma" and a2 then
     cmdPlasma(a2, tonumber(a3) or 1)
-elseif a1 == "help" or a1 == "-h" then
-    usage()
 elseif a2 == nil or tonumber(a2) then
     cmdMaterial(a1, tonumber(a2) or 1)
 else
-    usage("Unrecognized arguments.")
+    cli.usage(ctx, "Unrecognized arguments.")
 end

@@ -1,23 +1,31 @@
--- Manual drone tool -- a CLI for loading mining drones and checking status,
--- used to exercise the whole transport path (config -> station -> ME -> input
--- bus) before there is a full controller. It discovers miners, attaches each
--- one's station from config, and drives transport.loadDrones.
---
--- Run from this folder:
---   drone                     show usage + current status
---   drone list                list miners, their station, and current drone
---   drone <tier>              load a tier (1..13) into EVERY configured miner
---                             at once (concurrent stocking)
---   drone <miner> <tier>      load a tier into one miner (index from `list`,
---                             or an address prefix)
---   drone clear [miner]       return drones to the ME network (all, or one)
---
--- Respects cfg.dryRun: with it true (the default) nothing is moved, moves are
--- only logged. Flip cfg.dryRun to false in config.lua once you trust it.
+-- Manual drone tool: loads mining drones into modules and shows what each one
+-- holds. Exercises the whole transport path -- config, station, ME, input bus --
+-- before there is a controller to do it. See `drone --help`.
 
 local miners = require("lib.hw.miners")
 local drones = require("lib.gtnh.drones")
+local cli = require("lib.cli")
 local cfg = require("config")
+
+local ctx = cli.start({
+    name = "drone",
+    summary = "Load mining drones into modules, and see what each one holds.",
+    usage = {
+        { "drone",                "list miners, their station, and current drone" },
+        { "drone list",           "the same" },
+        { "drone <tier>",         "load tier 1..13 into EVERY configured miner at once" },
+        { "drone <miner> <tier>", "load one miner, by index from `list` or address prefix" },
+        { "drone clear [miner]",  "return drones to the ME network (all, or one)" },
+    },
+    notes = {
+        "Loading every miner at once is concurrent: each module's ME interface "
+            .. "stocks in parallel, which is much faster than one at a time.",
+        "Respects cfg.dryRun -- with it true (the default) nothing is moved, moves "
+            .. "are only logged. Flip it in config.lua once you have watched a drone "
+            .. "move correctly.",
+    },
+}, ...)
+if not ctx then return end
 
 -- Cross-station settings handed to every station (see miners.attachStation).
 local shared = {
@@ -156,27 +164,11 @@ local function cmdClear(ref)
     end
 end
 
-local function usage(msg)
-    if msg then print(msg) end
-    print("Usage:")
-    print("  drone list              list miners, stations, and current drones")
-    print("  drone <tier>            load tier 1..13 into every configured miner")
-    print("  drone <miner> <tier>    load tier into one miner (index or address prefix)")
-    print("  drone clear [miner]     return drones to ME (all, or one)")
-    print(string.format("Config: dryRun=%s, dronesPerModule=%s",
-        tostring(cfg.dryRun), tostring(cfg.dronesPerModule)))
-end
-
 -- ---- dispatch ------------------------------------------------------------
 
-local args = {...}
-local a1, a2 = args[1], args[2]
+local a1, a2 = ctx.args[1], ctx.args[2]
 
-if a1 == nil or a1 == "help" or a1 == "-h" then
-    usage()
-    print("")
-    cmdList()
-elseif a1 == "list" or a1 == "ls" then
+if a1 == nil or a1 == "list" or a1 == "ls" then
     cmdList()
 elseif a1 == "clear" or a1 == "unload" then
     cmdClear(a2)
@@ -185,5 +177,5 @@ elseif tonumber(a1) and a2 == nil then
 elseif a2 ~= nil and tonumber(a2) then
     cmdSet(a1, tonumber(a2))
 else
-    usage("Unrecognized arguments.")
+    cli.usage(ctx, "Unrecognized arguments.")
 end

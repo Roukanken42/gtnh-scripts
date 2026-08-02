@@ -7,6 +7,7 @@ install.lua
 mining/drone.lua
 mining/lib/calc/estimate.lua
 mining/lib/calc/target.lua
+mining/lib/cli.lua
 mining/lib/gtnh/drones.lua
 mining/lib/gtnh/meteors.lua
 mining/lib/gtnh/plasmas.lua

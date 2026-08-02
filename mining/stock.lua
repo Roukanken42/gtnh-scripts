@@ -119,14 +119,25 @@ local function cmdPatterns()
         end
         print(string.format("  [%2d] %-34s %s", p.index, tostring(entry.label), entry.kind))
         print("       in : " .. describeInputs(entry))
-        -- A renamed fake output reads back from the pattern slot as its BASE item.
-        -- When these differ, the slot name is a real craftable in its own right and
-        -- requesting it would craft that instead of pushing anything.
-        if entry.slotLabel and entry.slotLabel ~= entry.label then
-            print("       out: " .. entry.label .. "  (slot reports the base item: "
-                .. entry.slotLabel .. ")")
+        -- Always print the resolved output, not just when it differs from the slot
+        -- name: this is the line that says what a craft request will actually
+        -- target, and "resolved to the same label" has to be distinguishable from
+        -- "never resolved". A renamed fake output reads back from the pattern slot
+        -- as its BASE item, which is usually a real craftable in its own right.
+        if entry.output then
+            local o = entry.output
+            print(string.format("       out: %s  [%s%s]", tostring(o.label),
+                tostring(o.name), o.damage and (":" .. tostring(o.damage)) or ""))
+            if entry.slotLabel and entry.slotLabel ~= entry.label then
+                print("            slot reported the base item: " .. entry.slotLabel)
+            else
+                print("            slot reported the same -- nothing renamed here")
+            end
+        elseif entry.outputError then
+            print("       out: UNRESOLVED -- " .. entry.outputError)
+        elseif entry.kind ~= "unknown" then
+            print("       out: not resolved (no database configured)")
         end
-        if entry.outputError then print("       out: UNRESOLVED -- " .. entry.outputError) end
         if entry.reason then print("       why: " .. entry.reason) end
     end
     if #raw == 0 then

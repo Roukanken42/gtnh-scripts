@@ -16,8 +16,9 @@
 -- that is done for you here, but the staging tank then has to refill from ME.
 --
 -- `keep` is the one that runs: it holds every hatch full so a mining setup can be
--- driven by hand, without the controller. It clears its staging on the way out,
--- however it is stopped.
+-- driven by hand, without the controller. However it is stopped it hands
+-- everything back -- staging cleared, hatches drained -- because keeping fluid in
+-- the hatches is precisely what running it is for.
 --
 -- See config.lua for cfg.supply.hatchMeteors (how much to keep) and the per-
 -- station fluid fields.
@@ -134,6 +135,23 @@ local function fillUp(m, target, timeout)
     return moved
 end
 
+-- Empties a hatch back into the network. Loops for the same reason fillUp does,
+-- in reverse: it drains through an interface tank that holds only 16,000 L, so a
+-- large hatch needs several passes with time in between for the network to take
+-- each one. Clear the staging config first, or the tank will refuse fluid that is
+-- not what it was told to stock. Returns total moved.
+local function drainDown(m, timeout)
+    local moved, deadline = 0, computer.uptime() + (timeout or 20)
+    while computer.uptime() < deadline do
+        if m.station:hatchTank() <= 0 then break end
+        local n = m.station:drainHatch()
+        moved = moved + (n or 0)
+        if cfg.dryRun then break end
+        if (n or 0) <= 0 then os.sleep(0.5) end   -- interface tank still emptying
+    end
+    return moved
+end
+
 -- ---- commands --------------------------------------------------------------
 
 local function cmdList()
@@ -181,10 +199,11 @@ local function cmdSet(name)
         local tag = m.address:sub(1, 8)
         local have, label = hatchPlasma(m)
 
-        -- A hatch holds one fluid: the old one has to go before the new is taken.
+        -- A hatch holds one fluid: the old one has to go before the new is taken,
+        -- and all of it -- a partial drain leaves the hatch refusing the new plasma.
         if label and label ~= p.name then
             m.station:clearPlasmaSource()
-            local drained = m.station:drainHatch()
+            local drained = drainDown(m)
             print(string.format("  %s  drained %d L of %s", tag, drained, label))
         end
 
@@ -256,7 +275,7 @@ local function cmdKeep(name)
         local _, label = hatchPlasma(m)
         if label and label ~= p.name then
             m.station:clearPlasmaSource()
-            local drained = m.station:drainHatch()
+            local drained = drainDown(m)
             print(string.format("  %s  drained %d L of %s", m.address:sub(1, 8), drained, label))
         end
         local ok, serr = m.station:setPlasmaSource(slot)
@@ -293,22 +312,44 @@ local function cmdKeep(name)
 
     local ok, lerr = pcall(loop)
 
-    -- Clean up whatever this command set, however it ended. Each station has up to
-    -- 16,000 L staged in an interface tank; leaving those configured would hold
-    -- that fluid out of the network indefinitely. The hatches keep what they have
-    -- -- that is fuel the modules are about to burn, not something to hand back.
+    -- Put everything back, however this ended -- q, Ctrl-C or an error. Nothing
+    -- staged and nothing parked: each station holds up to 16,000 L in an interface
+    -- tank and however much its hatch takes, and leaving that behind keeps fluid
+    -- out of the network for as long as nobody notices. Keeping the hatches full
+    -- is what running this command is FOR, so stopping it gives the fluid back.
+    --
+    -- Configs are cleared for every station before any draining starts, so each
+    -- interface tank has had a chance to empty into the network by the time a
+    -- hatch tries to push through it.
+    print("Stopping: clearing staging and returning hatch contents...")
     for _, m in ipairs(fluid) do m.station:clearPlasmaSource() end
-    print(string.format("Stopped after %d top-up(s); staging cleared, hatches left full.", topped))
+
+    local returned, left = 0, 0
+    for _, m in ipairs(fluid) do
+        returned = returned + drainDown(m)
+        local remaining = m.station:hatchTank()
+        if remaining > 0 then
+            left = left + remaining
+            print(string.format("  %s  %d L would not go back -- is the network full?",
+                m.address:sub(1, 8), remaining))
+        end
+    end
+    print(string.format("Stopped after %d top-up(s); returned %d L%s.", topped, returned,
+        left > 0 and string.format(", %d L still in hatches", left) or ""))
 
     -- An interrupt is how this is meant to end; anything else is a real error.
     if not ok and not tostring(lerr):find("interrupt") then error(lerr, 0) end
 end
 
 local function cmdDrain()
+    -- Configs first, all of them, so each interface tank is free by the time a
+    -- hatch drains through it.
+    for _, m in ipairs(fluid) do m.station:clearPlasmaSource() end
     for _, m in ipairs(fluid) do
-        m.station:clearPlasmaSource()
-        local drained = m.station:drainHatch()
-        print(string.format("  %s  drained %d L%s", m.address:sub(1, 8), drained,
+        local drained = drainDown(m)
+        local left = m.station:hatchTank()
+        print(string.format("  %s  drained %d L%s%s", m.address:sub(1, 8), drained,
+            left > 0 and string.format(", %d L left", left) or "",
             cfg.dryRun and "  [dry]" or ""))
     end
 end
@@ -319,6 +360,7 @@ local function usage(msg)
     print("  plasma              what each hatch holds, and against what target")
     print("  plasma <name>       switch every module to that plasma and fill")
     print("  plasma keep [name]  keep every hatch topped up until interrupted")
+    print("                      (returns the fluid to the network on the way out)")
     print("  plasma fill         top the hatches up with what they already hold")
     print("  plasma drain        empty the hatches back into the network")
     print(string.format("Config: hatchMeteors=%s, dryRun=%s",

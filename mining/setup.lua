@@ -372,6 +372,109 @@ local function stageProbe(p, dbAddr, dbSlot)
     return nil, false, lastWhy
 end
 
+-- Makes sure the probe drone's KITS are in the local net. A module eats 4 drill
+-- tips + 4 rods of the drone's material per meteor and will not run -- so cannot
+-- be detected -- without them. They reach the modules from the local net on their
+-- own, so setup only has to see that they are in stock. The exact item labels come
+-- from the supply interface's kit pattern rather than being guessed at.
+-- Returns true, or false + reason (which is a warning, not a hard stop: the kits
+-- may have been put there by hand).
+local function ensureKits(net, material, itf, handle)
+    if not itf then return false, "no supply interface found to request kits from" end
+
+    -- Resolved against the database so the request targets the fake pattern's real
+    -- (renamed) output rather than the base item its slot reports.
+    local entry
+    for _, e in ipairs(supply.catalog(itf, handle)) do
+        if e.kind == "kit" and e.material == material then entry = e; break end
+    end
+    if not entry then
+        return false, "the supply interface has no kit pattern for " .. material
+    end
+
+    local stock = supply.stock({ entry }, net)
+    local have = supply.kitsInStock(entry, stock.items)
+    if have >= PROBE_KITS then
+        return true, string.format("%d %s kit(s) in stock", have, material)
+    end
+
+    local crafts = math.ceil((PROBE_KITS - have) / math.max(1, entry.perCraft))
+    step("Kits: %d of %d %s, requesting %d craft(s)...", have, PROBE_KITS, material, crafts)
+    local job, err = supply.request(itf, entry, crafts)
+    if not job then return false, tostring(err) end
+
+    local deadline = computer.uptime() + STOCK_TIMEOUT
+    while computer.uptime() < deadline do
+        local state = supply.jobState(job)
+        if state ~= "computing" then break end
+        os.sleep(POLL_INTERVAL)
+    end
+    stock = supply.stock({ entry }, net)
+    have = supply.kitsInStock(entry, stock.items)
+    if have <= 0 then return false, "no " .. material .. " kits arrived" end
+    return true, string.format("%d %s kit(s) in stock", have, material)
+end
+
+-- Makes sure the local net actually HOLDS the plasma we mean to probe with. A
+-- fluid interface can only stage what its network has, so without this every
+-- hatch stays empty and every hatch-to-miner pairing fails -- and fails silently,
+-- because an unfilled hatch looks exactly like a wrong side.
+-- Returns true, or false + reason.
+local function ensurePlasma(net, entry, itf, litres)
+    if not entry then return false, "no plasma pattern to stock from" end
+    local function have()
+        return supply.plasmaInStock(entry, supply.stock({ entry }, net))
+    end
+
+    local now = have()
+    if now >= litres then
+        return true, string.format("%d L of %s in the local net", now, entry.plasma.name)
+    end
+
+    local crafts = math.ceil((litres - now) / math.max(1, entry.perCraft))
+    step("Plasma: %d of %d L, requesting %d craft(s)...", now, litres, crafts)
+    local job, err = supply.request(itf, entry, crafts)
+    if not job then return false, tostring(err) end
+
+    local deadline = computer.uptime() + STOCK_TIMEOUT
+    while computer.uptime() < deadline do
+        if supply.jobState(job) ~= "computing" then break end
+        os.sleep(POLL_INTERVAL)
+    end
+    -- The fluid can take a while to land after the job itself reports done, and a
+    -- large request arrives in pieces.
+    deadline = computer.uptime() + STOCK_TIMEOUT
+    while computer.uptime() < deadline and have() < litres do os.sleep(POLL_INTERVAL) end
+
+    now = have()
+    if now <= 0 then return false, "no " .. entry.plasma.name .. " arrived" end
+    if now < litres then
+        -- Partial is not success: the hatches it does not cover stay empty, and an
+        -- empty hatch is indistinguishable from a wrong side during detection.
+        return false, string.format("only %d of %d L of %s", now, litres, entry.plasma.name)
+    end
+    return true, string.format("%d L of %s in the local net", now, entry.plasma.name)
+end
+
+-- Puts a plasma's ae2fc drop in the database, which is the only way to name a
+-- fluid to setFluidInterfaceConfiguration -- the local net holds plasma as fluid,
+-- never as drops, so it is lifted out of the supply interface's own pattern.
+-- Returns plasma, dbSlot, or nil + error.
+local function stagePlasmaDrop(itf, handle)
+    if not itf then return nil, "no supply interface found to take a plasma drop from" end
+
+    -- Any plasma will do for detection; take the cheapest per litre to probe with.
+    local best
+    for _, e in ipairs(supply.catalog(itf, handle)) do
+        if e.kind == "plasma" and (not best or e.plasma.tier < best.plasma.tier) then best = e end
+    end
+    if not best then return nil, "the supply interface has no plasma pattern" end
+
+    local slot, err = supply.storePlasmaDrop(itf, best, handle)
+    if not slot then return nil, tostring(err) end
+    return best, slot
+end
+
 -- Pairs transposers with the interface that feeds them, for ALL of them at once.
 --
 -- The loops are the other way round from the obvious shape, because the two

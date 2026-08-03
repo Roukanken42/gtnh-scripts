@@ -246,15 +246,28 @@ end
 -- fillHatchTo would sleep until it got there, which is right for `plasma keep`
 -- and wrong for a loop that also has a screen to repaint.
 --
--- `entries` are { station, level, capacity } -- the levels the CALLER has already
--- read this cycle. Reading them again here was six component calls a cycle, and
--- an indirect one costs a tick apiece.
+-- An entry is { station, level, capacity, plasma, switching }:
+--   level/capacity  what the CALLER already read this cycle. Reading them again
+--                   here was six component calls a cycle, each costing a tick.
+--   plasma          the plasma THAT MODULE should be on -- not the fleet's. Every
+--                   decision here is per hatch, which is the whole point: the
+--                   caller used to skip this entirely unless some fleet-wide
+--                   plasma had been detected, so a module whose hatch was empty
+--                   was never filled, and a switch onto an empty hatch waited for
+--                   a fluid nothing was moving. nil means there is nothing to
+--                   fill it with, and it is left alone.
+--   switching       the state of a queued plasma change, if there is one. Only
+--                   "filling" may be topped up; earlier than that the switch is
+--                   still emptying the hatch, and refilling it would fight the
+--                   drain.
 -- Returns the number of hatches touched and the litres moved.
-function control.topUp(entries, target, refill)
+function control.topUp(entries, scfg, refill)
     local touched, moved = 0, 0
     for _, e in ipairs(entries or {}) do
         local st = e.station
-        if st and st:hasFluid() then
+        if st and st:hasFluid() and e.plasma
+            and (e.switching == nil or e.switching == "filling") then
+            local target = supply.hatchLitres(e.plasma, scfg)
             local wants, want = control.wantsTopUp(e.level or 0, e.capacity, target, refill)
             if wants then
                 local n = st:fillHatch(want, e.level) or 0

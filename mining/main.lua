@@ -529,14 +529,16 @@ local function runCycle()
     end
     doneQueue()
 
-    if not paused and activePlasma then
+    -- No fleet-wide condition on any of this. It used to run only when a plasma
+    -- had been DETECTED across the fleet, which meant a module whose hatch was
+    -- empty never got filled -- and a switch onto an empty hatch sat in "filling"
+    -- for ever, waiting for a fluid that nothing was moving. Each hatch is decided
+    -- on its own, from the plasma that module is meant to be on.
+    if not paused then
         -- Assert the staging config for any station that has none: a hatch can
         -- only be filled from a tank that is pointed at the right fluid, and a
-        -- previous run (or `plasma drain`) may have cleared it.
-        --
-        -- Per module, not fleet-wide: one that has been switched on its own must
-        -- be re-pointed at ITS plasma, and one mid-switch must not be touched at
-        -- all -- the queue is already draining it.
+        -- previous run (or `plasma drain`) may have cleared it. One mid-switch is
+        -- left alone -- the queue is already handling it.
         for _, r in ipairs(rows) do
             if r.station and r.hasFluid and not queue:find(r.addr, "plasma")
                 and (r.staged or 0) <= 0 and (r.hatchLevel or 0) <= 0 then
@@ -547,23 +549,19 @@ local function runCycle()
         end
 
         -- The levels readFleet just read, rather than reading them again. Each
-        -- hatch is filled to ITS plasma's target, and one still being drained is
-        -- left out -- topping it up would refill what the switch is emptying.
-        local touched, moved = 0, 0
+        -- hatch is filled to ITS plasma's target.
+        local hatches = {}
         for _, r in ipairs(rows) do
-            local switching = queue:find(r.addr, "plasma")
-            if r.station and r.hasFluid
-                and not (switching and switching.state ~= "filling") then
-                local want = wantedPlasma(r)
-                if want then
-                    local t, m = control.topUp({ {
-                        station = r.station, level = r.hatchLevel,
-                        capacity = r.hatchCapacity,
-                    } }, supply.hatchLitres(want, scfg), scfg.hatchRefill)
-                    touched, moved = touched + t, moved + m
-                end
+            if r.station and r.hasFluid then
+                local switching = queue:find(r.addr, "plasma")
+                hatches[#hatches + 1] = {
+                    station = r.station, level = r.hatchLevel,
+                    capacity = r.hatchCapacity, plasma = wantedPlasma(r),
+                    switching = switching and switching.state or nil,
+                }
             end
         end
+        local touched, moved = control.topUp(hatches, scfg, scfg.hatchRefill)
         if touched > 0 then
             log(string.format("topped up %d hatch(es), +%d L", touched, moved))
         end

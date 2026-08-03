@@ -1007,6 +1007,16 @@ function ui.render(state)
     if not ui.active then return end
     if buffer then gpu.setActiveBuffer(buffer) end
 
+    -- Wipe the frame first. Panels only repaint the rectangles they cover, and the
+    -- buffer keeps everything between frames, so anything OUTSIDE this frame's
+    -- panels survived from the last one: the gutters between boxes, and worse, the
+    -- whole region a different screen's layout used. Switching views left pieces of
+    -- the old one stranded between the new one's boxes.
+    --
+    -- One fill for the whole screen, drawn off-screen like the rest of the frame,
+    -- so it costs a single call and cannot flicker.
+    rect(1, 1, W, H, C.bg)
+
     drawTitle(state)
     local kpiY = 3
     drawKPIs(state, kpiY)

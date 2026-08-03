@@ -927,7 +927,19 @@ local function buildAdvise(rows)
         edit = adv.edit and adv.edit.field or nil,
         error = adv.error, results = {}, notes = {},
         rateLabel = adv.want and (adv.want .. "/s") or "WANTED/s",
+        applied = adv.applied,
     }
+
+    -- Straight from the queue rather than from row.pending, which is only filled
+    -- in when a cycle assembles the view -- and the interesting moment is the
+    -- instant after applying, before any cycle has run.
+    local waiting = queue:pending(row.addr)
+    if #waiting > 0 then
+        local parts = {}
+        for _, e in ipairs(waiting) do parts[#parts + 1] = pendingLabel(e) end
+        a.pending = table.concat(parts, ", ")
+        a.pendingNote = waiting[1].note
+    end
 
     -- The material, then one row per pinnable parameter.
     local settings = {
@@ -1015,8 +1027,15 @@ local function buildAdvise(rows)
 end
 
 -- Applies a recommendation: the four parameters, queued like any other change.
+-- Returns a sentence describing what happened, which the advisor puts on screen --
+-- because everything this does is invisible from there otherwise. The changes go
+-- on the queue, the log is hidden unless asked for, and a parameter write waits
+-- for the module to finish its operation, so without a word here pressing ENTER
+-- looks exactly like pressing nothing.
 local function applyAdvice(row, c)
-    if not c then return end
+    if not c then
+        return "nothing selected to apply"
+    end
     local want = {
         drone = c.drone,
         -- The pool is identical across the whole interval the candidate reports,
@@ -1026,18 +1045,20 @@ local function applyAdvice(row, c)
         plasma = c.plasma,
     }
     local cur = currentOf(row)
-    local n = 0
+    local changed = {}
     for _, f in ipairs(control.FIELDS) do
         if want[f.key] ~= nil and want[f.key] ~= cur[f.key] then
             commitEdit(row, f.key, want[f.key])
-            n = n + 1
+            changed[#changed + 1] = f.label:lower()
         end
     end
-    if n == 0 then
+    if #changed == 0 then
         log(row.addr .. ": already set to the recommendation")
-    else
-        log(string.format("%s: %d setting(s) queued from the advisor", row.addr, n))
+        return "this module is already set to that"
     end
+    log(string.format("%s: %d setting(s) queued from the advisor", row.addr, #changed))
+    return string.format("queued %s -- the module is stopped for the write, so it "
+        .. "may take an operation to land", table.concat(changed, ", "))
 end
 
 -- ---- rendering ---------------------------------------------------------------
@@ -1123,6 +1144,7 @@ local function handleAdviseKey(char, code)
     }, char, code)
 
     if action == "advise-changed" then
+        adv.applied = nil
         runAdvise(row, adv)
         -- A shorter list can leave the cursor past the end of it.
         local rows = control.ADVISE_SETTINGS
@@ -1131,7 +1153,7 @@ local function handleAdviseKey(char, code)
     elseif action == "advise-apply" then
         local i = adv.cursor - control.ADVISE_SETTINGS
         local c = adv.result and adv.result.candidates[i]
-        applyAdvice(row, c)
+        adv.applied = applyAdvice(row, c)
         view.miners = readFleet(true)
     elseif action == "close" then
         nav.screen = "detail"

@@ -25,7 +25,8 @@
 --   cycle / tick / updated
 --   screen      "dashboard" | "detail" | "profile" | "advise"
 --   advise      { miner, settings, cursor, settingsCount, results, picking,
---                 summary, error, empty, notes, rateLabel, edit }
+--                 summary, error, empty, notes, rateLabel, edit,
+--                 applied, pending, pendingNote }
 --   profile     { cycles, elapsed, callCount, callTotal, spans, calls, note }
 --   moduleCursor integer            -- selected row in state.miners
 --   clipboard   nil | { addr, label }  -- the module a copy was taken from
@@ -890,7 +891,7 @@ local function drawAdviseSettings(state, x, y, w, h)
         cell(ix, row, 43, inner - 43, f.note or "", C.faint, inner)
     end
 
-    local sy = y + h - 2
+    local sy = y + h - 3
     if a.error then
         cell(ix, sy, 0, inner, a.error, C.crit, inner)
     elseif a.edit then
@@ -898,6 +899,20 @@ local function drawAdviseSettings(state, x, y, w, h)
             C.focus, inner)
     else
         cell(ix, sy, 0, inner, a.summary or "", C.dim, inner)
+    end
+
+    -- What applying just did, and what the module is still waiting on. Without
+    -- these the screen is identical before and after an apply: the changes are
+    -- queued, the log is hidden unless asked for, and a parameter write waits for
+    -- the module to finish its operation.
+    local py = y + h - 2
+    if a.applied then
+        cell(ix, py, 0, inner, "\xE2\x9C\x93 " .. a.applied, C.good, inner)
+    elseif a.pending then
+        cell(ix, py, 0, inner, "pending: " .. a.pending
+            .. (a.pendingNote and ("  -- " .. a.pendingNote) or ""), C.warn, inner)
+    else
+        cell(ix, py, 0, inner, "", C.faint, inner)
     end
 end
 
@@ -1003,7 +1018,7 @@ function ui.render(state)
 
     if state.screen == "advise" then
         local a = state.advise or {}
-        local settingsH = #(a.settings or {}) + 4
+        local settingsH = #(a.settings or {}) + 5
         drawAdviseSettings(state, 2, contentY, W - 2, settingsH)
         drawAdviseResults(state, 2, contentY + settingsH + 1, W - 2,
             contentH - settingsH - 1)
@@ -1014,7 +1029,7 @@ function ui.render(state)
 
     if state.screen == "advise" then
         local a = state.advise or {}
-        local settingsH = #(a.settings or {}) + 4
+        local settingsH = #(a.settings or {}) + 5
         drawAdviseSettings(state, 2, contentY, W - 2, settingsH)
         drawAdviseResults(state, 2, contentY + settingsH + 1, W - 2,
             contentH - settingsH - 1)

@@ -90,6 +90,11 @@ local ctx = cli.start({
             .. "narrows the search rather than filtering its results, so what comes "
             .. "back is the best available UNDER the pin. Only the module's own tier "
             .. "is searched, since that is hardware.",
+        "M and O open the whole fleet's meteor pool and ore output -- the same two "
+            .. "questions a module's detail screen answers, added up across every "
+            .. "module that has a drone, a distance and plasma. Both scroll, as do "
+            .. "the per-module tables: arrows on the fleet screens, PgUp/PgDn "
+            .. "anywhere (the arrows pick a parameter on a detail screen).",
         "C copies the module under the cursor -- its drone, distance, overdrive and "
             .. "plasma -- and V pastes them onto another. The clipboard is held, so "
             .. "one module can be pasted onto several in turn; Q closes copy mode "
@@ -892,6 +897,150 @@ local function buildDetail(rows)
     return d
 end
 
+-- ---- the fleet breakdowns ---------------------------------------------------
+--
+-- The same two questions a module's detail screen answers, asked of the whole
+-- fleet. Both are plain sums over the modules, so nothing here is an estimate of
+-- an estimate:
+--
+--   meteors mined per second      chance * parallels / cycle, added up
+--   ore items per second          the per-module yields, added up
+--   share of running time         each module's own share added up and divided by
+--                                 the number of modules counted, which makes it a
+--                                 fraction of the fleet's capacity and keeps the
+--                                 column adding to 100%
+--
+-- Cached per CYCLE. It costs one estimate.run per module -- a millisecond here,
+-- and OpenComputers is far slower than here -- so it is computed when one of these
+-- screens asks for it and not again until the next cycle.
+local fleetSums, fleetSumsAt = nil, -1
+
+local function fleetAggregate(rows)
+    if fleetSumsAt == cycle and fleetSums then return fleetSums end
+
+    local byMeteor, byOre = {}, {}
+    local counted = 0
+
+    for _, r in ipairs(rows) do
+        local cur = currentOf(r)
+        if cur.drone and cur.distance and cur.plasma then
+            local est = estimate.run{
+                distance = cur.distance, drone = cur.drone, module = r.miner.tier,
+                plasma = cur.plasma, overdrive = cur.overdrive or 1,
+                parallels = r.parallels, computation = cfg.computation,
+            }
+            if est and est.cycle > 0 then
+                counted = counted + 1
+                for _, e in ipairs(est.pool) do
+                    local m = byMeteor[e.name]
+                    if not m then
+                        m = { name = e.name, share = 0, modules = 0, timeSum = 0,
+                              meteors = 0, eut = 0, ore = {} }
+                        byMeteor[e.name] = m
+                    end
+                    m.share = m.share + e.timeShare
+                    m.modules = m.modules + 1
+                    -- Averages weighted by the time each module spends on it, so a
+                    -- module that barely rolls this meteor barely moves the figure.
+                    m.timeSum = m.timeSum + e.timeShare * e.time
+                    m.eut = m.eut + e.timeShare * e.eut
+                    m.meteors = m.meteors + e.chance * (e.parallels or 0) / est.cycle
+                    for _, y in ipairs(e.yield or {}) do
+                        local k = y.mat or y.oredict
+                        if k then m.ore[k] = (m.ore[k] or 0) + (y.stacks or 0) end
+                    end
+                end
+                for _, y in ipairs(est.yield) do
+                    local k = y.mat or y.oredict
+                    if k then
+                        local ore = byOre[k]
+                        if not ore then
+                            ore = { name = k, items = 0, stacks = 0, modules = 0 }
+                            byOre[k] = ore
+                        end
+                        ore.items = ore.items + y.itemsPerSecond
+                        ore.stacks = ore.stacks + y.stacksPerSecond
+                        ore.modules = ore.modules + 1
+                    end
+                end
+            end
+        end
+    end
+
+    local meteors, ore = {}, {}
+    local totalItems = 0
+    for _, m in pairs(byMeteor) do
+        m.avgTime = (m.share > 0) and (m.timeSum / m.share) or 0
+        m.avgEut = (m.share > 0) and (m.eut / m.share) or 0
+        -- A share of the FLEET, not of one module: each module contributed a
+        -- fraction of its own clock, and there are `counted` clocks.
+        m.share = (counted > 0) and (m.share / counted) or 0
+        -- The ore this meteor is mostly there for, which is what makes a row worth
+        -- caring about at all.
+        local best, bestAt = nil, 0
+        for k, v in pairs(m.ore) do
+            if v > bestAt then best, bestAt = k, v end
+        end
+        m.top = best
+        meteors[#meteors + 1] = m
+    end
+    for _, o in pairs(byOre) do
+        totalItems = totalItems + o.items
+        ore[#ore + 1] = o
+    end
+
+    table.sort(meteors, function(a, b)
+        if a.share ~= b.share then return a.share > b.share end
+        return a.name < b.name
+    end)
+    table.sort(ore, function(a, b)
+        if a.items ~= b.items then return a.items > b.items end
+        return a.name < b.name
+    end)
+
+    fleetSums = { meteors = meteors, ore = ore, modules = counted,
+                  totalItems = totalItems }
+    fleetSumsAt = cycle
+    return fleetSums
+end
+
+-- The fleet breakdowns as the dashboard renders them.
+local function buildFleet(rows)
+    local agg = fleetAggregate(rows)
+    local f = {
+        modules = agg.modules, meteors = {}, ore = {},
+        totalItems = string.format("%.2f", agg.totalItems),
+    }
+    if agg.modules == 0 then
+        f.empty = "No module has a drone, a distance and plasma all at once, so "
+            .. "there is nothing to add up yet."
+        return f
+    end
+
+    for _, m in ipairs(agg.meteors) do
+        f.meteors[#f.meteors + 1] = {
+            name = m.name, share = m.share,
+            runtime = string.format("%.1f%%", m.share * 100),
+            modules = string.format("%d/%d", m.modules, agg.modules),
+            time = secs(m.avgTime),
+            meteors = string.format("%.3f", m.meteors),
+            eut = si(m.avgEut),
+            ore = m.top or "",
+        }
+    end
+    for _, o in ipairs(agg.ore) do
+        f.ore[#f.ore + 1] = {
+            name = o.name,
+            share = (agg.totalItems > 0) and (o.items / agg.totalItems) or 0,
+            modules = string.format("%d/%d", o.modules, agg.modules),
+            items = string.format("%.2f", o.items),
+            stacks = string.format("%.3f", o.stacks),
+            hour = si(o.items * 3600),
+        }
+    end
+    return f
+end
+
 -- ---- the advisor -------------------------------------------------------------
 
 -- What the targeter is told about what things cost and what can be supplied.
@@ -1088,6 +1237,9 @@ local function render()
         screen = nav.screen, moduleCursor = nav.module, clipboard = nav.clipboard,
         profile = (nav.screen == "profile") and profile.snapshot() or nil,
         advise = (nav.screen == "advise") and buildAdvise(view.miners) or nil,
+        scroll = nav.scroll,
+        fleet = (nav.screen == "fleetMeteors" or nav.screen == "fleetOre")
+            and buildFleet(view.miners) or nil,
         detail = (nav.screen == "detail") and buildDetail(view.miners) or nil,
         focus = nav.focus, cursor = nav.cursor,
         confirm = nav.confirm and view.plasmas[nav.confirm]
@@ -1178,6 +1330,21 @@ local function handleAdviseKey(char, code)
     return changed
 end
 
+-- How many rows the table on the current screen has, so control.key can clamp the
+-- scroll offset. ui.tableRows says how many of them fit, as of the last render.
+local function tableRowCount()
+    if nav.screen == "fleetMeteors" or nav.screen == "fleetOre" then
+        local agg = fleetAggregate(view.miners)
+        return (nav.screen == "fleetOre") and #agg.ore or #agg.meteors
+    end
+    if nav.screen == "detail" then
+        local d = buildDetail(view.miners)
+        if not d then return 0 end
+        return (nav.view == "ore") and #d.yield or #d.pool
+    end
+    return 0
+end
+
 local function handleKey(char, code)
     if nav.screen == "advise" then return handleAdviseKey(char, code) end
     local wasFocused = nav.focus
@@ -1185,6 +1352,8 @@ local function handleKey(char, code)
         modules = #(view.miners or {}),
         plasmas = #(view.plasmas or {}),
         profiling = profile.enabled,
+        rows = tableRowCount(),
+        page = ui.tableRows,
         cur = (nav.screen == "detail") and view.miners[nav.module]
             and currentOf(view.miners[nav.module]) or nil,
     }, char, code)

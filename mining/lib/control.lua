@@ -307,10 +307,14 @@ end
 -- noticed until it has drained nine hatches.
 --
 --   screen   "dashboard" | "detail" | "profile" | "advise"
+--            | "fleetMeteors" | "fleetOre"
 --   module   cursor in the module list; in "detail", which module is open
 --   focus    nil | "plasma"          -- dashboard: is the plasma picker open
 --   cursor   row in the plasma picker
 --   confirm  picker row awaiting a second ENTER
+--   scroll   how many rows a long table is scrolled down by. Kept here so it
+--            survives repaints, and reset whenever the view changes -- landing on
+--            a new table already scrolled halfway is disorienting.
 --   field    1..#FIELDS              -- detail: which parameter is selected
 --   edit     nil | { field, value }  -- detail: the pending, uncommitted value
 --   clipboard nil | { addr, drone, distance, overdrive, plasma }
@@ -334,8 +338,9 @@ control.KEY = {
     up = 200, down = 208, left = 203, right = 205,
     pageUp = 201, pageDown = 209, delete = 211,
 }
-control.CH = { space = 32, a = 97, c = 99, f = 102, l = 108, p = 112,
-               q = 113, r = 114, s = 115, v = 118, x = 120 }
+control.CH = { space = 32, a = 97, c = 99, f = 102, l = 108, m = 109,
+               o = 111, p = 112, q = 113, r = 114, s = 115, v = 118,
+               x = 120 }
 
 -- The parameters a module can be driven with, in the order they are listed.
 -- `list` fields cycle through a fixed set (the caller maps index -> thing);
@@ -375,6 +380,26 @@ end
 -- 1.1, so half the reachable values would be unreachable. The trailing round then
 -- clears the binary dust -- adding 0.05 twenty times does not land on 2 by
 -- itself, and a value shown as 1.35 has to be the 1.35 that gets written.
+-- Moves a table's scroll offset, clamped against what the caller reports about the
+-- table it is showing: `rows` in total, `page` visible at once. Clamping HERE rather
+-- than when drawing means the offset can never run past the end and then need a
+-- dozen keypresses before anything moves again.
+local function scrollBy(st, delta, ctx)
+    local rows, page = ctx.rows or 0, ctx.page or 1
+    local most = math.max(0, rows - page)
+    local at = math.max(0, math.min((st.scroll or 0) + delta, most))
+    local moved = at ~= (st.scroll or 0)
+    st.scroll = at
+    return moved
+end
+
+-- Anything that changes which table is on screen starts it at the top.
+local function toScreen(st, screen)
+    st.screen, st.scroll = screen, 0
+end
+
+control.scrollBy = scrollBy
+
 local function clampField(f, v)
     local max = f.max
     if f.key == "distance" then max = control.MAX_DISTANCE end
@@ -429,12 +454,37 @@ function control.key(st, ctx, char, code)
         return nil, false
     end
 
+    -- ---- the fleet breakdowns ----
+    -- Read-only tables, so the arrows are free to scroll them. M and O switch
+    -- between the two without going back to the dashboard first, since comparing
+    -- "where does the time go" with "what comes out" is the whole point of having
+    -- both.
+    if st.screen == "fleetMeteors" or st.screen == "fleetOre" then
+        if code == KEY.up then return nil, scrollBy(st, -1, ctx) end
+        if code == KEY.down then return nil, scrollBy(st, 1, ctx) end
+        if code == KEY.pageUp then return nil, scrollBy(st, -(ctx.page or 1), ctx) end
+        if code == KEY.pageDown then return nil, scrollBy(st, ctx.page or 1, ctx) end
+        if char == CH.m then
+            if st.screen == "fleetMeteors" then toScreen(st, "dashboard")
+            else toScreen(st, "fleetMeteors") end
+            return nil, true
+        end
+        if char == CH.o then
+            if st.screen == "fleetOre" then toScreen(st, "dashboard")
+            else toScreen(st, "fleetOre") end
+            return nil, true
+        end
+        if char == CH.q then toScreen(st, "dashboard"); return nil, true end
+        if char == CH.l then return "log", true end
+        return nil, false
+    end
+
     -- ---- the profile screen ----
     -- Read-only, so it needs no guarding: Q leaves, S writes a file, R starts the
     -- measurement again.
     if st.screen == "profile" then
         if char == CH.q or char == CH.f then
-            st.screen = "dashboard"
+            toScreen(st, "dashboard")
             return nil, true
         end
         if char == CH.s then return "save-profile", true end
@@ -448,8 +498,14 @@ function control.key(st, ctx, char, code)
         local n = #control.FIELDS
         if code == KEY.up then st.field = (st.field - 2) % n + 1
         elseif code == KEY.down then st.field = st.field % n + 1
+        elseif code == KEY.pageUp then
+            return nil, scrollBy(st, -(ctx.page or 1), ctx)
+        elseif code == KEY.pageDown then
+            return nil, scrollBy(st, ctx.page or 1, ctx)
         elseif code == KEY.tab then
+            -- A different table, so back to the top of it.
             st.view = (st.view == "ore") and "meteors" or "ore"
+            st.scroll = 0
         elseif enter() then
             local f = control.FIELDS[st.field]
             local cur = (ctx.cur or {})[f.key]
@@ -519,7 +575,9 @@ function control.key(st, ctx, char, code)
 
     -- Only when there is something to show: without --profile nothing is
     -- measured, and a screen of zeroes is worse than no screen.
-    if char == CH.f and ctx.profiling then st.screen = "profile"; return nil, true end
+    if char == CH.m then toScreen(st, "fleetMeteors"); return nil, true end
+    if char == CH.o then toScreen(st, "fleetOre"); return nil, true end
+    if char == CH.f and ctx.profiling then toScreen(st, "profile"); return nil, true end
     if char == CH.space then return "pause", true end
     if char == CH.l then return "log", true end
     if char == CH.q then
@@ -682,7 +740,7 @@ function control.newNav()
     return {
         screen = "dashboard", module = 1, focus = nil, cursor = 1,
         confirm = nil, field = 1, edit = nil, view = "meteors", clipboard = nil,
-        advise = nil,
+        advise = nil, scroll = 0,
     }
 end
 

@@ -24,6 +24,9 @@
 --   switching   string               -- plasma name being applied right now
 --   cycle / tick / updated
 --   screen      "dashboard" | "detail" | "profile" | "advise"
+--               | "fleetMeteors" | "fleetOre"
+--   scroll      rows the current table is scrolled down by
+--   fleet       { meteors, ore, modules, totalItems, empty } -- the fleet sums
 --   advise      { miner, settings, cursor, settingsCount, results, picking,
 --                 summary, error, empty, notes, rateLabel, edit,
 --                 applied, pending, pendingNote }
@@ -178,6 +181,28 @@ local function rate(v)
     return string.format("%.4f", v)
 end
 
+-- How many rows the table on screen can show. Written on every render and read by
+-- the key handler on the next keypress, which is the only way the two can agree:
+-- the height depends on the panel layout, and the clamping has to happen where the
+-- keys are handled or the offset runs off the end and takes a dozen presses to
+-- come back.
+ui.tableRows = 1
+
+-- The window of `list` a scroll offset selects, plus a "1-24 of 137" for the title.
+-- Clamped again here: the offset is only as fresh as the last render, and a list
+-- that has just got shorter must not be drawn from past its end.
+local function window(list, scroll, rows)
+    local n = #list
+    ui.tableRows = math.max(rows, 1)
+    local first = math.max(0, math.min(scroll or 0, math.max(0, n - rows))) + 1
+    local last = math.min(n, first + rows - 1)
+    local label
+    if n == 0 then label = "empty"
+    elseif n <= rows then label = tostring(n)
+    else label = string.format("%d-%d of %d", first, last, n) end
+    return first, last, label
+end
+
 local function box(x, y, w, h, borderColor, fillColor)
     rect(x, y, w, h, fillColor)
     setfg(borderColor); setbg(fillColor)
@@ -192,7 +217,11 @@ end
 local function panel(x, y, w, h, title, focused)
     box(x, y, w, h, focused and C.focus or C.border, C.panel)
     if title then
-        text(x + 2, y, " " .. title .. " ", focused and C.focus or C.accent, C.panel)
+        -- Clipped to the box. Titles were never clipped, which went unnoticed while
+        -- they were all short: a long one runs along the top of whatever is to the
+        -- right of the panel, and off the edge of the screen entirely.
+        text(x + 2, y, trunc(" " .. title .. " ", math.max(0, w - 4)),
+            focused and C.focus or C.accent, C.panel)
     end
 end
 
@@ -296,7 +325,12 @@ end
 local UPDOWN = "\xE2\x86\x91\xE2\x86\x93"
 local LEFTRIGHT = "\xE2\x86\x90\xE2\x86\x92"
 
+local SCROLL = "[" .. "\xE2\x86\x91\xE2\x86\x93" .. "/PgUp/PgDn] scroll"
+
 local function hintFor(state)
+    if state.screen == "fleetMeteors" or state.screen == "fleetOre" then
+        return SCROLL .. "  [M] pool  [O] ore  [L] log  [Q] back"
+    end
     if state.screen == "advise" then
         local a = state.advise or {}
         if a.picking then
@@ -322,7 +356,8 @@ local function hintFor(state)
             end
             return "[" .. UPDOWN .. "] choose  [ENTER] apply  [Q] cancel"
         end
-        return "[" .. UPDOWN .. "] field  [ENTER] edit  [TAB] view  [A] advise  [Q] back"
+        return "[" .. UPDOWN .. "] field [ENTER] edit [PgUp/PgDn] scroll [TAB] view"
+            .. " [A] advise [Q] back"
     end
     if state.confirm then
         return "[ENTER] apply " .. state.confirm .. "   [Q] back"
@@ -334,11 +369,11 @@ local function hintFor(state)
     if state.clipboard then
         return "[" .. UPDOWN .. "] module  [V] paste  [C] copy another  [Q] done copying"
     end
-    -- Single-spaced and without the log toggle, which is the least of these and
-    -- is in --help: the whole line has to fit beside the status block, and what
-    -- overflows is silently cut off the end.
-    return "[" .. UPDOWN .. "] module [ENTER] details [C] copy [P] plasma"
-        .. " [SPACE] pause [Q] quit"
+    -- Tight: the whole line has to fit beside the status block and what overflows
+    -- is cut off the end. Pause and the log toggle are in --help; the navigation
+    -- keys are the ones worth the space.
+    return "[" .. UPDOWN .. "] module [ENTER] detail [C] copy [P] plasma"
+        .. " [M] pool [O] ore [Q] quit"
 end
 
 local function drawTitle(state)
@@ -692,7 +727,8 @@ local PC = { bar = 0, pct = 11, name = 17, size = 45, time = 58, chance = 67,
 local function drawPool(state, x, y, w, h)
     local d = state.detail or {}
     local list = d.pool or {}
-    panel(x, y, w, h, "METEOR POOL  " .. #list .. "  " .. MIDDOT
+    local first, last, span = window(list, state.scroll, h - 3)
+    panel(x, y, w, h, "METEOR POOL  " .. span .. "  " .. MIDDOT
         .. "  by share of running time  " .. MIDDOT .. "  TAB for ore output")
     local ix, inner = x + 2, w - 4
     local hy = y + 1
@@ -726,13 +762,9 @@ local function drawPool(state, x, y, w, h)
         if (e.share or 0) > top then top = e.share end
     end
 
-    for i, e in ipairs(list) do
-        local row = y + 1 + i
-        if row > y + h - 2 then
-            cell(ix, y + h - 2, 0, inner,
-                string.format("... and %d more", #list - i + 1), C.faint, inner)
-            break
-        end
+    for i = first, last do
+        local e = list[i]
+        local row = y + 1 + (i - first) + 1
         local col = e.blocked and C.crit or C.text
         if inner - PC.bar >= 10 then
             bar(ix + PC.bar, row, 10, (top > 0) and ((e.share or 0) / top) or 0,
@@ -758,7 +790,8 @@ local YC = { bar = 0, pct = 11, name = 17, items = 47, stacks = 60, hour = 73 }
 local function drawYield(state, x, y, w, h)
     local d = state.detail or {}
     local list = d.yield or {}
-    panel(x, y, w, h, "ORE OUTPUT  " .. #list .. "  " .. MIDDOT .. "  TAB for the meteor pool")
+    local first, last, span = window(list, state.scroll, h - 3)
+    panel(x, y, w, h, "ORE OUTPUT  " .. span .. "  " .. MIDDOT .. "  TAB for the meteor pool")
     local ix, inner = x + 2, w - 4
     local hy = y + 1
 
@@ -778,13 +811,9 @@ local function drawYield(state, x, y, w, h)
         return
     end
 
-    for i, e in ipairs(list) do
-        local row = y + 1 + i
-        if row > y + h - 2 then
-            cell(ix, y + h - 2, 0, inner,
-                string.format("... and %d more", #list - i + 1), C.faint, inner)
-            break
-        end
+    for i = first, last do
+        local e = list[i]
+        local row = y + 1 + (i - first) + 1
         if inner - YC.bar >= 10 then
             bar(ix + YC.bar, row, 10, e.share or 0, C.mine, C.panelHi)
         end
@@ -1012,6 +1041,104 @@ local function drawAdviseResults(state, x, y, w, h)
     end
 end
 
+-- ---- the fleet breakdowns ----------------------------------------------------
+--
+-- The same two questions as a module's detail screen -- where does the time go,
+-- and what comes out -- asked of the whole fleet. Both are plain sums over the
+-- modules, which is why they are worth having: nothing here is an estimate of an
+-- estimate.
+
+local FM = { bar = 0, pct = 11, name = 17, mods = 47, time = 56, met = 65,
+             eut = 79, ore = 92 }
+
+local function drawFleetPool(state, x, y, w, h)
+    local f = state.fleet or {}
+    local list = f.meteors or {}
+    local first, last, span = window(list, state.scroll, h - 3)
+    panel(x, y, w, h, "FLEET METEOR POOL  " .. span .. "  " .. MIDDOT .. "  "
+        .. (f.modules or 0) .. " module(s) counted  " .. MIDDOT
+        .. "  [O] ore output  [Q] back")
+    local ix, inner = x + 2, w - 4
+    local hy = y + 1
+
+    cell(ix, hy, FM.bar, 10, "RUNTIME", C.faint, inner)
+    cell(ix, hy, FM.name, 29, "METEOR", C.faint, inner)
+    cell(ix, hy, FM.mods, 8, "MODULES", C.faint, inner)
+    cell(ix, hy, FM.time, 8, padL("TIME", 7), C.faint, inner)
+    cell(ix, hy, FM.met, 13, padL("METEORS/s", 12), C.faint, inner)
+    cell(ix, hy, FM.eut, 12, padL("EU/t", 11), C.faint, inner)
+    cell(ix, hy, FM.ore, inner - FM.ore, "TOP ORE", C.faint, inner)
+
+    if #list == 0 then
+        cell(ix, y + 3, 0, inner, f.empty
+            or "No module is configured well enough to estimate.", C.warn, inner)
+        return
+    end
+
+    local top = 0
+    for _, e in ipairs(list) do
+        if (e.share or 0) > top then top = e.share end
+    end
+
+    for i = first, last do
+        local e = list[i]
+        local row = y + 1 + (i - first) + 1
+        if inner - FM.bar >= 10 then
+            bar(ix + FM.bar, row, 10, (top > 0) and (e.share / top) or 0,
+                C.accent2, C.panelHi)
+        end
+        cell(ix, row, FM.pct, 6, padL(e.runtime or "-", 5), C.text, inner)
+        cell(ix, row, FM.name, 29, e.name or "?", C.text, inner)
+        cell(ix, row, FM.mods, 8, e.modules or "-", C.dim, inner)
+        cell(ix, row, FM.time, 8, padL(e.time or "-", 7), C.dim, inner)
+        cell(ix, row, FM.met, 13, padL(e.meteors or "-", 12), C.good, inner)
+        cell(ix, row, FM.eut, 12, padL(e.eut or "-", 11), C.dim, inner)
+        cell(ix, row, FM.ore, inner - FM.ore, e.ore or "", C.faint, inner)
+    end
+end
+
+local FO = { bar = 0, pct = 11, name = 17, mods = 47, items = 56, stacks = 70,
+             hour = 84 }
+
+local function drawFleetOre(state, x, y, w, h)
+    local f = state.fleet or {}
+    local list = f.ore or {}
+    local first, last, span = window(list, state.scroll, h - 3)
+    panel(x, y, w, h, "FLEET ORE OUTPUT  " .. span .. "  " .. MIDDOT .. "  "
+        .. (f.totalItems or "0") .. " items/s in all  " .. MIDDOT
+        .. "  [M] meteor pool  [Q] back")
+    local ix, inner = x + 2, w - 4
+    local hy = y + 1
+
+    cell(ix, hy, FO.bar, 10, "SHARE", C.faint, inner)
+    cell(ix, hy, FO.name, 29, "ORE", C.faint, inner)
+    cell(ix, hy, FO.mods, 8, "MODULES", C.faint, inner)
+    cell(ix, hy, FO.items, 13, padL("ITEMS/s", 12), C.faint, inner)
+    cell(ix, hy, FO.stacks, 13, padL("STACKS/s", 12), C.faint, inner)
+    cell(ix, hy, FO.hour, 13, padL("PER HOUR", 12), C.faint, inner)
+
+    if #list == 0 then
+        cell(ix, y + 3, 0, inner, f.empty
+            or "No module is configured well enough to estimate.", C.warn, inner)
+        return
+    end
+
+    for i = first, last do
+        local e = list[i]
+        local row = y + 1 + (i - first) + 1
+        if inner - FO.bar >= 10 then
+            bar(ix + FO.bar, row, 10, e.share or 0, C.mine, C.panelHi)
+        end
+        cell(ix, row, FO.pct, 6, padL(string.format("%.1f%%", (e.share or 0) * 100), 5),
+            C.dim, inner)
+        cell(ix, row, FO.name, 29, e.name or "?", C.text, inner)
+        cell(ix, row, FO.mods, 8, e.modules or "-", C.dim, inner)
+        cell(ix, row, FO.items, 13, padL(e.items or "-", 12), C.good, inner)
+        cell(ix, row, FO.stacks, 13, padL(e.stacks or "-", 12), C.dim, inner)
+        cell(ix, row, FO.hour, 13, padL(e.hour or "-", 12), C.dim, inner)
+    end
+end
+
 local function drawLog(state, x, y, w, h)
     panel(x, y, w, h, "LOG")
     local msgs = state.messages or {}
@@ -1047,38 +1174,29 @@ function ui.render(state)
     local logY = H - logH + 1
     local contentH = state.showLog and (logY - contentY - 1) or (H - contentY + 1)
 
-    if state.screen == "advise" then
+    -- One chain, with the log/blit boilerplate ONCE after it. This used to be five
+    -- near-identical blocks, each repeating those two lines and returning early --
+    -- and two of them had quietly become duplicates, harmless only because they sat
+    -- after a return. Adding a screen should not mean copying that again.
+    if state.screen == "fleetMeteors" then
+        drawFleetPool(state, 2, contentY, W - 2, contentH)
+
+    elseif state.screen == "fleetOre" then
+        drawFleetOre(state, 2, contentY, W - 2, contentH)
+
+    elseif state.screen == "advise" then
         local a = state.advise or {}
         local settingsH = #(a.settings or {}) + 5
         drawAdviseSettings(state, 2, contentY, W - 2, settingsH)
         drawAdviseResults(state, 2, contentY + settingsH + 1, W - 2,
             contentH - settingsH - 1)
-        if state.showLog then drawLog(state, 2, logY, W - 2, logH) end
-        if buffer then gpu.bitblt(0, 1, 1, W, H, buffer, 1, 1) end
-        return
-    end
 
-    if state.screen == "advise" then
-        local a = state.advise or {}
-        local settingsH = #(a.settings or {}) + 5
-        drawAdviseSettings(state, 2, contentY, W - 2, settingsH)
-        drawAdviseResults(state, 2, contentY + settingsH + 1, W - 2,
-            contentH - settingsH - 1)
-        if state.showLog then drawLog(state, 2, logY, W - 2, logH) end
-        if buffer then gpu.bitblt(0, 1, 1, W, H, buffer, 1, 1) end
-        return
-    end
-
-    if state.screen == "profile" then
+    elseif state.screen == "profile" then
         drawProfile(state, 2, contentY, W - 2, contentH)
-        if state.showLog then drawLog(state, 2, logY, W - 2, logH) end
-        if buffer then gpu.bitblt(0, 1, 1, W, H, buffer, 1, 1) end
-        return
-    end
 
     -- One module, close up. The parameter block is fixed; whichever table is
     -- selected takes the rest.
-    if state.screen == "detail" then
+    elseif state.screen == "detail" then
         local paramsH = #(state.detail and state.detail.fields or {}) + 6
         drawParams(state, 2, contentY, W - 2, paramsH)
         local tableY = contentY + paramsH + 1
@@ -1088,28 +1206,27 @@ function ui.render(state)
         else
             drawPool(state, 2, tableY, W - 2, tableH)
         end
-        if state.showLog then drawLog(state, 2, logY, W - 2, logH) end
-        if buffer then gpu.bitblt(0, 1, 1, W, H, buffer, 1, 1) end
-        return
+
+    else
+        -- The dashboard. The stock panels are sized to their contents (there are
+        -- only ever nine materials and five plasmas) and the modules table takes
+        -- everything left, because that is the list that grows as the player
+        -- builds more of them.
+        local stockRows = math.max(#(state.kits or {}), #(state.plasmas or {}), 5)
+        local stocksH = math.max(9, math.min(stockRows + 5, contentH - 7))
+        local minersH = contentH - stocksH - 1
+        local stocksY = contentY + minersH + 1
+
+        drawMiners(state, 2, contentY, W - 2, minersH)
+
+        -- The plasma panel's width is fixed by its contents (SC_END plus the
+        -- panel's own chrome); kits takes whatever is left, and on a screen too
+        -- narrow for both, each row clips itself rather than spilling over.
+        local rightW = math.min(SC_END + 4, math.floor((W - 3) / 2))
+        local leftW = W - rightW - 3
+        drawKits(state, 2, stocksY, leftW, stocksH)
+        drawPlasma(state, 2 + leftW + 1, stocksY, rightW, stocksH)
     end
-
-    -- The stock panels are sized to their contents (there are only ever nine
-    -- materials and five plasmas) and the modules table takes everything left,
-    -- because that is the list that grows as the player builds more of them.
-    local stockRows = math.max(#(state.kits or {}), #(state.plasmas or {}), 5)
-    local stocksH = math.max(9, math.min(stockRows + 5, contentH - 7))
-    local minersH = contentH - stocksH - 1
-    local stocksY = contentY + minersH + 1
-
-    drawMiners(state, 2, contentY, W - 2, minersH)
-
-    -- The plasma panel's width is fixed by its contents (SC_END plus the panel's
-    -- own chrome); kits takes whatever is left, and on a screen too narrow for
-    -- both, each row clips itself rather than spilling over the frame.
-    local rightW = math.min(SC_END + 4, math.floor((W - 3) / 2))
-    local leftW = W - rightW - 3
-    drawKits(state, 2, stocksY, leftW, stocksH)
-    drawPlasma(state, 2 + leftW + 1, stocksY, rightW, stocksH)
 
     if state.showLog then drawLog(state, 2, logY, W - 2, logH) end
     if buffer then gpu.bitblt(0, 1, 1, W, H, buffer, 1, 1) end

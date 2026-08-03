@@ -72,7 +72,9 @@ cfg.interfaceSlot = 1
 --
 -- The numbers are arbitrary POINTS and are only ever compared against each other,
 -- so they never have to be right in absolute terms -- just roughly right
--- relative to one another. Neutronium is the baseline at 1.
+-- relative to one another. Nothing is a fixed baseline: what matters is the ratios
+-- between them, and a material being cheaper than a lower-tier one is a perfectly
+-- ordinary thing to say if that is how your production actually looks.
 --
 -- A material set to `false` (or simply left out) is treated as UNOBTAINABLE and
 -- its drone tiers are dropped from the search entirely, rather than being priced
@@ -84,28 +86,30 @@ cfg.kitCost = {
     ["Steel"] = 0.02,               -- MK-I,   MK-II
     ["Titanium"] = 0.02,            -- MK-III, MK-IV
     ["Tungstensteel"] = 0.02,       -- MK-V,   MK-VI
-    ["Naquadah"] = 0.05,            -- MK-VII, MK-VIII
-    ["Naquadah Alloy"] = 0.1,       -- MK-IX
-    ["Neutronium"] = 1,             -- MK-X    -- baseline
-    ["Cosmic Neutronium"] = 10,     -- MK-XI   -- TUNE
-    ["Infinity"] = 240,             -- MK-XII  -- 24x cosmic (24 go into one)
-    ["Transcendent Metal"] = false, -- MK-XIII -- unobtainable
+    ["Naquadah"] = 0.02,            -- MK-VII, MK-VIII
+    ["Naquadah Alloy"] = 0.02,      -- MK-IX
+    ["Neutronium"] = 0.4,           -- MK-X    
+    ["Cosmic Neutronium"] = 0.1,    -- MK-XI   
+    ["Infinity"] = 2.4,             -- MK-XII  
+    ["Transcendent Metal"] = false, -- MK-XIII 
 }
 
 -- Points per LITRE (mB) of plasma, by tier. Higher tiers burn far less per meteor
--- (825 L of Helium vs 150 L of Plutonium-241) but cost much more to make, which is
--- exactly the trade-off these numbers settle. All TUNE.
+-- (825 L of Helium vs 150 L of Plutonium-241) but usually cost more to make, and
+-- these numbers are what settles that trade-off. Pricing them all the SAME, as
+-- below, says the litres are interchangeable -- which hands the choice to the
+-- consumption rate alone, and so always favours the highest tier available.
 cfg.plasmaCost = {
-    [1] = 0.001,   -- Helium
-    [2] = 0.004,   -- Bismuth
-    [3] = 0.02,    -- Radon
-    [4] = 0.1,     -- Technetium
-    [5] = 0.5,     -- Plutonium-241
+    [1] = 0.01,   -- Helium
+    [2] = 0.01,   -- Bismuth
+    [3] = 0.01,   -- Radon
+    [4] = 0.01,   -- Technetium
+    [5] = false,  -- Plutonium-241
 }
 
 -- Points per EU. Deliberately tiny: power is meant to break ties between
 -- otherwise-equal configurations, not to drive the choice.
-cfg.euCost = 1e-9
+cfg.euCost = 1e-12
 
 -- What you can actually SUPPLY per second. A configuration that burns more than
 -- any of these is reported as infeasible rather than recommended.
@@ -172,7 +176,7 @@ cfg.supply = {
         ["Neutronium"]         = nil,
         ["Cosmic Neutronium"]  = nil,
         ["Infinity"]           = nil,
-        ["Transcendent Metal"] = nil,   -- listed for completeness; unobtainable above
+        ["Transcendent Metal"] = nil,
     },
 
     -- Litres of plasma to keep in the local net, by fluid name. nil = do not stock.
@@ -222,7 +226,7 @@ cfg.supply = {
 
     -- Refill only once stock falls below this fraction of target, then fill to
     -- the top. Stops a slow drain from re-requesting every single cycle.
-    lowWater = 0.9,
+    lowWater = 0.5,
 
     -- Cap on how many crafts a single request may ask for. nil = the whole
     -- deficit in one job.
@@ -260,11 +264,11 @@ cfg.control = {
     -- one meteor, so this is roughly "how many meteors of runway each module
     -- has". Worth lowering for the expensive materials -- 256 Infinity kits is
     -- 4,608 Infinity ingots sitting idle -- via cfg.supply.target above.
-    kitsPerMiner = 256,
+    kitsPerMiner = 1024,
 
     -- Local-net plasma buffer, in hatchfuls per module with a plasma feed. The
     -- hatches hold one each; this is what refills them.
-    hatchRefills = 4,
+    hatchRefills = 16,
 
     -- How long after a craft finishes before its material may be requested again.
     -- The local net is re-read the moment a craft lands, and THAT is what stops a

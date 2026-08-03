@@ -303,7 +303,10 @@ control.FIELDS = {
     { key = "drone",     label = "Drone",     kind = "list", min = 1, max = 13 },
     { key = "distance",  label = "Distance",  kind = "number", step = 1, page = 10,
       min = 1 },
-    { key = "overdrive", label = "Overdrive", kind = "number", step = 0.05, page = 0.25,
+    -- A quarter was too coarse to tune with: the useful overdrive range is barely
+    -- wider than one, so the bigger jump is a tenth and the arrows a twentieth.
+    -- Both are whole multiples of the step, which is what clampField snaps to.
+    { key = "overdrive", label = "Overdrive", kind = "number", step = 0.05, page = 0.1,
       -- Not 0: mineTime divides by the overdrive, so a preview at 0 is infinite.
       min = 0.05, max = 2 },
     { key = "plasma",    label = "Plasma",    kind = "list", min = 1, max = 5 },

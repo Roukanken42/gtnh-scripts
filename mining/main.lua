@@ -251,7 +251,31 @@ local slowEvery = math.max(ccfg.slowEvery or 6, 1)
 
 -- What the slow reads last saw, by module address, so a fast cycle can carry it
 -- forward instead of asking again.
+-- A queued change in twenty columns: "OD 1.35 stopping". control.describe spells
+-- it out in full, which is right for the log and too wide for a table cell.
+local function pendingLabel(e)
+    local what
+    if e.field == "drone" then
+        local d = drones.get(e.value)
+        what = d and ("MK-" .. d.roman) or "drone"
+    elseif e.field == "distance" then
+        what = "dist " .. tostring(e.value)
+    elseif e.field == "overdrive" then
+        what = string.format("OD %.2f", e.value)
+    else
+        what = e.plasma and (e.plasma.name:gsub(" Plasma$", "")) or "plasma"
+    end
+    return what .. " " .. e.state
+end
+
 local slowSeen = {}
+
+-- Modules whose slow half must be re-read on the next pass whatever the cadence
+-- says. Set when something has just changed one of those values, so the screen
+-- catches up at once instead of at the next slow cycle -- and set per MODULE,
+-- because re-reading the whole fleet to learn one drone costs a tick per hatch and
+-- bus in it.
+local slowDue = {}
 
 -- What each module is doing, read fresh. Everything the dashboard shows about a
 -- miner comes from here, so a cheap UI repaint never touches hardware.
@@ -263,9 +287,9 @@ local slowSeen = {}
 --                 so free, which the profile settled -- and the input hatch,
 --                 which is the one thing topping up decides on.
 --   `full` only   which drone is in the bus, and how much is staged in the
---                 interface tank. A drone changes when the player changes it, and
---                 an edit forces a full read on the spot; the staged figure is
---                 only ever displayed.
+--                 interface tank. A drone changes when the player changes it, so
+--                 slowDue forces those modules on the next pass; the staged
+--                 figure is only ever displayed.
 local function readFleet(full)
     local rows = {}
     for _, m in ipairs(fleet) do
@@ -289,7 +313,8 @@ local function readFleet(full)
         -- material is what its kits are made of -- the whole demand, read off the
         -- hardware rather than configured twice.
         local seen = slowSeen[m.address]
-        if full then
+        if full or slowDue[m.address] then
+            slowDue[m.address] = nil
             seen = {}
             slowSeen[m.address] = seen
             if row.hasItems then
@@ -328,6 +353,22 @@ local function readFleet(full)
         elseif row.hasFluid and (row.hatchLevel or 0) <= 0 then row.state = "DRY"
         elseif m:isActive() then row.state = "MINING"
         else row.state = "IDLE" end
+
+        -- What it is still waiting on. Read here rather than when the view is
+        -- assembled, so a row is never handed out with a stale idea of it -- the
+        -- moment that matters is right after a keypress queues something.
+        local waiting = queue:pending(m.address)
+        if #waiting > 0 then
+            local e = waiting[1]
+            row.pending = pendingLabel(e)
+            if #waiting > 1 then row.pending = row.pending .. " +" .. (#waiting - 1) end
+            row.pendingNote = e.note
+            row.pendingCount = #waiting
+            -- A module told to stop is not idle, it is finishing an operation.
+            if e.state == "stopping" and (row.state == "IDLE" or row.state == "MINING") then
+                row.state = "STOPPING"
+            end
+        end
         row.stateKind = row.state
 
         rows[#rows + 1] = row
@@ -381,23 +422,6 @@ local function slotFor(p)
     return slot
 end
 
--- A queued change in twenty columns: "OD 1.35 stopping". control.describe spells
--- it out in full, which is right for the log and too wide for a table cell.
-local function pendingLabel(e)
-    local what
-    if e.field == "drone" then
-        local d = drones.get(e.value)
-        what = d and ("MK-" .. d.roman) or "drone"
-    elseif e.field == "distance" then
-        what = "dist " .. tostring(e.value)
-    elseif e.field == "overdrive" then
-        what = string.format("OD %.2f", e.value)
-    else
-        what = e.plasma and (e.plasma.name:gsub(" Plasma$", "")) or "plasma"
-    end
-    return what .. " " .. e.state
-end
-
 -- Queues a committed edit. Nothing is written here: a parameter needs the module
 -- stopped, and a module mid-operation takes tens of seconds to get there, so the
 -- control thread works at it in the background and the dashboard shows it
@@ -420,6 +444,8 @@ local function commitEdit(row, field, value)
 
     local e = queue:want(row.addr, field, value, computer.uptime(), extra)
     log(string.format("%s: %s queued", row.addr, (control.describe(e))))
+    -- So the next read shows it as pending rather than looking ignored.
+    slowDue[row.miner.address] = true
 end
 
 -- Applies a copied config to another module. Only the fields that DIFFER are
@@ -521,6 +547,7 @@ local function runCycle()
     -- Work at whatever each module has been asked to change. Before the hatches,
     -- so a plasma switch gets its drain in before anything tries to top it up.
     local doneQueue = profile.span("queued changes")
+    local landed = false
     for _, r in ipairs(rows) do
         local settled = control.stepModule(queue, r, computer.uptime(), ccfg)
         for _, e in ipairs(settled) do
@@ -530,8 +557,15 @@ local function runCycle()
             else
                 log(string.format("%s: %s FAILED -- %s", r.addr, what, tostring(e.error)))
             end
+            -- Whatever it was, the row read a moment ago describes the module as it
+            -- was BEFORE. A drone is the one that shows: it is a slow read, so a
+            -- finished swap would sit there with the pending gone and the old drone
+            -- still named until the slow cadence came round half a minute later.
+            slowDue[r.miner.address] = true
+            landed = true
         end
     end
+    if landed then rows = readFleet(false) end
     doneQueue()
 
     -- No fleet-wide condition on any of this. It used to run only when a plasma
@@ -667,23 +701,6 @@ local function runCycle()
             missing = (not patternFor[p.name]) and itf ~= nil or nil,
             active = activePlasma ~= nil and p.tier == activePlasma.tier,
         }
-    end
-
-    -- What each module is waiting on, so the dashboard can show it rather than
-    -- leaving a change that takes a minute looking like one that did nothing.
-    for _, r in ipairs(rows) do
-        local waiting = queue:pending(r.addr)
-        if #waiting > 0 then
-            local e = waiting[1]
-            r.pending = pendingLabel(e)
-            if #waiting > 1 then r.pending = r.pending .. " +" .. (#waiting - 1) end
-            r.pendingNote = e.note
-            r.pendingCount = #waiting
-            -- A module told to stop is not idle, it is finishing an operation.
-            if e.state == "stopping" and r.state == "IDLE" then r.state = "STOPPING" end
-            if e.state == "stopping" and r.state == "MINING" then r.state = "STOPPING" end
-            r.stateKind = r.state
-        end
     end
 
     local mining = 0
@@ -1321,7 +1338,7 @@ local function handleAdviseKey(char, code)
         local i = adv.cursor - control.ADVISE_SETTINGS
         local c = adv.result and adv.result.candidates[i]
         adv.applied = applyAdvice(row, c)
-        view.miners = readFleet(true)
+        view.miners = readFleet(false)
     elseif action == "close" then
         nav.screen = "detail"
     elseif action == "log" then
@@ -1394,7 +1411,12 @@ local function handleKey(char, code)
         end
     elseif action == "paste" then
         local row = view.miners[nav.module]
-        if row then pasteInto(row, nav.clipboard) end
+        if row then
+            pasteInto(row, nav.clipboard)
+            -- Otherwise the pending column stays blank until the next cycle, and a
+            -- paste looks like it did nothing.
+            view.miners = readFleet(false)
+        end
     elseif action == "open" then
         nav.screen, nav.field, nav.edit = "detail", 1, nil
     elseif action == "close" then
@@ -1404,10 +1426,9 @@ local function handleKey(char, code)
         nav.edit = nil
         local row = view.miners[nav.module]
         if row and edit then commitEdit(row, edit.field, edit.value) end
-        -- The write changed the hardware -- including the drone, which is one of
-        -- the slow reads -- so take a full one rather than showing stale values
-        -- until the slow cadence comes round again.
-        view.miners = readFleet(true)
+        -- commitEdit marked the module due, so this picks its slow half up without
+        -- re-reading every other module's.
+        view.miners = readFleet(false)
     elseif action == "apply-plasma" then
         local pick = view.plasmas[nav.confirm]
         nav.confirm, nav.focus = nil, nil

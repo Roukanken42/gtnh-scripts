@@ -272,7 +272,7 @@ end
 -- directly -- and a two-step confirm that is wrong in one direction is not
 -- noticed until it has drained nine hatches.
 --
---   screen   "dashboard" | "detail" | "profile"
+--   screen   "dashboard" | "detail" | "profile" | "advise"
 --   module   cursor in the module list; in "detail", which module is open
 --   focus    nil | "plasma"          -- dashboard: is the plasma picker open
 --   cursor   row in the plasma picker
@@ -291,9 +291,10 @@ end
 control.KEY = {
     esc = 1, tab = 15, enter = 28, numEnter = 156,
     up = 200, down = 208, left = 203, right = 205,
+    pageUp = 201, pageDown = 209, delete = 211,
 }
-control.CH = { space = 32, c = 99, f = 102, l = 108, p = 112, q = 113,
-               r = 114, s = 115, v = 118 }
+control.CH = { space = 32, a = 97, c = 99, f = 102, l = 108, p = 112,
+               q = 113, r = 114, s = 115, v = 118, x = 120 }
 
 -- The parameters a module can be driven with, in the order they are listed.
 -- `list` fields cycle through a fixed set (the caller maps index -> thing);
@@ -410,6 +411,8 @@ function control.key(st, ctx, char, code)
             local cur = (ctx.cur or {})[f.key]
             if cur == nil then return nil, false end
             st.edit = { field = f.key, value = cur }
+        elseif char == CH.a then
+            return "advise", true
         elseif code == KEY.esc or char == CH.q then
             return "close", true
         elseif char == CH.l then return "log", true
@@ -485,11 +488,153 @@ function control.key(st, ctx, char, code)
     return nil, false
 end
 
+-- ---- the advisor ------------------------------------------------------------
+--
+-- A screen that asks target.lua what this module SHOULD be set to, and applies
+-- the answer. It reaches the same searcher the planning code will, so the answers
+-- a player gets by hand and the ones an automatic mode would pick come from one
+-- place.
+--
+-- Any of the four parameters can be PINNED, which narrows the search rather than
+-- filtering its results: pin Radon and overdrive 1.5 and the recommendations are
+-- the best available UNDER that, which is the question actually being asked when
+-- somebody says "what if I keep using Radon".
+--
+--   want     the material being asked for
+--   pins     { drone, distance, overdrive, plasma } -- nil means "any"
+--   cursor   1..ADVISE_SETTINGS are the settings, past that the recommendations
+--   edit     { field, value } while a pin is being dialled
+--   picking  { cursor } while a material is being chosen
+--   result   whatever the last search returned
+
+-- want, then one row per pinnable field.
+control.ADVISE_SETTINGS = 1 + #control.FIELDS
+
+function control.newAdvise(want)
+    return { want = want, pins = {}, cursor = 1, edit = nil, picking = nil }
+end
+
+-- Applies a keypress to the advisor. `ctx.materials` is the list a material is
+-- chosen from, `ctx.cur` the module's live values (what a pin starts from), and
+-- `ctx.results` how many recommendations are on screen.
+-- Returns "advise-changed" when the search has to be re-run, "advise-apply" when
+-- a recommendation was chosen (st.cursor says which), "close" to leave.
+function control.adviseKey(st, ctx, char, code)
+    local KEY, CH = control.KEY, control.CH
+    local function enter() return code == KEY.enter or code == KEY.numEnter end
+    local mats = ctx.materials or {}
+
+    -- ---- choosing a material ----
+    -- 154 of them, so a letter jumps to the first one starting with it. Scrolling
+    -- to Tungsten one row at a time is not a user interface.
+    if st.picking then
+        local n = #mats
+        if n == 0 then st.picking = nil; return nil, true end
+        if code == KEY.up then st.picking.cursor = (st.picking.cursor - 2) % n + 1
+        elseif code == KEY.down then st.picking.cursor = st.picking.cursor % n + 1
+        elseif code == KEY.pageUp then
+            st.picking.cursor = math.max(1, st.picking.cursor - 10)
+        elseif code == KEY.pageDown then
+            st.picking.cursor = math.min(n, st.picking.cursor + 10)
+        elseif enter() then
+            st.want = mats[st.picking.cursor]
+            st.picking = nil
+            return "advise-changed", true
+        elseif code == KEY.esc then
+            st.picking = nil
+        elseif char and char >= 97 and char <= 122 then
+            local want = string.char(char)
+            for i, m in ipairs(mats) do
+                if m:sub(1, 1):lower() == want then st.picking.cursor = i; break end
+            end
+        else
+            return nil, false
+        end
+        return nil, true
+    end
+
+    -- ---- dialling a pin ----
+    if st.edit then
+        local f
+        for _, cand in ipairs(control.FIELDS) do
+            if cand.key == st.edit.field then f = cand end
+        end
+        local delta
+        if code == KEY.up then delta = f.kind == "list" and 1 or f.step
+        elseif code == KEY.down then delta = f.kind == "list" and -1 or -f.step
+        elseif code == KEY.right then delta = f.kind == "list" and 1 or f.page
+        elseif code == KEY.left then delta = f.kind == "list" and -1 or -f.page
+        end
+        if delta then
+            if f.kind == "list" then
+                local n = (f.key == "plasma") and (ctx.plasmas or 5) or f.max
+                if n > 0 then st.edit.value = (st.edit.value - 1 + delta) % n + 1 end
+            else
+                st.edit.value = clampField(f, st.edit.value + delta)
+            end
+            return nil, true
+        end
+        if enter() then
+            st.pins[st.edit.field] = st.edit.value
+            st.edit = nil
+            return "advise-changed", true
+        end
+        if code == KEY.esc then st.edit = nil; return nil, true end
+        return nil, false
+    end
+
+    -- ---- the list ----
+    local rows = control.ADVISE_SETTINGS + (ctx.results or 0)
+    if code == KEY.up then
+        st.cursor = (st.cursor - 2) % rows + 1
+        return nil, true
+    elseif code == KEY.down then
+        st.cursor = st.cursor % rows + 1
+        return nil, true
+    end
+
+    if enter() then
+        if st.cursor == 1 then
+            -- Open the picker on whatever is already chosen.
+            local at = 1
+            for i, m in ipairs(mats) do if m == st.want then at = i end end
+            st.picking = { cursor = at }
+            return nil, true
+        elseif st.cursor <= control.ADVISE_SETTINGS then
+            local f = control.FIELDS[st.cursor - 1]
+            -- Seeded from the pin if there is one, else from what the module is
+            -- actually set to: "best if I keep what I have" is the common ask.
+            local from = st.pins[f.key] or (ctx.cur or {})[f.key]
+            if from == nil then
+                from = (f.kind == "list") and 1 or (f.min or 1)
+            end
+            st.edit = { field = f.key, value = from }
+            return nil, true
+        else
+            return "advise-apply", true
+        end
+    end
+
+    -- Releasing a pin back to "any".
+    if (char == CH.x or code == KEY.delete)
+        and st.cursor > 1 and st.cursor <= control.ADVISE_SETTINGS then
+        local f = control.FIELDS[st.cursor - 1]
+        if st.pins[f.key] == nil then return nil, false end
+        st.pins[f.key] = nil
+        return "advise-changed", true
+    end
+
+    if code == KEY.esc or char == CH.a or char == CH.q then return "close", true end
+    if char == CH.l then return "log", true end
+    return nil, false
+end
+
 -- A fresh navigation state.
 function control.newNav()
     return {
         screen = "dashboard", module = 1, focus = nil, cursor = 1,
         confirm = nil, field = 1, edit = nil, view = "meteors", clipboard = nil,
+        advise = nil,
     }
 end
 

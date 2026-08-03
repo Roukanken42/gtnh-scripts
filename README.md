@@ -47,7 +47,9 @@ mining/
     gtnh/                What the game gives us: meteor, plasma and drone data,
                          extracted from GTNH and regenerable (see each header).
     calc/                Pure maths over that data -- no components touched, so
-                         it runs in any Lua interpreter.
+                         it runs in any Lua interpreter. target.lua answers
+                         "what should this module be set to", which the
+                         controller's advisor screen asks directly.
     hw/                  Everything that talks to a component.
     control.lua          What the controller decides: what to stock, what to
                          request, and the plasma picker's keyboard.

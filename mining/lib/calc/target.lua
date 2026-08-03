@@ -482,6 +482,13 @@ end
 --                     plasma = { [tier] = <L per second> }, eu = <per second> },
 --     computation = <n>,           -- computation on tap; caps parallels
 --     mode        = "throttle" | "fast" | <overdrive>,
+--     modules     = { <tier>, ... },  -- only these module tiers
+--     drones      = <tier> | { <tier>, ... },   -- only these drone tiers
+--     plasmas     = <tier> | { <tier>, ... },   -- only these plasmas
+--     distance    = <n>,           -- only configurations that include it
+--   -- The four above PIN part of the answer, for "what is best if I keep using
+--   -- Radon at overdrive 1.5". A pin narrows the search rather than filtering its
+--   -- output, so the candidates that come back are the best AMONG the allowed.
 --     limit       = 8,             -- candidates to keep
 --     onProgress  = function(scanned) end,   -- every 256 candidates; os.sleep(0)
 --   }
@@ -522,11 +529,26 @@ function target.search(demand, opts)
                  targets = targets, skipped = skipped, scanned = 0 }
     end
 
-    -- Usable plasmas: those you can actually make.
+    -- A pin, as a set of allowed tiers. A bare number is the common case.
+    local function pinned(v)
+        if v == nil then return nil end
+        if type(v) == "number" then return { [v] = true } end
+        local set = {}
+        for _, tier in ipairs(v) do set[tier] = true end
+        return next(set) and set or nil
+    end
+    local onlyDrones, onlyPlasmas = pinned(opts.drones), pinned(opts.plasmas)
+
+    -- Usable plasmas: those you can actually make, minus anything pinned out.
     local usablePlasmas = {}
     for _, p in ipairs(plasmas.list) do
-        if plasmaCost[p.tier] then usablePlasmas[#usablePlasmas + 1] = p
+        if onlyPlasmas and not onlyPlasmas[p.tier] then
+            -- deliberately excluded by the caller; not a shortage, so not reported
+        elseif plasmaCost[p.tier] then usablePlasmas[#usablePlasmas + 1] = p
         else skipped[#skipped + 1] = p.name .. ": no cost entry, not searched" end
+    end
+    if #usablePlasmas == 0 and onlyPlasmas then
+        return nil, "the pinned plasma has no cost entry, so nothing can be searched"
     end
 
     -- Usable drone tiers: those whose kit material you can actually make.
@@ -534,8 +556,13 @@ function target.search(demand, opts)
     for tier = drones.MIN_TIER, drones.MAX_TIER do
         local d = drones.get(tier)
         local pts = ingotCost[d.material]
-        if pts then usableDrones[#usableDrones + 1] = { tier = tier, drone = d, points = pts }
+        if onlyDrones and not onlyDrones[tier] then
+            -- likewise
+        elseif pts then usableDrones[#usableDrones + 1] = { tier = tier, drone = d, points = pts }
         else skipped[#skipped + 1] = d.name .. " (" .. d.material .. "): unobtainable, not searched" end
+    end
+    if #usableDrones == 0 and onlyDrones then
+        return nil, "the pinned drone's material is marked unobtainable in the cost table"
     end
 
     local moduleTiers = opts.modules
@@ -565,8 +592,15 @@ function target.search(demand, opts)
                 local prevSums, prevCands = nil, nil
                 for gi = 1, #grid do
                     local d = grid[gi]
-                    if d <= maxDistance then
-                        local hi = grid[gi + 1] and (grid[gi + 1] - 1) or maxDistance
+                    local hi = grid[gi + 1] and (grid[gi + 1] - 1) or maxDistance
+                    -- A pinned distance keeps only the interval containing it. The
+                    -- pool is constant across an interval, so this is one cell, not
+                    -- one distance -- and the candidate still reports the whole
+                    -- range it is valid over.
+                    if opts.distance and not (d <= opts.distance and opts.distance <= hi) then
+                        d = nil
+                    end
+                    if d and d <= maxDistance then
                         local sums = poolSums(d, ud.tier, moduleTier, mod.voltage,
                             mod.parallels, opts.computation, targets)
 
@@ -634,6 +668,28 @@ function target.search(demand, opts)
         skipped = skipped,
         scanned = scanned,
     }
+end
+
+-- Every material a meteor can yield, sorted. This is the set resolveTargets will
+-- accept, so it lives beside it: a picker built from anywhere else could offer
+-- something no meteor drops, and the search would come back empty with no hint as
+-- to why. Names are the `mat` names, which is what the estimator reports too.
+local materialCache
+
+function target.materials()
+    if materialCache then return materialCache end
+    local seen = {}
+    materialCache = {}
+    for _, m in ipairs(meteors.list) do
+        for _, y in ipairs(m.yield) do
+            if y.mat and not seen[y.mat] then
+                seen[y.mat] = true
+                materialCache[#materialCache + 1] = y.mat
+            end
+        end
+    end
+    table.sort(materialCache)
+    return materialCache
 end
 
 -- Exposed for tests and for callers that want the curve without a whole search.

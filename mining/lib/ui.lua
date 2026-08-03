@@ -23,7 +23,9 @@
 --   confirm     string               -- plasma name awaiting confirmation
 --   switching   string               -- plasma name being applied right now
 --   cycle / tick / updated
---   screen      "dashboard" | "detail" | "profile"
+--   screen      "dashboard" | "detail" | "profile" | "advise"
+--   advise      { miner, settings, cursor, settingsCount, results, picking,
+--                 summary, error, empty, notes, rateLabel, edit }
 --   profile     { cycles, elapsed, callCount, callTotal, spans, calls, note }
 --   moduleCursor integer            -- selected row in state.miners
 --   clipboard   nil | { addr, label }  -- the module a copy was taken from
@@ -294,6 +296,18 @@ local UPDOWN = "\xE2\x86\x91\xE2\x86\x93"
 local LEFTRIGHT = "\xE2\x86\x90\xE2\x86\x92"
 
 local function hintFor(state)
+    if state.screen == "advise" then
+        local a = state.advise or {}
+        if a.picking then
+            return "[" .. UPDOWN .. "] or a letter  [ENTER] pick  [ESC] cancel"
+        end
+        if a.edit then
+            return "[" .. UPDOWN .. "] adjust  [" .. LEFTRIGHT
+                .. "] jump  [ENTER] pin  [ESC] cancel"
+        end
+        return "[" .. UPDOWN .. "] row  [ENTER] change or apply  [X] unpin  [ESC] back"
+    end
+
     if state.screen == "profile" then
         return "[S] save  [R] reset  [L] log  [ESC] back"
     end
@@ -307,7 +321,7 @@ local function hintFor(state)
             end
             return "[" .. UPDOWN .. "] choose  [ENTER] apply  [ESC] cancel"
         end
-        return "[" .. UPDOWN .. "] field  [ENTER] edit  [TAB] view  [ESC] back"
+        return "[" .. UPDOWN .. "] field  [ENTER] edit  [TAB] view  [A] advise  [ESC] back"
     end
     if state.confirm then
         return "[ENTER] apply " .. state.confirm .. "   [ESC] back"
@@ -838,6 +852,127 @@ local function drawProfile(state, x, y, w, h)
         { "CALL", "N/CYCLE", "PER CYCLE", "TOTAL", "AVG" }, true)
 end
 
+-- ---- the advisor -------------------------------------------------------------
+--
+-- Asks the targeter what this module should be set to, and applies the answer.
+-- One cursor runs down both panels -- the settings and then the recommendations --
+-- so there is no mode to be in and no second key to remember: ENTER on a setting
+-- changes it, ENTER on a recommendation applies it.
+
+local function drawAdviseSettings(state, x, y, w, h)
+    local a = state.advise or {}
+    local m = a.miner or {}
+    panel(x, y, w, h, "ADVISE  " .. (m.tierName or "?") .. "  " .. (m.addr or ""),
+        a.edit ~= nil or a.picking ~= nil)
+    local ix, inner = x + 2, w - 4
+
+    for i, f in ipairs(a.settings or {}) do
+        local row = y + i
+        if row > y + h - 3 then break end
+        local selected = (a.cursor == i)
+        local editing = selected and a.edit ~= nil
+
+        cell(ix, row, 0, 2, selected and ARROW or " ",
+            editing and C.focus or (selected and C.accent or C.faint), inner)
+        cell(ix, row, 2, 12, f.label, selected and C.text or C.dim, inner)
+        if editing then
+            cell(ix, row, 14, 28, "\xE2\x97\x82 " .. tostring(f.pending) .. " \xE2\x96\xB8",
+                C.focus, inner)
+        else
+            -- A pin reads differently from "any": one is a decision, the other is
+            -- the absence of one, and the search treats them completely differently.
+            cell(ix, row, 14, 28, f.value or "any",
+                f.pinned and C.accent2 or (f.value and C.text or C.faint), inner)
+        end
+        cell(ix, row, 43, inner - 43, f.note or "", C.faint, inner)
+    end
+
+    local sy = y + h - 2
+    if a.error then
+        cell(ix, sy, 0, inner, a.error, C.crit, inner)
+    elseif a.edit then
+        cell(ix, sy, 0, inner, "ENTER pins it and searches again; ESC leaves it as it was",
+            C.focus, inner)
+    else
+        cell(ix, sy, 0, inner, a.summary or "", C.dim, inner)
+    end
+end
+
+local AC = {
+    cur = 0, score = 2, drone = 14, dist = 23, plasma = 34, od = 57,
+    rate = 64, purity = 78, eut = 87, kits = 99,
+}
+
+local function drawAdviseResults(state, x, y, w, h)
+    local a = state.advise or {}
+    local ix, inner = x + 2, w - 4
+
+    -- The material list takes over this panel while one is being chosen: it is
+    -- where the room is, and nothing below matters until the choice is made.
+    if a.picking then
+        panel(x, y, w, h, "CHOOSE A MATERIAL  " .. MIDDOT
+            .. "  a letter jumps to it  " .. MIDDOT .. "  ENTER picks", true)
+        local list = a.picking.list or {}
+        local rows = h - 2
+        -- Keep the cursor centred so paging through 154 names does not jump about.
+        local first = math.max(1, math.min((a.picking.cursor or 1) - math.floor(rows / 2),
+            #list - rows + 1))
+        for i = 0, rows - 1 do
+            local idx = first + i
+            local name = list[idx]
+            if not name then break end
+            local sel = (idx == a.picking.cursor)
+            cell(ix, y + 1 + i, 0, 2, sel and ARROW or " ", C.focus, inner)
+            cell(ix, y + 1 + i, 2, inner - 2, name, sel and C.text or C.dim, inner)
+        end
+        return
+    end
+
+    local list = a.results or {}
+    panel(x, y, w, h, "RECOMMENDED  " .. #list .. "  " .. MIDDOT
+        .. "  ENTER applies it to this module")
+    local hy = y + 1
+    cell(ix, hy, AC.score, 11, padL("POINTS/ITEM", 11), C.faint, inner)
+    cell(ix, hy, AC.drone, 8, "DRONE", C.faint, inner)
+    cell(ix, hy, AC.dist, 10, "DISTANCE", C.faint, inner)
+    cell(ix, hy, AC.plasma, 22, "PLASMA", C.faint, inner)
+    cell(ix, hy, AC.od, 6, "OD", C.faint, inner)
+    cell(ix, hy, AC.rate, 13, padL(a.rateLabel or "WANTED/s", 12), C.faint, inner)
+    cell(ix, hy, AC.purity, 8, padL("PURE", 7), C.faint, inner)
+    cell(ix, hy, AC.eut, 11, padL("EU/t", 10), C.faint, inner)
+    cell(ix, hy, AC.kits, 11, padL("KITS/s", 10), C.faint, inner)
+
+    if #list == 0 then
+        cell(ix, y + 3, 0, inner, a.empty or "Nothing to recommend.", C.warn, inner)
+        for i, note in ipairs(a.notes or {}) do
+            if y + 3 + i > y + h - 2 then break end
+            cell(ix, y + 3 + i, 0, inner, note, C.faint, inner)
+        end
+        return
+    end
+
+    for i, r in ipairs(list) do
+        local row = y + 1 + i
+        if row > y + h - 2 then
+            cell(ix, y + h - 2, 0, inner,
+                string.format("... and %d more", #list - i + 1), C.faint, inner)
+            break
+        end
+        local sel = (a.cursor == (a.settingsCount or 0) + i)
+        cell(ix, row, AC.cur, 2, sel and ARROW or " ", C.focus, inner)
+        cell(ix, row, AC.score, 11, padL(r.score or "-", 10),
+            i == 1 and C.good or C.text, inner)
+        cell(ix, row, AC.drone, 8, r.drone or "-", C.text, inner)
+        cell(ix, row, AC.dist, 10, r.distance or "-", C.dim, inner)
+        cell(ix, row, AC.plasma, 22, r.plasma or "-", C.mine, inner)
+        cell(ix, row, AC.od, 6, r.overdrive or "-", C.dim, inner)
+        cell(ix, row, AC.rate, 13, padL(r.rate or "-", 12), C.good, inner)
+        cell(ix, row, AC.purity, 8, padL(r.purity or "-", 7), C.dim, inner)
+        cell(ix, row, AC.eut, 11, padL(r.eut or "-", 10), C.dim, inner)
+        cell(ix, row, AC.kits, 11, padL(r.kits or "-", 10), C.dim, inner)
+    end
+end
+
 local function drawLog(state, x, y, w, h)
     panel(x, y, w, h, "LOG")
     local msgs = state.messages or {}
@@ -862,6 +997,28 @@ function ui.render(state)
     local logH = state.showLog and 8 or 0
     local logY = H - logH + 1
     local contentH = state.showLog and (logY - contentY - 1) or (H - contentY + 1)
+
+    if state.screen == "advise" then
+        local a = state.advise or {}
+        local settingsH = #(a.settings or {}) + 4
+        drawAdviseSettings(state, 2, contentY, W - 2, settingsH)
+        drawAdviseResults(state, 2, contentY + settingsH + 1, W - 2,
+            contentH - settingsH - 1)
+        if state.showLog then drawLog(state, 2, logY, W - 2, logH) end
+        if buffer then gpu.bitblt(0, 1, 1, W, H, buffer, 1, 1) end
+        return
+    end
+
+    if state.screen == "advise" then
+        local a = state.advise or {}
+        local settingsH = #(a.settings or {}) + 4
+        drawAdviseSettings(state, 2, contentY, W - 2, settingsH)
+        drawAdviseResults(state, 2, contentY + settingsH + 1, W - 2,
+            contentH - settingsH - 1)
+        if state.showLog then drawLog(state, 2, logY, W - 2, logH) end
+        if buffer then gpu.bitblt(0, 1, 1, W, H, buffer, 1, 1) end
+        return
+    end
 
     if state.screen == "profile" then
         drawProfile(state, 2, contentY, W - 2, contentH)

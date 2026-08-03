@@ -23,6 +23,7 @@ local dbslots = require("lib.hw.db")
 local drones = require("lib.gtnh.drones")
 local plasmas = require("lib.gtnh.plasmas")
 local estimate = require("lib.calc.estimate")
+local targeter = require("lib.calc.target")
 local profile = require("lib.profile")
 local ui = require("lib.ui")
 local cli = require("lib.cli")
@@ -82,6 +83,13 @@ local ctx = cli.start({
             .. "actually there. Requests are therefore only made on the cycles that "
             .. "carry a fresh reading -- planning against a stale one would order a "
             .. "shortfall that has already been filled.",
+        "From a module's detail screen, A opens the ADVISOR: pick the material you "
+            .. "want and it asks the targeter for the best setups this module could "
+            .. "run, then applies the one you choose. Any of the four parameters can "
+            .. "be PINNED first (ENTER on it, arrows to set, X to release) -- pinning "
+            .. "narrows the search rather than filtering its results, so what comes "
+            .. "back is the best available UNDER the pin. Only the module's own tier "
+            .. "is searched, since that is hardware.",
         "C copies the module under the cursor -- its drone, distance, overdrive and "
             .. "plasma -- and V pastes them onto another. The clipboard is held, so "
             .. "one module can be pasted onto several in turn; Q closes copy mode "
@@ -318,6 +326,18 @@ end
 
 -- The plasma the fleet is on: whatever most hatches hold. Manual mode runs one
 -- plasma everywhere, so a disagreement means a switch is still settling.
+-- The four drivable parameters of the open module, as the values an EDIT starts
+-- from. Anything the module cannot tell us is nil, and control.key refuses to
+-- start editing a field with no current value -- there is nothing to step from.
+local function currentOf(row)
+    return {
+        drone = row.droneTier,
+        distance = row.distance,
+        overdrive = row.overdrive,
+        plasma = row.plasma and row.plasma.tier or nil,
+    }
+end
+
 -- The plasma a module is MEANT to be on: what it was last told, which is not
 -- what its hatch holds while a switch is settling. Without this the controller
 -- sees a freshly drained hatch, decides the module has no plasma, and points it
@@ -370,6 +390,58 @@ local function pendingLabel(e)
     return what .. " " .. e.state
 end
 
+-- Queues a committed edit. Nothing is written here: a parameter needs the module
+-- stopped, and a module mid-operation takes tens of seconds to get there, so the
+-- control thread works at it in the background and the dashboard shows it
+-- waiting. Which also means the key handler stays instant.
+local function commitEdit(row, field, value)
+    local extra
+    if field == "plasma" then
+        local p = plasmas.byTier[value]
+        if not p then return end
+        if not row.station or not row.hasFluid then
+            log(row.addr .. ": no plasma feed configured")
+            return
+        end
+        local slot, err = slotFor(p)
+        extra = { plasma = p, slot = slot, slotError = err }
+        -- Recorded as this module's intent right away, so the staging logic stops
+        -- treating it as a module that has lost its plasma.
+        desiredPlasma[row.addr] = p
+    end
+
+    local e = queue:want(row.addr, field, value, computer.uptime(), extra)
+    log(string.format("%s: %s queued", row.addr, (control.describe(e))))
+end
+
+-- Applies a copied config to another module. Only the fields that DIFFER are
+-- queued: pasting a value a module already has would stop it, write what was
+-- already there, and start it again for nothing.
+local function pasteInto(row, clip)
+    if not clip then return end
+    if clip.addr == row.addr then
+        log(row.addr .. ": that is where the config came from")
+        return
+    end
+
+    local cur = currentOf(row)
+    local n = 0
+    for _, f in ipairs(control.FIELDS) do
+        local want = clip[f.key]
+        if want ~= nil and want ~= cur[f.key] then
+            commitEdit(row, f.key, want)
+            n = n + 1
+        end
+    end
+    if n == 0 then
+        log(row.addr .. ": already matches " .. tostring(clip.addr))
+    else
+        log(string.format("%s: %d setting(s) queued from %s", row.addr, n,
+            tostring(clip.addr)))
+    end
+end
+
+-- The advisor owns its own keyboard; this is the part that needs the fleet.
 -- ---- one maintenance cycle ---------------------------------------------------
 
 local cycle = 0
@@ -639,18 +711,6 @@ local function si(n)
     return string.format("%.2fG", n / 1e9)
 end
 
--- The four drivable parameters of the open module, as the values an EDIT starts
--- from. Anything the module cannot tell us is nil, and control.key refuses to
--- start editing a field with no current value -- there is nothing to step from.
-local function currentOf(row)
-    return {
-        drone = row.droneTier,
-        distance = row.distance,
-        overdrive = row.overdrive,
-        plasma = row.plasma and row.plasma.tier or nil,
-    }
-end
-
 -- What the module would be doing at `cur`, whether or not that is what it is set
 -- to: while a field is being edited the pending value is substituted, so the
 -- pool and the ore table show the effect before it is committed. That is the
@@ -814,6 +874,169 @@ local function buildDetail(rows)
     return d
 end
 
+-- ---- the advisor -------------------------------------------------------------
+
+-- What the targeter is told about what things cost and what can be supplied.
+local function searchOpts(row, pins)
+    return {
+        cost = { ingot = cfg.kitCost, plasma = cfg.plasmaCost, eu = cfg.euCost },
+        budget = cfg.budget,
+        computation = cfg.computation,
+        -- The module tier is hardware, not a choice: only this module's own tier
+        -- is searched, so a recommendation is always one it can actually run.
+        modules = { row.miner.tier },
+        drones = pins.drone,
+        plasmas = pins.plasma,
+        distance = pins.distance,
+        -- A pinned overdrive goes in as the mode. Left open, the targeter throttles
+        -- to the demanded rate, and with no rate demanded that is its fast vertex.
+        mode = pins.overdrive,
+        limit = 12,
+        -- OpenComputers kills a thread that does not yield for long enough, and a
+        -- search is thousands of evaluations. Yielding costs nothing here.
+        onProgress = function() os.sleep(0) end,
+    }
+end
+
+-- Runs the search for the module's advisor and stores what came back on `adv`.
+local function runAdvise(row, adv)
+    adv.result, adv.error = nil, nil
+    if not adv.want then
+        adv.error = "Choose a material first."
+        return
+    end
+    local ok, res, err = pcall(targeter.search, { [adv.want] = 1 },
+        searchOpts(row, adv.pins))
+    if not ok then adv.error = "search failed: " .. tostring(res); return end
+    if not res then adv.error = tostring(err); return end
+    adv.result = res
+end
+
+-- The advisor as the dashboard renders it.
+local function buildAdvise(rows)
+    local row = rows[nav.module]
+    local adv = nav.advise
+    if not row or not adv then return nil end
+
+    local cur = currentOf(row)
+    local a = {
+        miner = row, cursor = adv.cursor, settingsCount = control.ADVISE_SETTINGS,
+        edit = adv.edit and adv.edit.field or nil,
+        error = adv.error, results = {}, notes = {},
+        rateLabel = adv.want and (adv.want .. "/s") or "WANTED/s",
+    }
+
+    -- The material, then one row per pinnable parameter.
+    local settings = {
+        {
+            label = "Want", value = adv.want,
+            note = string.format("%d materials a meteor can yield",
+                #targeter.materials()),
+            pending = adv.want,
+        },
+    }
+    for _, f in ipairs(control.FIELDS) do
+        local pin = adv.pins[f.key]
+        local shown, pending, note
+
+        local function nameOf(v)
+            if v == nil then return nil end
+            if f.key == "drone" then
+                local d = drones.get(v)
+                return d and ("MK-" .. d.roman) or tostring(v)
+            elseif f.key == "plasma" then
+                local p = plasmas.byTier[v]
+                return p and p.name or tostring(v)
+            elseif f.key == "overdrive" then
+                return string.format("%.2f", v)
+            end
+            return tostring(v)
+        end
+
+        if pin ~= nil then
+            shown = nameOf(pin) .. "  (pinned)"
+            note = "X releases it"
+        else
+            local now = nameOf(cur[f.key])
+            note = now and ("ENTER pins; " .. now .. " now") or "ENTER pins a value"
+        end
+        if adv.edit and adv.edit.field == f.key then pending = nameOf(adv.edit.value) end
+
+        settings[#settings + 1] = {
+            label = f.label, value = shown, note = note,
+            pinned = pin ~= nil, pending = pending, kind = f.kind,
+        }
+    end
+    a.settings = settings
+
+    local res = adv.result
+    if res then
+        a.summary = string.format("%d configuration(s) scanned, %d worth having",
+            res.scanned, #res.candidates)
+        for _, c in ipairs(res.candidates) do
+            local d = drones.get(c.drone)
+            a.results[#a.results + 1] = {
+                candidate = c,
+                score = string.format("%.4g", c.score),
+                drone = d and ("MK-" .. d.roman) or tostring(c.drone),
+                distance = (c.distance[1] == c.distance[2]) and tostring(c.distance[1])
+                    or (c.distance[1] .. "-" .. c.distance[2]),
+                plasma = c.plasmaName,
+                overdrive = string.format("%.2f", c.overdrive),
+                rate = string.format("%.2f", c.rates[adv.want] or 0),
+                purity = string.format("%.0f%%", (c.purity or 0) * 100),
+                eut = si(c.cost.euPerSecond / estimate.TPS),
+                kits = string.format("%.3f", c.cost.kits),
+            }
+        end
+        if #res.candidates == 0 then
+            -- Say WHY, because an empty table with pins set looks like a bug. The
+            -- usual answer is that the pins exclude everything that yields it.
+            a.empty = "No configuration of this module yields " .. tostring(adv.want)
+                .. " under these pins."
+            for _, note in ipairs(res.skipped) do
+                a.notes[#a.notes + 1] = note
+            end
+            if #res.infeasible > 0 then
+                a.notes[#a.notes + 1] = string.format(
+                    "%d were possible but over budget -- see cfg.budget.",
+                    #res.infeasible)
+            end
+        end
+    end
+
+    if adv.picking then
+        a.picking = { list = targeter.materials(), cursor = adv.picking.cursor }
+    end
+    return a
+end
+
+-- Applies a recommendation: the four parameters, queued like any other change.
+local function applyAdvice(row, c)
+    if not c then return end
+    local want = {
+        drone = c.drone,
+        -- The pool is identical across the whole interval the candidate reports,
+        -- so the near end is as good as any and the module travels less.
+        distance = c.distance[1],
+        overdrive = math.floor(c.overdrive * 100 + 0.5) / 100,
+        plasma = c.plasma,
+    }
+    local cur = currentOf(row)
+    local n = 0
+    for _, f in ipairs(control.FIELDS) do
+        if want[f.key] ~= nil and want[f.key] ~= cur[f.key] then
+            commitEdit(row, f.key, want[f.key])
+            n = n + 1
+        end
+    end
+    if n == 0 then
+        log(row.addr .. ": already set to the recommendation")
+    else
+        log(string.format("%s: %d setting(s) queued from the advisor", row.addr, n))
+    end
+end
+
 -- ---- rendering ---------------------------------------------------------------
 
 local tick = 0
@@ -825,6 +1048,7 @@ local function render()
         mode = "MANUAL", dryRun = cfg.dryRun, paused = paused, showLog = showLog,
         screen = nav.screen, moduleCursor = nav.module, clipboard = nav.clipboard,
         profile = (nav.screen == "profile") and profile.snapshot() or nil,
+        advise = (nav.screen == "advise") and buildAdvise(view.miners) or nil,
         detail = (nav.screen == "detail") and buildDetail(view.miners) or nil,
         focus = nav.focus, cursor = nav.cursor,
         confirm = nav.confirm and view.plasmas[nav.confirm]
@@ -883,58 +1107,39 @@ local quit = false
 -- a table worth reading whole.
 local PROFILE_FILE = "mining-profile.txt"
 
--- Queues a committed edit. Nothing is written here: a parameter needs the module
--- stopped, and a module mid-operation takes tens of seconds to get there, so the
--- control thread works at it in the background and the dashboard shows it
--- waiting. Which also means the key handler stays instant.
-local function commitEdit(row, field, value)
-    local extra
-    if field == "plasma" then
-        local p = plasmas.byTier[value]
-        if not p then return end
-        if not row.station or not row.hasFluid then
-            log(row.addr .. ": no plasma feed configured")
-            return
-        end
-        local slot, err = slotFor(p)
-        extra = { plasma = p, slot = slot, slotError = err }
-        -- Recorded as this module's intent right away, so the staging logic stops
-        -- treating it as a module that has lost its plasma.
-        desiredPlasma[row.addr] = p
-    end
+local function handleAdviseKey(char, code)
+    local row = view.miners[nav.module]
+    local adv = nav.advise
+    if not row or not adv then nav.screen = "dashboard"; return true end
 
-    local e = queue:want(row.addr, field, value, computer.uptime(), extra)
-    log(string.format("%s: %s queued", row.addr, (control.describe(e))))
-end
+    local action, changed = control.adviseKey(adv, {
+        materials = targeter.materials(),
+        cur = currentOf(row),
+        plasmas = #plasmas.list,
+        results = adv.result and #adv.result.candidates or 0,
+    }, char, code)
 
--- Applies a copied config to another module. Only the fields that DIFFER are
--- queued: pasting a value a module already has would stop it, write what was
--- already there, and start it again for nothing.
-local function pasteInto(row, clip)
-    if not clip then return end
-    if clip.addr == row.addr then
-        log(row.addr .. ": that is where the config came from")
-        return
+    if action == "advise-changed" then
+        runAdvise(row, adv)
+        -- A shorter list can leave the cursor past the end of it.
+        local rows = control.ADVISE_SETTINGS
+            + (adv.result and #adv.result.candidates or 0)
+        if adv.cursor > rows then adv.cursor = rows end
+    elseif action == "advise-apply" then
+        local i = adv.cursor - control.ADVISE_SETTINGS
+        local c = adv.result and adv.result.candidates[i]
+        applyAdvice(row, c)
+        view.miners = readFleet(true)
+    elseif action == "close" then
+        nav.screen = "detail"
+    elseif action == "log" then
+        showLog = not showLog
     end
-
-    local cur = currentOf(row)
-    local n = 0
-    for _, f in ipairs(control.FIELDS) do
-        local want = clip[f.key]
-        if want ~= nil and want ~= cur[f.key] then
-            commitEdit(row, f.key, want)
-            n = n + 1
-        end
-    end
-    if n == 0 then
-        log(row.addr .. ": already matches " .. tostring(clip.addr))
-    else
-        log(string.format("%s: %d setting(s) queued from %s", row.addr, n,
-            tostring(clip.addr)))
-    end
+    return changed
 end
 
 local function handleKey(char, code)
+    if nav.screen == "advise" then return handleAdviseKey(char, code) end
     local wasFocused = nav.focus
     local action, changed = control.key(nav, {
         modules = #(view.miners or {}),
@@ -952,7 +1157,23 @@ local function handleKey(char, code)
         end
     end
 
-    if action == "copy" then
+    if action == "advise" then
+        local row = view.miners[nav.module]
+        if row then
+            -- Opened on the material the module's own drone is made of when that
+            -- is a thing meteors drop, since "more of what I am already mining" is
+            -- the usual question. Otherwise on whatever it last looked at.
+            local want = (nav.advise and nav.advise.want) or nil
+            if not want and row.material then
+                for _, m in ipairs(targeter.materials()) do
+                    if m == row.material then want = m end
+                end
+            end
+            nav.advise = control.newAdvise(want)
+            nav.screen = "advise"
+            if want then runAdvise(row, nav.advise) end
+        end
+    elseif action == "copy" then
         local row = view.miners[nav.module]
         if row then
             -- The four drivable parameters, which is what a module's config IS --

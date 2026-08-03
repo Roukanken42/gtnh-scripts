@@ -968,7 +968,7 @@ end
 
 local AC = {
     cur = 0, score = 2, drone = 14, dist = 23, plasma = 34, od = 57,
-    rate = 64, purity = 78, eut = 87, kits = 99,
+    rate = 64, purity = 78, eut = 87, kits = 99, why = 112,
 }
 
 local function drawAdviseResults(state, x, y, w, h)
@@ -1009,6 +1009,7 @@ local function drawAdviseResults(state, x, y, w, h)
     cell(ix, hy, AC.purity, 8, padL("PURE", 7), C.faint, inner)
     cell(ix, hy, AC.eut, 11, padL("EU/t", 10), C.faint, inner)
     cell(ix, hy, AC.kits, 11, padL("KITS/s", 10), C.faint, inner)
+    cell(ix, hy, AC.why, inner - AC.why, "", C.faint, inner)
 
     if #list == 0 then
         cell(ix, y + 3, 0, inner, a.empty or "Nothing to recommend.", C.warn, inner)
@@ -1027,17 +1028,22 @@ local function drawAdviseResults(state, x, y, w, h)
             break
         end
         local sel = (a.cursor == (a.settingsCount or 0) + i)
+        -- A configuration nothing can supply is shown in red with what is missing,
+        -- rather than silently sitting among ones that can be run.
+        local bad = r.bad
         cell(ix, row, AC.cur, 2, sel and ARROW or " ", C.focus, inner)
         cell(ix, row, AC.score, 11, padL(r.score or "-", 10),
-            i == 1 and C.good or C.text, inner)
-        cell(ix, row, AC.drone, 8, r.drone or "-", C.text, inner)
+            bad and C.crit or (i == 1 and C.good or C.text), inner)
+        cell(ix, row, AC.drone, 8, r.drone or "-", bad and C.crit or C.text, inner)
         cell(ix, row, AC.dist, 10, r.distance or "-", C.dim, inner)
         cell(ix, row, AC.plasma, 22, r.plasma or "-", C.mine, inner)
         cell(ix, row, AC.od, 6, r.overdrive or "-", C.dim, inner)
-        cell(ix, row, AC.rate, 13, padL(r.rate or "-", 12), C.good, inner)
+        cell(ix, row, AC.rate, 13, padL(r.rate or "-", 12),
+            bad and C.crit or C.good, inner)
         cell(ix, row, AC.purity, 8, padL(r.purity or "-", 7), C.dim, inner)
         cell(ix, row, AC.eut, 11, padL(r.eut or "-", 10), C.dim, inner)
         cell(ix, row, AC.kits, 11, padL(r.kits or "-", 10), C.dim, inner)
+        cell(ix, row, AC.why, inner - AC.why, r.why or "", C.crit, inner)
     end
 end
 

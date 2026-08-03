@@ -609,18 +609,24 @@ end
 --   picking  { cursor } while a material is being chosen
 --   result   whatever the last search returned
 
--- want, then one row per pinnable field.
-control.ADVISE_SETTINGS = 1 + #control.FIELDS
+-- want, one row per pinnable field, then the unavailable-configurations toggle.
+control.ADVISE_SETTINGS = 2 + #control.FIELDS
 
 function control.newAdvise(want)
-    return { want = want, pins = {}, cursor = 1, edit = nil, picking = nil }
+    -- Configurations the fleet cannot actually supply are HIDDEN to begin with.
+    -- A recommendation you cannot run is worse than one fewer recommendation, and
+    -- hiding them also stops them filling the result limit and crowding out the
+    -- ones you can.
+    return { want = want, pins = {}, cursor = 1, edit = nil, picking = nil,
+             showAll = false }
 end
 
 -- Applies a keypress to the advisor. `ctx.materials` is the list a material is
 -- chosen from, `ctx.cur` the module's live values (what a pin starts from), and
 -- `ctx.results` how many recommendations are on screen.
--- Returns "advise-changed" when the search has to be re-run, "advise-apply" when
--- a recommendation was chosen (st.cursor says which), "close" to leave.
+-- Returns "advise-changed" when the search has to be re-run, "advise-filter" when
+-- only what is shown changed, "advise-apply" when a recommendation was chosen
+-- (st.cursor says which), "close" to leave.
 function control.adviseKey(st, ctx, char, code)
     local KEY, CH = control.KEY, control.CH
     local function enter() return code == KEY.enter or code == KEY.numEnter end
@@ -706,7 +712,11 @@ function control.adviseKey(st, ctx, char, code)
             for i, m in ipairs(mats) do if m == st.want then at = i end end
             st.picking = { cursor = at }
             return nil, true
-        elseif st.cursor <= control.ADVISE_SETTINGS then
+        elseif st.cursor == control.ADVISE_SETTINGS then
+            -- The last setting row: show or hide what cannot be supplied.
+            st.showAll = not st.showAll
+            return "advise-filter", true
+        elseif st.cursor < control.ADVISE_SETTINGS then
             local f = control.FIELDS[st.cursor - 1]
             -- Seeded from the pin if there is one, else from what the module is
             -- actually set to: "best if I keep what I have" is the common ask.
@@ -723,7 +733,7 @@ function control.adviseKey(st, ctx, char, code)
 
     -- Releasing a pin back to "any".
     if (char == CH.x or code == KEY.delete)
-        and st.cursor > 1 and st.cursor <= control.ADVISE_SETTINGS then
+        and st.cursor > 1 and st.cursor < control.ADVISE_SETTINGS then
         local f = control.FIELDS[st.cursor - 1]
         if st.pins[f.key] == nil then return nil, false end
         st.pins[f.key] = nil

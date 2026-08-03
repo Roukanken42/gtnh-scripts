@@ -90,6 +90,12 @@ local ctx = cli.start({
             .. "narrows the search rather than filtering its results, so what comes "
             .. "back is the best available UNDER the pin. Only the module's own tier "
             .. "is searched, since that is hardware.",
+        "Configurations the fleet cannot supply -- kits of a material with no "
+            .. "pattern, a plasma with no pattern, a drone tier nobody owns -- are "
+            .. "left out by default, since a recommendation you cannot run is worse "
+            .. "than one fewer. The last setting row shows them instead, marked in "
+            .. "red with what is missing. A PINNED drone or plasma is always "
+            .. "searched, available or not.",
         "M and O open the whole fleet's meteor pool and ore output -- the same two "
             .. "questions a module's detail screen answers, added up across every "
             .. "module that has a drone, a distance and plasma. Both scroll, as do "
@@ -239,6 +245,11 @@ local showLog = false
 
 local view = { miners = {}, kits = {}, plasmas = {}, totals = {} }
 local stock = { items = {}, fluids = {} }
+
+-- Drone tier -> how many the local net holds. A drone is a catalyst rather than a
+-- consumable, so this is a presence check: read alongside the stock, since it is
+-- the same kind of question and the same cadence.
+local droneStock = {}
 
 -- Where the keyboard is: which screen, which row, and what is being edited.
 -- control.key owns every transition; main only carries the actions out.
@@ -514,6 +525,15 @@ local function runCycle()
         stock = supply.stock(catalog, net)
         stockFresh = true
         doneRefresh()
+    end
+
+    if full and net then
+        local doneDrones = profile.span("read drones in stock")
+        droneStock = {}
+        for _, d in ipairs(localnet.dronesInStock(net)) do
+            if d.tier then droneStock[d.tier] = (droneStock[d.tier] or 0) + (d.size or 0) end
+        end
+        doneDrones()
     end
 
     -- A fleet-wide plasma choice becomes one queued change per module, exactly as
@@ -914,6 +934,58 @@ local function buildDetail(rows)
     return d
 end
 
+-- ---- what can actually be run ------------------------------------------------
+--
+-- The advisor will happily recommend a configuration nothing can keep supplied:
+-- kits of a material with no pattern, a plasma with no pattern, a drone tier
+-- nobody owns. Those are worse than no recommendation, so what is available is
+-- worked out here and the search is narrowed to it.
+--
+-- Derived from the pattern catalog plus the drones the local net holds, so it costs
+-- nothing beyond the one drone query folded into the stock read.
+
+local function availability()
+    local kits, plasmaOf, dronePattern = {}, {}, {}
+    for _, e in ipairs(catalog) do
+        if e.kind == "kit" then kits[e.material] = true
+        elseif e.kind == "plasma" then plasmaOf[e.plasma.tier] = true
+        elseif e.kind == "drone" then dronePattern[e.drone.tier] = true end
+    end
+    return { kits = kits, plasma = plasmaOf, dronePattern = dronePattern,
+             droneStock = droneStock }
+end
+
+-- Why a drone tier cannot be run, or nil if it can. A tier needs the drone itself
+-- -- in the local net, or fetchable through a pattern -- and a kit pattern for the
+-- material its drill tips and rods are made of.
+local function droneTrouble(avail, tier)
+    local d = drones.get(tier)
+    if not d then return "no such drone" end
+    if not (avail.droneStock[tier] or avail.dronePattern[tier]) then
+        return "no MK-" .. d.roman .. " drone"
+    end
+    if not avail.kits[d.material] then return "no " .. d.material .. " kits" end
+    return nil
+end
+
+local function plasmaTrouble(avail, tier)
+    if avail.plasma[tier] then return nil end
+    local p = plasmas.byTier[tier]
+    return "no " .. ((p and p.name) or ("plasma " .. tostring(tier)))
+end
+
+-- The tiers worth searching: everything the fleet can be supplied with.
+local function obtainable(avail)
+    local ds, ps = {}, {}
+    for tier = drones.MIN_TIER, drones.MAX_TIER do
+        if not droneTrouble(avail, tier) then ds[#ds + 1] = tier end
+    end
+    for _, p in ipairs(plasmas.list) do
+        if not plasmaTrouble(avail, p.tier) then ps[#ps + 1] = p.tier end
+    end
+    return ds, ps
+end
+
 -- ---- the fleet breakdowns ---------------------------------------------------
 --
 -- The same two questions a module's detail screen answers, asked of the whole
@@ -1061,7 +1133,24 @@ end
 -- ---- the advisor -------------------------------------------------------------
 
 -- What the targeter is told about what things cost and what can be supplied.
-local function searchOpts(row, pins)
+local function searchOpts(row, pins, showAll)
+    -- Unless asked to show everything, the search is narrowed to what the fleet can
+    -- be supplied with -- BEFORE ranking, not after. Filtering the results instead
+    -- would let unrunnable configurations fill the result limit and crowd out the
+    -- ones that can actually be run.
+    --
+    -- A pin always wins: asking specifically for a drone means wanting to see it
+    -- even when nothing can supply it, and the row says so.
+    local onlyDrones, onlyPlasmas = pins.drone, pins.plasma
+    if not showAll then
+        local ds, ps = obtainable(availability())
+        -- An empty list would mean "nothing at all", which target.search reads as
+        -- no restriction. Nothing obtainable is worth saying rather than silently
+        -- searching everything, so it is left unfiltered and every row gets
+        -- labelled instead.
+        if not onlyDrones and #ds > 0 then onlyDrones = ds end
+        if not onlyPlasmas and #ps > 0 then onlyPlasmas = ps end
+    end
     return {
         cost = { ingot = cfg.kitCost, plasma = cfg.plasmaCost, eu = cfg.euCost },
         budget = cfg.budget,
@@ -1069,8 +1158,8 @@ local function searchOpts(row, pins)
         -- The module tier is hardware, not a choice: only this module's own tier
         -- is searched, so a recommendation is always one it can actually run.
         modules = { row.miner.tier },
-        drones = pins.drone,
-        plasmas = pins.plasma,
+        drones = onlyDrones,
+        plasmas = onlyPlasmas,
         distance = pins.distance,
         -- A pinned overdrive goes in as the mode. Left open, the targeter throttles
         -- to the demanded rate, and with no rate demanded that is its fast vertex.
@@ -1090,7 +1179,7 @@ local function runAdvise(row, adv)
         return
     end
     local ok, res, err = pcall(targeter.search, { [adv.want] = 1 },
-        searchOpts(row, adv.pins))
+        searchOpts(row, adv.pins, adv.showAll))
     if not ok then adv.error = "search failed: " .. tostring(res); return end
     if not res then adv.error = tostring(err); return end
     adv.result = res
@@ -1163,6 +1252,16 @@ local function buildAdvise(rows)
             pinned = pin ~= nil, pending = pending, kind = f.kind,
         }
     end
+    -- The last row: what to do with configurations nothing can supply.
+    local avail = availability()
+    local ds, ps = obtainable(avail)
+    settings[#settings + 1] = {
+        label = "Unavailable",
+        value = adv.showAll and "shown" or "hidden",
+        pinned = adv.showAll,
+        note = string.format("ENTER toggles; %d of %d drones and %d of %d plasmas "
+            .. "can be supplied", #ds, drones.MAX_TIER, #ps, #plasmas.list),
+    }
     a.settings = settings
 
     local res = adv.result
@@ -1171,7 +1270,18 @@ local function buildAdvise(rows)
             res.scanned, #res.candidates)
         for _, c in ipairs(res.candidates) do
             local d = drones.get(c.drone)
+            -- Why this one cannot be run, if it cannot. Only ever non-empty when
+            -- unavailable configurations are being shown, or when a pin forced one
+            -- into the list.
+            local why = {}
+            local dt = droneTrouble(avail, c.drone)
+            if dt then why[#why + 1] = dt end
+            local pt = plasmaTrouble(avail, c.plasma)
+            if pt then why[#why + 1] = pt end
+
             a.results[#a.results + 1] = {
+                bad = (#why > 0) or nil,
+                why = (#why > 0) and table.concat(why, ", ") or nil,
                 candidate = c,
                 score = string.format("%.4g", c.score),
                 drone = d and ("MK-" .. d.roman) or tostring(c.drone),
@@ -1185,11 +1295,16 @@ local function buildAdvise(rows)
                 kits = string.format("%.3f", c.cost.kits),
             }
         end
+        if #a.results == 0 and #res.candidates > 0 then
+            a.empty = "Everything found needs something the fleet cannot supply."
+        end
         if #res.candidates == 0 then
             -- Say WHY, because an empty table with pins set looks like a bug. The
             -- usual answer is that the pins exclude everything that yields it.
             a.empty = "No configuration of this module yields " .. tostring(adv.want)
-                .. " under these pins."
+                .. " under these pins"
+                .. (adv.showAll and "." or
+                    " that the fleet can supply -- the Unavailable row shows the rest.")
             for _, note in ipairs(res.skipped) do
                 a.notes[#a.notes + 1] = note
             end
@@ -1327,7 +1442,15 @@ local function handleAdviseKey(char, code)
         results = adv.result and #adv.result.candidates or 0,
     }, char, code)
 
-    if action == "advise-changed" then
+    if action == "advise-filter" then
+        -- Narrowing happens inside the search, so this does need re-running -- but
+        -- say so plainly rather than pretending the pins changed.
+        adv.applied = nil
+        runAdvise(row, adv)
+        local rows = control.ADVISE_SETTINGS
+            + (adv.result and #adv.result.candidates or 0)
+        if adv.cursor > rows then adv.cursor = rows end
+    elseif action == "advise-changed" then
         adv.applied = nil
         runAdvise(row, adv)
         -- A shorter list can leave the cursor past the end of it.

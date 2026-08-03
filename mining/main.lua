@@ -221,7 +221,10 @@ local jobs = control.newJobs(jobLimits)
 -- controller works at these in the background instead of waiting.
 local queue = control.newQueue()
 local satisfied = {}            -- hysteresis latch, carried across cycles
-local activePlasma = nil        -- the plasma the fleet runs on
+-- The plasma most of the fleet is on. DISPLAY ONLY -- the KPI card and the marker
+-- in the plasma picker. No decision reads it: what a given module should be on is
+-- control.plasmaFor, which deliberately never consults the fleet.
+local activePlasma = nil
 local desiredPlasma = {}        -- address -> plasma a module was switched to
 local pendingPlasma = nil       -- chosen in the UI, applied by the next cycle
 local plasmaSlots = {}          -- plasma name -> database slot of its drop
@@ -341,15 +344,12 @@ local function currentOf(row)
     }
 end
 
--- The plasma a module is MEANT to be on: what it was last told, which is not
--- what its hatch holds while a switch is settling. Without this the controller
--- sees a freshly drained hatch, decides the module has no plasma, and points it
--- back at the fleet's -- undoing the switch every time.
+-- The plasma a module is MEANT to be on. The precedence, and the deliberate
+-- absence of a fleet-wide fallback at the end of it, are in control.plasmaFor.
 local function wantedPlasma(row)
     local queued = queue:find(row.addr, "plasma")
-    if queued and queued.plasma then return queued.plasma end
-    if desiredPlasma[row.addr] then return desiredPlasma[row.addr] end
-    return activePlasma
+    return control.plasmaFor(queued and queued.plasma or nil,
+        desiredPlasma[row.addr], row.plasma)
 end
 
 local function detectPlasma(rows)
@@ -575,8 +575,10 @@ local function runCycle()
             material = r.material, hasFluid = r.hasFluid, plasma = wantedPlasma(r),
         }
     end
+    -- No fleet-wide default: every entry already carries the plasma its own module
+    -- is on, and one that carries none is a module nothing should be stocked for.
     local kitTargets, plasmaTargets, from =
-        control.demand(demandFleet, scfg, ccfg, activePlasma)
+        control.demand(demandFleet, scfg, ccfg, nil)
 
     -- Kits go one per meteor and meteors take tens of seconds, so re-reading the
     -- whole net every cycle only buys staleness nobody can see.

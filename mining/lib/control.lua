@@ -120,6 +120,27 @@ function control.demand(fleet, scfg, ccfg, plasma)
     return kits, litres, from
 end
 
+-- The plasma a module is MEANT to be on, in order of authority:
+--
+--   1. a queued change      the switch being carried out right now, which is not
+--                          what the hatch holds until it lands
+--   2. what it was told     an individual or fleet-wide choice, remembered so a
+--                          freshly drained hatch is not mistaken for a module
+--                          that has lost its plasma
+--   3. what is in its hatch what it is demonstrably running
+--
+-- And NOTHING after that. In particular NOT the fleet's plasma, which used to be
+-- the last resort and turned advising ONE module into a fleet-wide switch: the
+-- module filled, it became the only hatch holding anything, so the fleet majority
+-- became its plasma -- and every other module, having no opinion of its own, read
+-- that majority and was primed with it. A module nobody has configured has no
+-- plasma, and the controller may not invent one for it.
+function control.plasmaFor(queued, told, inHatch)
+    if queued then return queued end
+    if told then return told end
+    return inHatch
+end
+
 -- ---- restock jobs -----------------------------------------------------------
 
 local Jobs = {}

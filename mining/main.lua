@@ -962,7 +962,7 @@ local function droneTrouble(avail, tier)
     local d = drones.get(tier)
     if not d then return "no such drone" end
     if not (avail.droneStock[tier] or avail.dronePattern[tier]) then
-        return "no MK-" .. d.roman .. " drone"
+        return "no MK-" .. d.roman
     end
     if not avail.kits[d.material] then return "no " .. d.material .. " kits" end
     return nil
@@ -1287,12 +1287,17 @@ local function buildAdvise(rows)
                 drone = d and ("MK-" .. d.roman) or tostring(c.drone),
                 distance = (c.distance[1] == c.distance[2]) and tostring(c.distance[1])
                     or (c.distance[1] .. "-" .. c.distance[2]),
-                plasma = c.plasmaName,
+                -- The suffix is on every one of them and the header says PLASMA,
+                -- so it is eight columns of nothing.
+                plasma = (c.plasmaName:gsub(" Plasma$", "")),
                 overdrive = string.format("%.2f", c.overdrive),
                 rate = string.format("%.2f", c.rates[adv.want] or 0),
                 purity = string.format("%.0f%%", (c.purity or 0) * 100),
                 eut = si(c.cost.euPerSecond / estimate.TPS),
                 kits = string.format("%.3f", c.cost.kits),
+                -- Litres a second, the same question KITS/s answers: can the line
+                -- that makes this actually keep up with the module burning it.
+                plasmaRate = string.format("%.1f", c.cost.plasmaPerSecond),
             }
         end
         if #a.results == 0 and #res.candidates > 0 then

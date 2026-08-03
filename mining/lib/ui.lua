@@ -966,9 +966,12 @@ local function drawAdviseSettings(state, x, y, w, h)
     end
 end
 
+-- The plasma NAME column lost eight columns to make room for the plasma RATE:
+-- every value in it ended in " Plasma", which carries no information when the
+-- header already says so.
 local AC = {
-    cur = 0, score = 2, drone = 14, dist = 23, plasma = 34, od = 57,
-    rate = 64, purity = 78, eut = 87, kits = 99, why = 112,
+    cur = 0, score = 2, drone = 14, dist = 23, plasma = 34, od = 49,
+    rate = 56, purity = 70, eut = 79, kits = 91, lps = 103, why = 116,
 }
 
 local function drawAdviseResults(state, x, y, w, h)
@@ -1003,12 +1006,13 @@ local function drawAdviseResults(state, x, y, w, h)
     cell(ix, hy, AC.score, 11, padL("POINTS/ITEM", 11), C.faint, inner)
     cell(ix, hy, AC.drone, 8, "DRONE", C.faint, inner)
     cell(ix, hy, AC.dist, 10, "DISTANCE", C.faint, inner)
-    cell(ix, hy, AC.plasma, 22, "PLASMA", C.faint, inner)
+    cell(ix, hy, AC.plasma, 14, "PLASMA", C.faint, inner)
     cell(ix, hy, AC.od, 6, "OD", C.faint, inner)
     cell(ix, hy, AC.rate, 13, padL(a.rateLabel or "WANTED/s", 12), C.faint, inner)
     cell(ix, hy, AC.purity, 8, padL("PURE", 7), C.faint, inner)
     cell(ix, hy, AC.eut, 11, padL("EU/t", 10), C.faint, inner)
     cell(ix, hy, AC.kits, 11, padL("KITS/s", 10), C.faint, inner)
+    cell(ix, hy, AC.lps, 12, padL("PLASMA L/s", 11), C.faint, inner)
     cell(ix, hy, AC.why, inner - AC.why, "", C.faint, inner)
 
     if #list == 0 then
@@ -1036,13 +1040,14 @@ local function drawAdviseResults(state, x, y, w, h)
             bad and C.crit or (i == 1 and C.good or C.text), inner)
         cell(ix, row, AC.drone, 8, r.drone or "-", bad and C.crit or C.text, inner)
         cell(ix, row, AC.dist, 10, r.distance or "-", C.dim, inner)
-        cell(ix, row, AC.plasma, 22, r.plasma or "-", C.mine, inner)
+        cell(ix, row, AC.plasma, 14, r.plasma or "-", bad and C.crit or C.mine, inner)
         cell(ix, row, AC.od, 6, r.overdrive or "-", C.dim, inner)
         cell(ix, row, AC.rate, 13, padL(r.rate or "-", 12),
             bad and C.crit or C.good, inner)
         cell(ix, row, AC.purity, 8, padL(r.purity or "-", 7), C.dim, inner)
         cell(ix, row, AC.eut, 11, padL(r.eut or "-", 10), C.dim, inner)
         cell(ix, row, AC.kits, 11, padL(r.kits or "-", 10), C.dim, inner)
+        cell(ix, row, AC.lps, 12, padL(r.plasmaRate or "-", 11), C.dim, inner)
         cell(ix, row, AC.why, inner - AC.why, r.why or "", C.crit, inner)
     end
 end

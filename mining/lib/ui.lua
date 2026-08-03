@@ -677,29 +677,31 @@ local function drawParams(state, x, y, w, h)
     cell(ix, y + h - 2, 0, inner, d.rates or "", C.dim, inner)
 end
 
--- CHANCE | METEOR | SIZE | TIME | RUNTIME | PAR | EU/t | COMP, with a bar for the
--- chance.
+-- RUNTIME | METEOR | SIZE | TIME | CHANCE | PAR | EU/t | COMP, with the bar on the
+-- runtime.
 --
--- CHANCE is how often a meteor is rolled; RUNTIME is how much of the clock it
--- actually eats, which is the chance weighted by how long that meteor takes. They
--- come apart badly: something rolled one time in ten that takes three times as long
--- as the rest accounts for a quarter of the module's working life, and it is the
--- second number that says which meteor is really setting your throughput.
-local PC = { bar = 0, pct = 11, name = 17, size = 45, time = 58, share = 67,
+-- RUNTIME leads because it is the answer to the question people bring to this
+-- table. CHANCE is how often a meteor is rolled; RUNTIME is how much of the clock
+-- it eats -- the chance weighted by how long it takes -- and they come apart
+-- badly. Something rolled one time in seven that takes four times as long as the
+-- rest is where a third of the module's life goes, so it is RUNTIME that says which
+-- meteor is setting the throughput. The rows are sorted by it too.
+local PC = { bar = 0, pct = 11, name = 17, size = 45, time = 58, chance = 67,
              par = 78, eut = 84, comp = 95, note = 105 }
 
 local function drawPool(state, x, y, w, h)
     local d = state.detail or {}
     local list = d.pool or {}
-    panel(x, y, w, h, "METEOR POOL  " .. #list .. "  " .. MIDDOT .. "  TAB for ore output")
+    panel(x, y, w, h, "METEOR POOL  " .. #list .. "  " .. MIDDOT
+        .. "  by share of running time  " .. MIDDOT .. "  TAB for ore output")
     local ix, inner = x + 2, w - 4
     local hy = y + 1
 
-    cell(ix, hy, PC.bar, 10, "CHANCE", C.faint, inner)
+    cell(ix, hy, PC.bar, 10, "RUNTIME", C.faint, inner)
     cell(ix, hy, PC.name, 27, "METEOR", C.faint, inner)
     cell(ix, hy, PC.size, 12, "SIZE", C.faint, inner)
     cell(ix, hy, PC.time, 8, "TIME", C.faint, inner)
-    cell(ix, hy, PC.share, 10, padL("RUNTIME", 9), C.faint, inner)
+    cell(ix, hy, PC.chance, 10, padL("CHANCE", 9), C.faint, inner)
     cell(ix, hy, PC.par, 5, "PAR", C.faint, inner)
     cell(ix, hy, PC.eut, 10, "EU/t", C.faint, inner)
     cell(ix, hy, PC.comp, 9, "COMP", C.faint, inner)
@@ -715,6 +717,15 @@ local function drawPool(state, x, y, w, h)
         return
     end
 
+    -- The bars are scaled to the BIGGEST share rather than to 100%: no single
+    -- meteor holds much more than a third of the time, so absolute bars would all
+    -- sit in the first few cells and compare nothing. The percentage beside each
+    -- one is the absolute figure; the bar is for reading the ranking at a glance.
+    local top = 0
+    for _, e in ipairs(list) do
+        if (e.share or 0) > top then top = e.share end
+    end
+
     for i, e in ipairs(list) do
         local row = y + 1 + i
         if row > y + h - 2 then
@@ -724,17 +735,16 @@ local function drawPool(state, x, y, w, h)
         end
         local col = e.blocked and C.crit or C.text
         if inner - PC.bar >= 10 then
-            bar(ix + PC.bar, row, 10, e.chance or 0, e.blocked and C.crit or C.accent2,
-                C.panelHi)
+            bar(ix + PC.bar, row, 10, (top > 0) and ((e.share or 0) / top) or 0,
+                e.blocked and C.crit or C.accent2, C.panelHi)
         end
-        cell(ix, row, PC.pct, 6, padL(string.format("%.1f%%", (e.chance or 0) * 100), 5),
-            C.dim, inner)
+        cell(ix, row, PC.pct, 6, padL(e.runtime or "-", 5),
+            e.blocked and C.faint or C.text, inner)
         cell(ix, row, PC.name, 27, e.name or "?", col, inner)
         cell(ix, row, PC.size, 12, e.size or "-", C.dim, inner)
         cell(ix, row, PC.time, 8, e.time or "-", C.dim, inner)
-        -- Coloured like the chance bar: this is the share that matters most.
-        cell(ix, row, PC.share, 10, padL(e.runtime or "-", 9),
-            e.blocked and C.faint or C.accent2, inner)
+        cell(ix, row, PC.chance, 10,
+            padL(string.format("%.1f%%", (e.chance or 0) * 100), 9), C.dim, inner)
         cell(ix, row, PC.par, 5, tostring(e.parallels or "-"), C.dim, inner)
         cell(ix, row, PC.eut, 10, e.eut or "-", C.dim, inner)
         cell(ix, row, PC.comp, 9, e.computation or "-", C.dim, inner)

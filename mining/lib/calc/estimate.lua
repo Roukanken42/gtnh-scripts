@@ -159,8 +159,11 @@ end
 -- Returns nil + error on bad parameters, otherwise:
 --   { params,                   -- the resolved parameters
 --     pool = {                  -- runnable meteors, most likely first
---       { meteor, name, weight, chance, parallels, limit, time, stacks,
---         eut, computation, plasma, kits, yield }, ... },
+--       { meteor, name, weight, chance, timeShare, parallels, limit, time,
+--         stacks, eut, computation, plasma, kits, yield }, ... },
+--                               -- chance is the share of ROLLS; timeShare the
+--                               -- share of RUNNING TIME, which is the one that
+--                               -- says where the module's life actually goes
 --     blocked,                  -- same shape, but parallels = 0 and `needs` =
 --                               -- { eut, computation } for one parallel; `limit`
 --                               -- says which of the two fell short
@@ -247,6 +250,18 @@ function estimate.run(params)
             end
             a.stacks = a.stacks + c * y.stacks * e.parallels
         end
+    end
+
+    -- What share of the module's RUNNING TIME each meteor accounts for: its chance
+    -- weighted by how long it takes, over the average length of an operation.
+    -- expTime is the sum of exactly these numerators, so the shares add to 1.
+    --
+    -- Not the same thing as the chance, and not close to it. A meteor rolled one
+    -- time in seven that takes four times as long as the rest is where a third of
+    -- the module's life goes -- so this, rather than the chance, is what says which
+    -- meteor is setting the throughput.
+    for _, e in ipairs(pool) do
+        e.timeShare = (expTime > 0) and (e.chance * e.time / expTime) or 0
     end
 
     table.sort(pool, function(a, b) return a.chance > b.chance end)

@@ -824,18 +824,25 @@ local function buildDetail(rows)
         return d
     end
 
-    for _, e in ipairs(est.pool) do
+    -- Ordered by share of RUNNING TIME, not by chance. estimate.run hands the pool
+    -- over most-likely-first, which is its documented contract and no use here: the
+    -- meteor at the top of this table should be the one the module actually spends
+    -- its life on, and those are frequently not the same meteor.
+    local runnable = {}
+    for _, e in ipairs(est.pool) do runnable[#runnable + 1] = e end
+    table.sort(runnable, function(a, b)
+        if a.timeShare ~= b.timeShare then return a.timeShare > b.timeShare end
+        return a.name < b.name
+    end)
+
+    for _, e in ipairs(runnable) do
         local sz = e.meteor and e.meteor.size
-        -- The share of RUNNING TIME this meteor accounts for, as opposed to the
-        -- share of rolls. est.cycle is the chance-weighted average length of an
-        -- operation -- the sum of exactly these numerators -- so dividing by it
-        -- gives a share of the clock, and the column adds up to 100%.
-        local share = (est.cycle > 0) and (e.chance * e.time / est.cycle) or 0
         d.pool[#d.pool + 1] = {
             name = e.name, chance = e.chance, parallels = e.parallels,
+            share = e.timeShare,
             size = sz and (sz[1] .. "-" .. sz[2]) or "-",
             time = secs(e.time), eut = si(e.eut), computation = si(e.computation),
-            runtime = string.format("%.1f%%", share * 100),
+            runtime = string.format("%.1f%%", (e.timeShare or 0) * 100),
             note = e.limit and ("capped by " .. e.limit) or nil,
         }
     end

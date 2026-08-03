@@ -96,8 +96,11 @@ local ctx = cli.start({
             .. "rather than quitting. Only the settings that actually differ are "
             .. "queued, so pasting does not stop a module to write what it already "
             .. "has.",
-        "SPACE pauses maintenance (the modules keep running); L shows the log; "
-            .. "Q quits.",
+        "Q always means BACK OUT ONE LEVEL: cancel an edit, close a picker, leave "
+            .. "a screen -- and on the dashboard with nothing open, quit. There is no "
+            .. "ESC binding anywhere, because pressing it in OpenComputers closes the "
+            .. "screen instead of reaching the program.",
+        "SPACE pauses maintenance (the modules keep running); L shows the log.",
         "Run with --profile when a cycle feels slow, then press F: it shows where "
             .. "each cycle's time went and how many component calls it made. That "
             .. "second number is usually the answer -- an OpenComputers call that is "

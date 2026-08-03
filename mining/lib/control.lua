@@ -286,10 +286,17 @@ end
 --            -- stray Q cannot end the program mid-copy.
 --
 -- Letters are matched on the CHARACTER and navigation on the SCANCODE: a
--- character is what the keyboard layout actually produced, while arrows, TAB and
--- ESC have none. The codes are the ones OpenComputers reports (LWJGL).
+-- character is what the keyboard layout actually produced, while the arrows and
+-- TAB have none. The codes are the ones OpenComputers reports (LWJGL).
+--
+-- THERE IS NO ESCAPE KEY. Pressing it in OpenComputers closes the screen rather
+-- than delivering a key_down, so a program can never see it -- an ESC binding is
+-- a dead end with no way out of whatever it was supposed to leave. Q does that
+-- job everywhere instead, and means the same thing at every depth: BACK OUT ONE
+-- LEVEL. Cancel an edit, close a picker, leave a screen -- and at the top, with
+-- nothing open, quit.
 control.KEY = {
-    esc = 1, tab = 15, enter = 28, numEnter = 156,
+    tab = 15, enter = 28, numEnter = 156,
     up = 200, down = 208, left = 203, right = 205,
     pageUp = 201, pageDown = 209, delete = 211,
 }
@@ -384,15 +391,15 @@ function control.key(st, ctx, char, code)
             return nil, true
         end
         if enter() then return "commit", true end
-        if code == KEY.esc then st.edit = nil; return nil, true end
+        if char == CH.q then st.edit = nil; return nil, true end
         return nil, false
     end
 
     -- ---- the profile screen ----
-    -- Read-only, so it needs no guarding: ESC leaves, S writes a file, R starts
-    -- the measurement again.
+    -- Read-only, so it needs no guarding: Q leaves, S writes a file, R starts the
+    -- measurement again.
     if st.screen == "profile" then
-        if code == KEY.esc or char == CH.q or char == CH.f then
+        if char == CH.q or char == CH.f then
             st.screen = "dashboard"
             return nil, true
         end
@@ -416,7 +423,7 @@ function control.key(st, ctx, char, code)
             st.edit = { field = f.key, value = cur }
         elseif char == CH.a then
             return "advise", true
-        elseif code == KEY.esc or char == CH.q then
+        elseif char == CH.q then
             return "close", true
         elseif char == CH.l then return "log", true
         else return nil, false
@@ -430,7 +437,7 @@ function control.key(st, ctx, char, code)
     -- lose the selection.
     if st.confirm then
         if enter() then return "apply-plasma", true end
-        if code == KEY.esc or char == CH.q then st.confirm = nil; return nil, true end
+        if char == CH.q then st.confirm = nil; return nil, true end
         return nil, false
     end
 
@@ -441,7 +448,7 @@ function control.key(st, ctx, char, code)
         elseif enter() then
             if nPla <= 0 then return nil, false end
             st.confirm = st.cursor
-        elseif code == KEY.esc or char == CH.p or char == CH.q then
+        elseif char == CH.p or char == CH.q then
             st.focus = nil
         else
             return nil, false
@@ -543,10 +550,14 @@ function control.adviseKey(st, ctx, char, code)
             st.want = mats[st.picking.cursor]
             st.picking = nil
             return "advise-changed", true
-        elseif code == KEY.esc then
+        elseif char == CH.q then
             st.picking = nil
-        elseif char and char >= 97 and char <= 122 then
-            local want = string.char(char)
+        elseif char and ((char >= 97 and char <= 122) or (char >= 65 and char <= 90)) then
+            -- Q is spent on backing out, which would leave Quantium and Quartzite
+            -- reachable only by scrolling -- so an UPPERCASE letter jumps too, and
+            -- shift-Q gets to them. A different character code, so there is no
+            -- clash with the lowercase q that cancels.
+            local want = string.char(char):lower()
             for i, m in ipairs(mats) do
                 if m:sub(1, 1):lower() == want then st.picking.cursor = i; break end
             end
@@ -582,7 +593,7 @@ function control.adviseKey(st, ctx, char, code)
             st.edit = nil
             return "advise-changed", true
         end
-        if code == KEY.esc then st.edit = nil; return nil, true end
+        if char == CH.q then st.edit = nil; return nil, true end
         return nil, false
     end
 
@@ -627,7 +638,7 @@ function control.adviseKey(st, ctx, char, code)
         return "advise-changed", true
     end
 
-    if code == KEY.esc or char == CH.a or char == CH.q then return "close", true end
+    if char == CH.a or char == CH.q then return "close", true end
     if char == CH.l then return "log", true end
     return nil, false
 end

@@ -299,17 +299,17 @@ local function hintFor(state)
     if state.screen == "advise" then
         local a = state.advise or {}
         if a.picking then
-            return "[" .. UPDOWN .. "] or a letter  [ENTER] pick  [ESC] cancel"
+            return "[" .. UPDOWN .. "] or a letter  [ENTER] pick  [Q] cancel"
         end
         if a.edit then
             return "[" .. UPDOWN .. "] adjust  [" .. LEFTRIGHT
-                .. "] jump  [ENTER] pin  [ESC] cancel"
+                .. "] jump  [ENTER] pin  [Q] cancel"
         end
-        return "[" .. UPDOWN .. "] row  [ENTER] change or apply  [X] unpin  [ESC] back"
+        return "[" .. UPDOWN .. "] row  [ENTER] change or apply  [X] unpin  [Q] back"
     end
 
     if state.screen == "profile" then
-        return "[S] save  [R] reset  [L] log  [ESC] back"
+        return "[S] save  [R] reset  [L] log  [Q] back"
     end
     if state.screen == "detail" then
         local d = state.detail or {}
@@ -317,24 +317,27 @@ local function hintFor(state)
             local f = d.fields and d.fields[d.field]
             if f and f.kind == "number" then
                 return "[" .. UPDOWN .. "] adjust  [" .. LEFTRIGHT
-                    .. "] jump  [ENTER] apply  [ESC] cancel"
+                    .. "] jump  [ENTER] apply  [Q] cancel"
             end
-            return "[" .. UPDOWN .. "] choose  [ENTER] apply  [ESC] cancel"
+            return "[" .. UPDOWN .. "] choose  [ENTER] apply  [Q] cancel"
         end
-        return "[" .. UPDOWN .. "] field  [ENTER] edit  [TAB] view  [A] advise  [ESC] back"
+        return "[" .. UPDOWN .. "] field  [ENTER] edit  [TAB] view  [A] advise  [Q] back"
     end
     if state.confirm then
-        return "[ENTER] apply " .. state.confirm .. "   [ESC] back"
+        return "[ENTER] apply " .. state.confirm .. "   [Q] back"
     elseif state.focus == "plasma" then
-        return "[" .. UPDOWN .. "] choose   [ENTER] select   [ESC] cancel"
+        return "[" .. UPDOWN .. "] choose   [ENTER] select   [Q] cancel"
     end
     -- The profile key is deliberately absent: it only does anything under
     -- --profile, and the hint bar is for the keys that always work.
     if state.clipboard then
         return "[" .. UPDOWN .. "] module  [V] paste  [C] copy another  [Q] done copying"
     end
-    return "[" .. UPDOWN .. "] module  [ENTER] details  [C] copy  [P] plasma"
-        .. "  [SPACE] pause  [L] log  [Q] quit"
+    -- Single-spaced and without the log toggle, which is the least of these and
+    -- is in --help: the whole line has to fit beside the status block, and what
+    -- overflows is silently cut off the end.
+    return "[" .. UPDOWN .. "] module [ENTER] details [C] copy [P] plasma"
+        .. " [SPACE] pause [Q] quit"
 end
 
 local function drawTitle(state)
@@ -824,7 +827,7 @@ end
 local function drawProfile(state, x, y, w, h)
     local p = state.profile or {}
     local headH = 5
-    panel(x, y, w, headH, "PROFILE  " .. MIDDOT .. "  [S] save to a file  [R] reset  [ESC] back")
+    panel(x, y, w, headH, "PROFILE  " .. MIDDOT .. "  [S] save to a file  [R] reset  [Q] back")
     local ix, inner = x + 2, w - 4
 
     cell(ix, y + 1, 0, inner, string.format(
@@ -891,7 +894,7 @@ local function drawAdviseSettings(state, x, y, w, h)
     if a.error then
         cell(ix, sy, 0, inner, a.error, C.crit, inner)
     elseif a.edit then
-        cell(ix, sy, 0, inner, "ENTER pins it and searches again; ESC leaves it as it was",
+        cell(ix, sy, 0, inner, "ENTER pins it and searches again; Q leaves it as it was",
             C.focus, inner)
     else
         cell(ix, sy, 0, inner, a.summary or "", C.dim, inner)

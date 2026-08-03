@@ -826,10 +826,16 @@ local function buildDetail(rows)
 
     for _, e in ipairs(est.pool) do
         local sz = e.meteor and e.meteor.size
+        -- The share of RUNNING TIME this meteor accounts for, as opposed to the
+        -- share of rolls. est.cycle is the chance-weighted average length of an
+        -- operation -- the sum of exactly these numerators -- so dividing by it
+        -- gives a share of the clock, and the column adds up to 100%.
+        local share = (est.cycle > 0) and (e.chance * e.time / est.cycle) or 0
         d.pool[#d.pool + 1] = {
             name = e.name, chance = e.chance, parallels = e.parallels,
             size = sz and (sz[1] .. "-" .. sz[2]) or "-",
             time = secs(e.time), eut = si(e.eut), computation = si(e.computation),
+            runtime = string.format("%.1f%%", share * 100),
             note = e.limit and ("capped by " .. e.limit) or nil,
         }
     end
@@ -850,7 +856,9 @@ local function buildDetail(rows)
             name = e.name, parallels = 0, blocked = true,
             chance = rawWeight > 0 and (e.weight or 0) / rawWeight or 0,
             size = sz and (sz[1] .. "-" .. sz[2]) or "-",
-            time = "-", eut = si(e.needs and e.needs.eut or 0),
+            -- Never runs, so it takes none of the running time.
+            time = "-", runtime = "-",
+            eut = si(e.needs and e.needs.eut or 0),
             computation = si(e.needs and e.needs.computation or 0),
             note = "no " .. tostring(e.limit or "capacity"),
         }

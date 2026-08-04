@@ -206,9 +206,10 @@ cfg.supply = {
     -- higher tier burns far fewer litres per meteor. There is no reason to hoard
     -- more -- the interface keeps another 16,000 L staged behind it.
     --
-    -- Note a module running 8 parallels chews through this eight times faster
-    -- than one running 1, so raise it if the feed cycle is slow. Clamped to what
-    -- the hatch can actually hold.
+    -- This one is per HATCH, not per parallel like cfg.control's figures below --
+    -- a hatch holds what it holds however many parallels drink from it. So a module
+    -- running 8 chews through this eight times faster than one running 1: raise it
+    -- if the feed cycle is slow. Clamped to what the hatch can actually hold.
     --
     -- Sized for `plasma keep` to be lazy: a few hundred meteors means it tops a
     -- hatch up every few minutes rather than every few seconds.
@@ -260,15 +261,21 @@ cfg.control = {
     -- within 30s. Lower it if that matters more than the cycle time.
     slowEvery = 6,
 
-    -- Kits to keep in the local net per module running that material. One kit is
-    -- one meteor, so this is roughly "how many meteors of runway each module
-    -- has". Worth lowering for the expensive materials -- 256 Infinity kits is
-    -- 4,608 Infinity ingots sitting idle -- via cfg.supply.target above.
-    kitsPerMiner = 1024,
+    -- Kits to keep in the local net per PARALLEL running that material. One kit is
+    -- one meteor and a module mines one meteor per parallel per operation, so this
+    -- is roughly "how many meteors of runway each parallel has" -- and counting
+    -- parallels is what makes it track consumption: a T2 on 4 of them asks for four
+    -- times what a single-parallel module does, because it burns four times as much.
+    --
+    -- Worth lowering for the expensive materials -- 1,024 Infinity kits is 18,432
+    -- Infinity ingots sitting idle, and a T3 asks for eight lots of it -- via
+    -- cfg.supply.target above, which is a flat figure and ignores parallels.
+    kitsPerParallel = 256,
 
-    -- Local-net plasma buffer, in hatchfuls per module with a plasma feed. The
-    -- hatches hold one each; this is what refills them.
-    hatchRefills = 16,
+    -- Local-net plasma buffer, in hatchfuls per PARALLEL with a plasma feed. Same
+    -- reasoning as the kits: the litres go per meteor, so parallels are what spend
+    -- them. The hatches hold one hatchful each; this is what refills them.
+    hatchRefills = 8,
 
     -- How long after a craft finishes before its material may be requested again.
     -- The local net is re-read the moment a craft lands, and THAT is what stops a

@@ -72,7 +72,10 @@ local ctx = cli.start({
             .. "screen, and the controller then keeps it on that plasma rather than "
             .. "putting it back on the fleet's.",
         "What to stock is read off the hardware: a module's input bus says which "
-            .. "drone it runs, and that says which material its kits are made of. "
+            .. "drone it runs, and that says which material its kits are made of, "
+            .. "while its parallels say how much of it -- both consumables go per "
+            .. "meteor, and a module mines one meteor per parallel, so a T2 on 4 of "
+            .. "them asks for four times what a single-parallel module does. "
             .. "Set cfg.supply.target or cfg.supply.plasma to override a figure; "
             .. "left nil, the fleet's own answer is used (cfg.control tunes it).",
         "Restock requests are capped -- by default 2 kit jobs and 1 plasma job at "
@@ -627,11 +630,15 @@ local function runCycle()
     end
     doneHatch()
 
-    -- What to stock, and what to ask for.
+    -- What to stock, and what to ask for. The parallels are what the module is SET
+    -- to, not what its tier could do: a T3 held at 2 parallels consumes like a T1,
+    -- and stocking for the 8 it is not running would hoard for nothing. Falls back
+    -- to the tier ceiling only when the parameter could not be read at all.
     local demandFleet = {}
     for _, r in ipairs(rows) do
         demandFleet[#demandFleet + 1] = {
             material = r.material, hasFluid = r.hasFluid, plasma = wantedPlasma(r),
+            parallels = r.parallels or r.parallelCap,
         }
     end
     -- No fleet-wide default: every entry already carries the plasma its own module

@@ -34,13 +34,14 @@ local control = {}
 -- be for a fluid nothing is burning.
 control.JOBS = { plasma = 1, kit = 2 }
 
--- Kits to keep per miner running that material, when nothing in config says.
--- One kit is one meteor, so this is "a few hundred meteors of runway each" --
--- big enough that a restock is rare, small enough not to hoard Infinity.
-control.KITS_PER_MINER = 256
+-- Kits to keep per PARALLEL running that material, when nothing in config says.
+-- One kit is one meteor and a parallel mines one meteor an operation, so this is
+-- "a few hundred meteors of runway each" -- big enough that a restock is rare,
+-- small enough not to hoard Infinity.
+control.KITS_PER_PARALLEL = 256
 
--- Local-net plasma buffer, in hatchfuls per miner with a plasma feed. The hatches
--- themselves hold one each; this is what refills them.
+-- Local-net plasma buffer, in hatchfuls per PARALLEL with a plasma feed. The
+-- hatches themselves hold one each; this is what refills them.
 control.HATCH_REFILLS = 4
 
 -- How long after a craft finishes before its material may be requested again.
@@ -70,19 +71,31 @@ end
 
 -- What the local net should hold, given what the fleet is actually running.
 --   fleet   list of { material = <kit material or nil>, hasFluid = <bool>,
---                     plasma = <that module's plasma, or nil> }
+--                     plasma = <that module's plasma, or nil>,
+--                     parallels = <how many it runs; missing counts as 1> }
 --   scfg    cfg.supply (target / plasma / hatchLitres / hatchMeteors)
---   ccfg    cfg.control (kitsPerMiner / hatchRefills)
+--   ccfg    cfg.control (kitsPerParallel / hatchRefills)
 --   plasma  the fleet default, for modules that name none of their own
 -- Returns kits (material -> kits), litres (fluid name -> L), and `from`
 -- (key -> "fleet" | "config") so the UI can say where a number came from.
+--
+-- Everything is counted in PARALLELS rather than modules, which is what makes the
+-- figures track consumption: both consumables are spent per METEOR, and a module
+-- mines one meteor per parallel per operation. So a T2 on 4 parallels burns four
+-- times what a module on 1 does, and now asks for four times as much. Counting
+-- modules meant one number had to cover both, and it starved the wide ones.
+--
+-- A module that cannot say how many it runs counts as one parallel: too little
+-- stock stalls a module, while too much only sits in the net.
 function control.demand(fleet, scfg, ccfg, plasma)
     scfg, ccfg = scfg or {}, ccfg or {}
     local kits, litres, from = {}, {}, {}
 
     local perMaterial, perPlasma = {}, {}
     for _, m in ipairs(fleet or {}) do
-        if m.material then perMaterial[m.material] = (perMaterial[m.material] or 0) + 1 end
+        local par = math.floor(tonumber(m.parallels) or 1)
+        if par < 1 then par = 1 end
+        if m.material then perMaterial[m.material] = (perMaterial[m.material] or 0) + par end
         -- Counted per plasma, not once for the fleet: a module switched on its own
         -- burns a different fluid, and stocking only the majority's would starve it.
         if m.hasFluid then
@@ -90,14 +103,17 @@ function control.demand(fleet, scfg, ccfg, plasma)
             if p then
                 local e = perPlasma[p.name]
                 if not e then e = { plasma = p, n = 0 }; perPlasma[p.name] = e end
-                e.n = e.n + 1
+                e.n = e.n + par
             end
         end
     end
 
-    local perMiner = ccfg.kitsPerMiner or control.KITS_PER_MINER
+    -- kitsPerMiner is what this used to be called, and the number means the same
+    -- thing read per parallel -- so an old config keeps working and simply stocks
+    -- a T2 four times over, which is the point of the change.
+    local perParallel = ccfg.kitsPerParallel or ccfg.kitsPerMiner or control.KITS_PER_PARALLEL
     for material, n in pairs(perMaterial) do
-        kits[material] = n * perMiner
+        kits[material] = n * perParallel
         from[material] = "fleet"
     end
 

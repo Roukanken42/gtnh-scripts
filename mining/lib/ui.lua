@@ -17,10 +17,11 @@
 --
 -- ---- marking what the fleet is FOR ------------------------------------------
 -- Every table that lists ore, or the meteors ore comes out of, marks the rows that
--- serve a want (state.wants). It is the same question in four places -- "is any of
--- this what I asked for?" -- and the answer is what says whether a fleet is
--- effective or merely busy. Wanted ore is drawn in C.mine and carries its stock and
--- fill; everything else stays dim, and a meteor row says which wants it serves.
+-- serve a want the fleet is still SHORT of. It is the same question in four places --
+-- "is any of this going somewhere I need it?" -- and the answer is what says whether a
+-- fleet is effective or merely busy. Ore that is short is highlighted and drawn in
+-- C.mine with its stock and fill; a want already met keeps its figures but loses the
+-- highlight, since it is not a goal any more; everything else stays dim.
 --
 -- State contract (all fields optional-safe):
 --   mode        "MANUAL" | "AUTO" | "AUTO 4/8"   -- the fleet's overall mode
@@ -38,8 +39,10 @@
 --               a row is { material, label, stock, fill, pct, need, made, cover,
 --               coverPct, eta, state, note }. Also read by the ore/meteor tables
 --               through `wanted` below.
---   wanted      { [ore key] = { fill, pct, stock, material } } -- what to mark in
---               any table that lists ore. Absent means nothing is wanted.
+--   wanted      { [ore key] = { fill, pct, stock, material, goal } } -- what to mark
+--               in any table that lists ore. `goal` is false for a want already met,
+--               which is shown quietly rather than highlighted. Absent means nothing
+--               is wanted.
 --   advise      { miner, settings, cursor, settingsCount, results, picking,
 --                 summary, error, empty, notes, rateLabel, edit,
 --                 applied, pending, pendingNote }
@@ -302,10 +305,15 @@ local function wantOf(state, key)
     return w and w[key] or nil
 end
 
--- Fills a table row's background, for the rows that are wanted. Returns the colour
--- the row's cells must then be drawn on.
-local function rowBg(x, y, inner, wanted)
-    if not wanted then return C.panel end
+-- Fills a table row's background, for the rows the fleet is currently short of.
+-- Returns the colour the row's cells must then be drawn on.
+--
+-- Only OUTSTANDING wants are highlighted. A want that is full is still on the list and
+-- still shows its figures, but quietly: these tables are read to find out where the
+-- fleet's output is going short, and a screen where everything on the list is lit up
+-- answers a question nobody asked.
+local function rowBg(x, y, inner, goal)
+    if not goal then return C.panel end
     rect(x, y, inner, 1, C.panelHi)
     return C.panelHi
 end
@@ -314,9 +322,12 @@ end
 -- against what was asked for, and how full that is. `off` is where they start.
 local function drawWantCells(x, y, inner, w, off, bg)
     if w then
-        cell(x, y, off, 20, w.stock or "-", C.dim, inner, bg)
+        -- A met want is dimmed rather than dropped: "on the list, and done" is worth a
+        -- glance, and losing the numbers entirely would leave it looking unwanted.
+        local quiet = not w.goal
+        cell(x, y, off, 20, w.stock or "-", quiet and C.faint or C.dim, inner, bg)
         cell(x, y, off + 20, 6, padL(w.pct or "-", 5),
-            w.fill and fillColor(w.fill) or C.faint, inner, bg)
+            (not quiet) and w.fill and fillColor(w.fill) or C.faint, inner, bg)
     else
         -- Deliberately not blank: "this ore is not on the list" is information, and
         -- a run of dots down the column is how you see at a glance how much of what
@@ -815,6 +826,10 @@ end
 -- SERVES shares the last stretch with the note, because they are never both worth
 -- saying: a meteor the module cannot power serves nothing whatever it yields, so the
 -- note wins where there is one and the wants fill the space the rest of the time.
+--
+-- What it lists is the wants the fleet is still SHORT of. A meteor whose only wanted
+-- ore is already stocked is not a reason to be rolling it, so it is neither listed nor
+-- highlighted -- the column is for the goals, not the list.
 local PC = { bar = 0, pct = 11, name = 17, size = 45, time = 58, chance = 67,
              par = 78, eut = 84, comp = 95, note = 105 }
 
@@ -919,17 +934,18 @@ local function drawYield(state, x, y, w, h)
         local e = list[i]
         local row = y + 1 + (i - first) + 1
         local want = wantOf(state, e.name)
-        local bg = rowBg(ix, row, inner, want)
+        local goal = want ~= nil and want.goal
+        local bg = rowBg(ix, row, inner, goal)
         if inner - YC.bar >= 10 then
             -- The empty half of the bar has to invert on a highlighted row: its
             -- usual colour IS the highlight, and a full-looking bar on every wanted
             -- ore would be a lie told by the palette.
             bar(ix + YC.bar, row, 10, e.share or 0, C.mine,
-                want and C.panel or C.panelHi)
+                goal and C.panel or C.panelHi)
         end
         cell(ix, row, YC.pct, 6, padL(string.format("%.1f%%", (e.share or 0) * 100), 5),
             C.dim, inner, bg)
-        cell(ix, row, YC.name, 29, e.name or "?", want and C.mine or C.text, inner, bg)
+        cell(ix, row, YC.name, 29, e.name or "?", goal and C.mine or C.text, inner, bg)
         cell(ix, row, YC.items, 12, padL(rate(e.itemsPerSecond), 11), C.good, inner, bg)
         cell(ix, row, YC.stacks, 12, padL(string.format("%.3f", e.stacksPerSecond or 0), 11),
             C.dim, inner, bg)
@@ -1189,10 +1205,10 @@ local function drawFleetPool(state, x, y, w, h)
     cell(ix, hy, FM.time, 8, padL("TIME", 7), C.faint, inner)
     cell(ix, hy, FM.met, 13, padL("METEORS/s", 12), C.faint, inner)
     cell(ix, hy, FM.eut, 12, padL("EU/t", 11), C.faint, inner)
-    -- The wants it serves where it serves any, and what it mostly drops otherwise.
-    -- "Top ore" alone answered a question nobody was asking: the useful thing to
-    -- know about a meteor eating a fifth of the fleet's clock is whether that fifth
-    -- is going anywhere.
+    -- The OUTSTANDING wants it serves where it serves any, and what it mostly drops
+    -- otherwise. "Top ore" alone answered a question nobody was asking: the useful
+    -- thing to know about a meteor eating a fifth of the fleet's clock is whether that
+    -- fifth is going somewhere still needed.
     cell(ix, hy, FM.ore, inner - FM.ore, "SERVES / TOP ORE", C.faint, inner)
 
     if #list == 0 then
@@ -1257,14 +1273,15 @@ local function drawFleetOre(state, x, y, w, h)
         local e = list[i]
         local row = y + 1 + (i - first) + 1
         local want = wantOf(state, e.name)
-        local bg = rowBg(ix, row, inner, want)
+        local goal = want ~= nil and want.goal
+        local bg = rowBg(ix, row, inner, goal)
         if inner - FO.bar >= 10 then
             bar(ix + FO.bar, row, 10, e.share or 0, C.mine,
-                want and C.panel or C.panelHi)
+                goal and C.panel or C.panelHi)
         end
         cell(ix, row, FO.pct, 6, padL(string.format("%.1f%%", (e.share or 0) * 100), 5),
             C.dim, inner, bg)
-        cell(ix, row, FO.name, 29, e.name or "?", want and C.mine or C.text, inner, bg)
+        cell(ix, row, FO.name, 29, e.name or "?", goal and C.mine or C.text, inner, bg)
         cell(ix, row, FO.mods, 8, e.modules or "-", C.dim, inner, bg)
         cell(ix, row, FO.items, 13, padL(e.items or "-", 12), C.good, inner, bg)
         cell(ix, row, FO.stacks, 13, padL(e.stacks or "-", 12), C.dim, inner, bg)

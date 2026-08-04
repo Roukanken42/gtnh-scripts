@@ -412,14 +412,22 @@ function wants.evaluate(entries, stock, opts, satisfied, oreRates)
     return rows, demand, summary
 end
 
--- Which of the fleet's yield keys are WANTED, as a set, so the ore and meteor
--- tables can mark them. Built from the entries rather than from the demand table
--- on purpose: a want that is currently full is still what the fleet is for, and
--- dimming it the moment it fills would make the marking flicker.
-function wants.wantedKeys(entries)
+-- Which of the fleet's yield keys are worth MARKING, as a set of key -> material.
+--
+-- `satisfied` is the latch table (see the header). Pass it and the set covers only the
+-- wants still being asked for, which is what the ore and meteor tables want: those
+-- tables are read to ask "is any of this what I am short of", and a want that is full
+-- answers no. Marking it anyway buries the two rows that matter among six that do not.
+--
+-- Note the latch rather than the raw fill is what decides, which is also what keeps
+-- the marking still: a want hovering at its target stays satisfied until it drops
+-- under refillAt, so a highlight does not blink on and off with the last stack.
+function wants.wantedKeys(entries, satisfied)
     local set = {}
     for _, e in ipairs(entries or {}) do
-        for key in pairs(e.keys) do set[key] = e.material end
+        if not (satisfied and satisfied[e.material] == true) then
+            for key in pairs(e.keys) do set[key] = e.material end
+        end
     end
     return set
 end

@@ -335,8 +335,11 @@ local wantRows, wantDemand, wantSummary = {}, nil, { n = #wantEntries }
 local wantView = { rows = {}, notes = {}, summary = {} }
 local wantMark = {}
 
--- Every yield key the want list absorbs -> the material it serves. What the ore and
--- meteor tables mark.
+-- Every yield key of a want still being ASKED FOR -> the material it serves. What the
+-- ore and meteor tables mark, and rebuilt with each evaluation: those tables answer
+-- "is the fleet's output going anywhere I need", and a want that is full is not an
+-- answer to that. Starts out covering everything, since nothing is satisfied until a
+-- reading says so.
 local wantKeys = wanted.wantedKeys(wantEntries)
 
 -- The fleet's own ore output, keyed as the estimator keys it, from the last heavy
@@ -1657,10 +1660,14 @@ local function buildWantView()
         }
 
         -- Every key the entry absorbs points at the same mark, so an ore table can
-        -- ask about "dustPlatinum" and get the Platinum want back.
+        -- ask about "dustPlatinum" and get the Platinum want back. `goal` is what
+        -- decides how loudly it is drawn: a met want keeps its figures, quietly, and
+        -- an outstanding one is highlighted -- those tables are read to find out where
+        -- the fleet's output is going short, not to be reminded what is on the list.
         local e = wantEntries[i]
         if e then
-            local mark = { material = r.material, fill = fill, pct = pct, stock = stock }
+            local mark = { material = r.material, fill = fill, pct = pct, stock = stock,
+                           goal = not r.satisfied }
             for key in pairs(e.keys) do marks[key] = mark end
         end
     end
@@ -1795,6 +1802,9 @@ function refreshWants(rows)
     -- 3. Fill, weight, rate, and the latch.
     wantRows, wantDemand, wantSummary =
         wanted.evaluate(wantEntries, mainStock, acfg, wantSatisfied, fleetOreRates)
+    -- What the meteor tables mark, now that the latch has been brought up to date:
+    -- the wants still outstanding, and not the ones already met.
+    wantKeys = wanted.wantedKeys(wantEntries, wantSatisfied)
     buildWantView()
 end
 

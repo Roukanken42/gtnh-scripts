@@ -217,8 +217,13 @@ function Jobs:has(key)
     return false
 end
 
-function Jobs:add(kind, key, job, crafts, at)
+-- `extra` carries what the request was FOR -- the level before it, what one craft
+-- delivers, how many items AE2 was actually asked for -- so that when the job settles
+-- the caller can compare what arrived with what was expected. A craft that reports
+-- success and delivers a fraction of the goods is otherwise invisible.
+function Jobs:add(kind, key, job, crafts, at, extra)
     local j = { kind = kind, key = key, job = job, crafts = crafts, since = at or 0 }
+    if extra then for k, v in pairs(extra) do if j[k] == nil then j[k] = v end end end
     self.active[#self.active + 1] = j
     return j
 end
@@ -255,11 +260,16 @@ function control.issue(itf, work, jobs, at)
         elseif jobs:room(kind) <= 0 then
             blocked = blocked + 1
         else
-            local job, err = supply.request(itf, w.entry, w.crafts)
+            local job, items = supply.request(itf, w.entry, w.crafts)
             if job then
-                issued[#issued + 1] = jobs:add(kind, w.key, job, w.crafts, at)
+                issued[#issued + 1] = jobs:add(kind, w.key, job, w.crafts, at, {
+                    -- Everything needed to check the delivery against the promise.
+                    before = w.have, target = w.target, perCraft = w.perCraft,
+                    expected = w.perCraft and (w.crafts * w.perCraft) or nil,
+                    items = items, capped = w.capped,
+                })
             else
-                errs[#errs + 1] = w.key .. ": " .. tostring(err)
+                errs[#errs + 1] = w.key .. ": " .. tostring(items)
             end
         end
     end

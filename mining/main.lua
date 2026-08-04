@@ -644,13 +644,6 @@ local function runCycle()
     local donePoll = profile.span("poll restock jobs")
     local finishedJobs = jobs:poll(computer.uptime(), ccfg.settleGrace)
     donePoll()
-    for _, j in ipairs(finishedJobs) do
-        if j.state == "done" then
-            log(string.format("stocked %s (x%d)", j.key, j.crafts))
-        else
-            log(string.format("%s restock %s", j.key, j.state))
-        end
-    end
 
     -- A craft has landed, so what the net holds has changed. Re-read it NOW
     -- rather than waiting for the slow cadence: this reading is what stops the
@@ -661,6 +654,42 @@ local function runCycle()
         stock = supply.stock(catalog, net)
         stockFresh = true
         doneRefresh()
+    end
+
+    -- What a finished craft actually DELIVERED, against what it was asked for. The
+    -- reading above is already fresh, so this costs nothing -- and it is the only
+    -- place a job that reports success while pushing a fraction of the goods can be
+    -- seen at all. Everything about a fake crafting pattern is inferred: how many
+    -- kits one craft is worth comes off its input counts, and how many crafts a
+    -- request means depends on its output count. Either can be wrong on a pattern
+    -- nobody has checked, and both fail the same silent way.
+    local levels = stockFresh and supply.levels(catalog, stock) or nil
+    for _, j in ipairs(finishedJobs) do
+        if j.state == "done" then
+            local now = levels and levels[j.key]
+            if now and j.before and j.expected then
+                local got = now - j.before
+                local unit = (j.kind == "plasma") and " L" or " kits"
+                local line = string.format("stocked %s: %d -> %d%s (%+d, expected %+d "
+                    .. "from %d craft(s))", j.key, j.before, now, unit, got,
+                    j.expected, j.crafts)
+                log(line)
+                -- Flagged rather than left to be noticed: a delivery this far short of
+                -- the promise means the pattern is not what the catalog thinks it is,
+                -- and it will go on being short every cycle until someone looks.
+                if got < j.expected * 0.9 then
+                    log(string.format("  SHORT by %d%s -- check `stock patterns`: one "
+                        .. "craft is read as %s%s from its inputs, and %d item(s) of its "
+                        .. "output were requested for %d craft(s)",
+                        j.expected - got, unit, tostring(j.perCraft), unit,
+                        j.items or j.crafts, j.crafts))
+                end
+            else
+                log(string.format("stocked %s (x%d craft(s))", j.key, j.crafts))
+            end
+        else
+            log(string.format("%s restock %s", j.key, j.state))
+        end
     end
 
     if full and net then
@@ -803,7 +832,17 @@ local function runCycle()
         if not paused then
             local issued, blocked, errs = control.issue(itf, work, jobs, computer.uptime())
             for _, j in ipairs(issued) do
-                log(string.format("requested %s x%d", j.key, j.crafts))
+                -- In the units that matter: crafts is what AE2 is being asked to run,
+                -- but kits (or litres) is what the shortfall was measured in, and the
+                -- two only agree if the pattern was read correctly.
+                local unit = (j.kind == "plasma") and "L" or "kits"
+                log(string.format("requested %s: %d craft(s) = %d %s (%d short of %d)",
+                    j.key, j.crafts, j.expected or 0, unit,
+                    (j.target or 0) - (j.before or 0), j.target or 0))
+                if j.capped then
+                    log(string.format("  capped at %d of %d craft(s) by "
+                        .. "cfg.supply.maxCrafts", j.crafts, j.capped))
+                end
             end
             for _, e in ipairs(errs) do log("request failed: " .. e) end
             if blocked > 0 and #issued > 0 then

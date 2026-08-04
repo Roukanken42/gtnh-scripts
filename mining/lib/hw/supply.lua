@@ -132,9 +132,15 @@ function supply.classify(pattern, materials)
         -- replaces it with the real label and moves this to entry.slotLabel.
         label = outputs[1] and outputs[1].name,
         outputIndex = outputs[1] and outputs[1].index,
+        -- How many output items ONE craft of this pattern makes. Almost always 1, and
+        -- it matters when it is not: a craft request asks AE2 for a number of ITEMS,
+        -- so a pattern whose output is a stack of 64 turns a request for 13 into a
+        -- single craft. See supply.request.
+        outputCount = (outputs[1] and tonumber(outputs[1].count)) or 1,
         index = pattern.index,
         inputs = slots(pattern.inputs),
     }
+    if entry.outputCount < 1 then entry.outputCount = 1 end
 
     local function unknown(reason)
         entry.kind, entry.reason = "unknown", reason
@@ -277,11 +283,20 @@ function supply.plan(catalog, stock, cfg, satisfied)
             return
         end
         local deficit = target - have
-        local crafts = math.ceil(deficit / perCraft)
-        if cfg.maxCrafts and crafts > cfg.maxCrafts then crafts = cfg.maxCrafts end
+        local wanted = math.ceil(deficit / perCraft)
+        local crafts, capped = wanted, nil
+        if cfg.maxCrafts and crafts > cfg.maxCrafts then
+            -- Reported, not just applied. A cap that quietly turns "3000 kits short"
+            -- into one craft looks exactly like a supply line that is not working, and
+            -- there is nothing on any screen to tell the two apart.
+            crafts, capped = cfg.maxCrafts, wanted
+        end
         work[#work + 1] = {
             entry = entry, key = key, have = have, target = target,
             deficit = deficit, crafts = crafts,
+            -- What one craft delivers, and what the deficit really asked for: enough
+            -- for a caller to say "13 crafts, 3328 kits" rather than just "13".
+            perCraft = perCraft, wanted = wanted, capped = capped,
         }
     end
 
@@ -410,9 +425,19 @@ end
 -- many lots of its inputs into the local net. Returns an AECraftingJob, or
 -- nil + error. The label is re-checked after filtering because the ME filter's
 -- matching semantics are not exact-only (localnet.lua guards the same way).
+--
+-- A CRAFT IS NOT AN ITEM. AECraftable.request takes a number of output ITEMS, and one
+-- craft of a pattern makes entry.outputCount of them -- so asking for `crafts` items
+-- of a pattern whose output is a stack of 64 gets you ceil(crafts/64) crafts, which
+-- for any sane deficit is one. That is a silent shortfall: the job succeeds, the log
+-- says thirteen crafts, and a fraction of the kits arrive.
+--
+-- Returns the job and the number of items asked for, so a caller can say what it did
+-- in the units AE2 was actually given.
 function supply.request(itf, entry, crafts)
     if not entry or not entry.label then return nil, "entry has no requestable output" end
     crafts = math.max(1, math.floor(crafts or 1))
+    local items = crafts * math.max(1, entry.outputCount or 1)
 
     -- Without a resolved output we only have the item TYPE's name, which may name
     -- a completely different craftable -- a real "Steel Drill Tip" recipe rather
@@ -451,9 +476,9 @@ function supply.request(itf, entry, crafts)
         return nil, "'" .. tostring(want.label) .. "' is not craftable on the supply network"
     end
 
-    local okReq, job = pcall(found.request, crafts)
+    local okReq, job = pcall(found.request, items)
     if not okReq then return nil, "request failed: " .. tostring(job) end
-    return job
+    return job, items
 end
 
 -- Copies one slot of a pattern into a database and hands back what landed there.

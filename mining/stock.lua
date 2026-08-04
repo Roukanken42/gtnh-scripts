@@ -105,8 +105,14 @@ local function settle(job, label)
 end
 
 local function request(entry, crafts, what)
-    local job, e = supply.request(itf, entry, crafts)
-    if not job then print("  FAIL " .. what .. ": " .. tostring(e)); return false end
+    local job, items = supply.request(itf, entry, crafts)
+    if not job then print("  FAIL " .. what .. ": " .. tostring(items)); return false end
+    -- Say what AE2 was actually asked for. It is a number of output ITEMS, and only
+    -- equals the craft count when the pattern's output is a single item.
+    if items and items ~= crafts then
+        print(string.format("  (asked AE2 for %d output item(s) -- %d craft(s) x %d "
+            .. "per craft)", items, crafts, entry.outputCount or 1))
+    end
     return settle(job, what) == "done"
 end
 
@@ -130,6 +136,17 @@ local function cmdPatterns()
         -- target, and "resolved to the same label" has to be distinguishable from
         -- "never resolved". A renamed fake output reads back from the pattern slot
         -- as its BASE item, which is usually a real craftable in its own right.
+        -- What ONE craft is worth, in the units the controller plans in, and how many
+        -- output items that craft makes. The second number is the one that catches
+        -- people out: a craft request asks AE2 for a number of ITEMS, so an output
+        -- stack of 64 turns a request for 13 crafts into one.
+        if entry.kind ~= "unknown" then
+            local unit = (entry.kind == "plasma") and "L" or "kits"
+            print(string.format("       one craft: %s %s  ->  %d output item(s)%s",
+                tostring(entry.perCraft), unit, entry.outputCount or 1,
+                (entry.outputCount or 1) > 1
+                    and "   (so a request is multiplied by that)" or ""))
+        end
         if entry.output then
             local o = entry.output
             print(string.format("       out: %s  [%s%s]", tostring(o.label),

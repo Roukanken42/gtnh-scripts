@@ -543,57 +543,202 @@ end
 -- their way to a module. The supply interface's adapter reaches the main net (that
 -- is the whole reason it is the bridge), so this asks it.
 --
--- ONE UNFILTERED SCAN, and the wanted labels picked out of it. The alternative --
--- getItemsInNetwork({label = ...}) per want -- is one component call each, and an
--- OpenComputers call that is not direct returns on the NEXT TICK, so ten wants
--- would be half a second of cycle every time. One call is one tick however long the
--- list is, at the price of a large table arriving all at once.
+-- ---- NEVER LIST THE WHOLE NETWORK -------------------------------------------
+-- The obvious implementation -- getItemsInNetwork() with no filter, once, and pick
+-- the wanted labels out of the result -- does not work, and the way it fails is worth
+-- recording because it looks like a bug in the call:
 --
--- Which is why THIS IS NOT A CHEAP READ, and the caller is expected to do it on the
--- slow cadence only (main.lua's `full` cycles). A main net with thousands of item
--- types makes a big table, and an OpenComputers machine has little memory; the call
--- is under pcall for exactly that reason, and a failure comes back as an error
--- rather than taking the controller down with it.
+--     reading the main net failed: nil
+--
+-- A main net has thousands of item types. Materialising all of them as one Lua table
+-- exceeds the MEMORY an OpenComputers computer is allowed, and OC's answer to running
+-- out is to hand back nothing -- so the call returns nil rather than raising anything
+-- that says "too big". No arrangement of arguments fixes it: the result is the
+-- problem, not the request.
+--
+-- So every read here is FILTERED, and the network is never asked for more than the
+-- wants. Two calls do it:
+--
+--   getItemsInNetwork({ label = ... })   resolve one label to its ITEM ID. Small
+--                                        result (only stacks with that label), one
+--                                        call per label -- but only ONCE, since an
+--                                        item's id does not change.
+--   getItemsInNetworkById({ id, ... })   the actual reading: all the wanted ids in a
+--                                        single call, every cycle thereafter.
+--
+-- Which makes the steady-state cost one component call per heavy cycle regardless of
+-- how long the want list is, and the startup cost one call per label. The ids are the
+-- caller's to keep (see `ids` below) so the resolution is paid for once per run.
+--
+-- An id here is a stack's `name` -- "minecraft:clay", "gregtech:gt.metaitem.01" -- and
+-- GregTech reuses one name across hundreds of items with different damage values. So
+-- an id query can return far more than was asked for, and the LABEL is what decides
+-- what counts. Same re-check the filtered form needs anyway (localnet.lua and
+-- supply.request do it too, for the same reason).
 --
 -- Returns stock, info:
---   stock  { [label] = count } -- every wanted label, present or not, so a caller
---          can tell "none in stock" from "never asked about"... except that it
---          cannot, which is what `info.missing` is for
---   info   { scanned = <item types seen>, found = <labels with any stock>,
---            missing = { <label>, ... } }   -- and .error if the scan failed
+--   stock  { [label] = count } -- every wanted label, present or not
+--   info   { how = "byId" | "byLabel", calls = <component calls made>,
+--            found = <labels with any stock>, missing = { <label>, ... },
+--            resolved = <ids learned this call>, unresolved = { <label>, ... } }
+--          and .error if the network could not be read at all
 --
--- A label in `missing` held nothing AND appeared nowhere in the network. AE2 does
--- not list a type it holds none of, so that is usually simply "you have none" --
--- but it is also exactly what a mistyped label looks like, and the two are worth
--- being able to tell apart on screen.
-function supply.mainStock(itf, labels)
-    local want, out, missing = {}, {}, {}
-    for _, l in ipairs(labels or {}) do
-        if type(l) == "string" and l ~= "" then want[l] = true end
+-- A label in `missing` held nothing AND appeared nowhere in the network. AE2 does not
+-- list a type it holds none of, so that is usually simply "you have none" -- but it
+-- is also exactly what a mistyped label looks like, and the two are worth being able
+-- to tell apart on screen. `unresolved` is the stronger signal: a label AE2 has never
+-- heard of cannot even be given an id.
+
+-- One call, with the outcome in words rather than as a bare nil: "returned nil" and
+-- "errored" are different faults with different fixes.
+local function askItems(itf, method, filter)
+    if itf[method] == nil then return nil, "not available on this interface" end
+    local ok, res = pcall(itf[method], filter)
+    if not ok then return nil, "errored (" .. tostring(res) .. ")" end
+    -- Some builds wrap a list in an object with getAll(), exactly as the transposers
+    -- do for getAllStacks (see transport.lua's readStacks).
+    if type(res) == "table" and res.getAll ~= nil then
+        local okAll, arr = pcall(res.getAll)
+        if okAll and type(arr) == "table" then return arr end
+        return nil, "getAll() on the result failed"
     end
-    if not next(want) then return out, { scanned = 0, found = 0, missing = missing } end
+    if type(res) ~= "table" then return nil, "returned " .. type(res) end
+    return res
+end
+
+-- `ids` is caller-owned and carried across cycles: { [label] = <item id> | false }.
+--   nil     never looked -- resolved on this call
+--   string  known, and read by id from here on
+--   false   looked, and the network has never held it. NOT retried, because a
+--           misspelled label would otherwise cost a component call every heavy cycle
+--           for the life of the run. Clearing the falses is the caller's business
+--           (main.lua does it occasionally), which is what lets an item be picked up
+--           after it is made for the first time.
+function supply.mainStock(itf, labels, ids)
+    local want, out, missing, unresolved = {}, {}, {}, {}
+    ids = ids or {}
+    local n = 0
+    for _, l in ipairs(labels or {}) do
+        if type(l) == "string" and l ~= "" and not want[l] then want[l] = true; n = n + 1 end
+    end
+    if n == 0 then
+        return out, { how = "none", calls = 0, found = 0, missing = missing,
+                      resolved = 0, unresolved = unresolved }
+    end
 
     if not itf or itf.getItemsInNetwork == nil then
-        return nil, { scanned = 0, found = 0, missing = missing,
-                      error = "the supply interface cannot list the main net's items" }
+        return nil, { calls = 0, found = 0, missing = missing, resolved = 0,
+                      unresolved = unresolved,
+                      error = "the supply interface cannot list the main net's items"
+                          .. " -- it has no getItemsInNetwork" }
     end
 
-    local ok, items = pcall(itf.getItemsInNetwork)
-    if not ok or type(items) ~= "table" then
-        return nil, { scanned = 0, found = 0, missing = missing,
-                      error = "reading the main net failed: " .. tostring(items) }
-    end
+    local calls, found, resolved = 0, 0, 0
 
-    local scanned, found = 0, 0
-    for _, it in ipairs(items) do
-        scanned = scanned + 1
-        local label = type(it) == "table" and it.label or nil
-        if label and want[label] then
-            -- Summed, not assigned: the same label can appear more than once when
-            -- the stacks differ in damage or NBT, and every one of them is stock.
+    local function take(label, size)
+        if want[label] then
+            -- Summed, not assigned: the same label can appear more than once when the
+            -- stacks differ in damage or NBT, and every one of them is stock.
             if out[label] == nil then found = found + 1 end
-            out[label] = (out[label] or 0) + (it.size or 0)
+            out[label] = (out[label] or 0) + (size or 0)
         end
+    end
+
+    -- ---- resolve the labels we have no id for yet ----
+    -- The filtered result carries the sizes too, so this doubles as the reading for
+    -- whatever it resolves and the first cycle needs no second query for them.
+    local failure, answered = nil, false
+    for label in pairs(want) do
+        if ids[label] == nil then
+            local items, why = askItems(itf, "getItemsInNetwork", { label = label })
+            calls = calls + 1
+            if not items then
+                failure = failure or ("getItemsInNetwork({label = ...}): " .. why)
+            else
+                answered = true
+                for _, it in ipairs(items) do
+                    if type(it) == "table" and it.label == label then
+                        if it.name and ids[label] == nil then
+                            ids[label] = it.name
+                            resolved = resolved + 1
+                        end
+                        take(label, it.size)
+                    end
+                end
+                if ids[label] == nil then
+                    ids[label] = false          -- sought, never held; see the header
+                end
+            end
+        end
+        if ids[label] == false then unresolved[#unresolved + 1] = label end
+    end
+
+    -- ---- read everything we do have an id for, in one call ----
+    local byId, idList = {}, {}
+    for label in pairs(want) do
+        local id = ids[label]
+        -- Only the ones not already read above: those were resolved by a query that
+        -- already reported their size. `false` is a label the net has never held.
+        if id and id ~= false and out[label] == nil and not byId[id] then
+            byId[id] = true
+            idList[#idList + 1] = id
+        end
+    end
+    table.sort(idList)
+
+    local how = answered and "byLabel" or "cached"
+    if #idList > 0 then
+        local items, why = askItems(itf, "getItemsInNetworkById", idList)
+        calls = calls + 1
+        if items then
+            how = "byId"
+            for _, it in ipairs(items) do
+                -- The id is shared by every damage value of a GregTech meta item, so
+                -- the label is what says whether this stack is one of ours.
+                if type(it) == "table" and it.label then take(it.label, it.size) end
+            end
+        else
+            -- No id query on this build (or it refused). One call per label instead:
+            -- slower, and the only other thing that is safe to ask for.
+            failure = failure or ("getItemsInNetworkById: " .. why)
+            for label in pairs(want) do
+                if out[label] == nil and ids[label] then
+                    local one, oneWhy = askItems(itf, "getItemsInNetwork", { label = label })
+                    calls = calls + 1
+                    if not one then
+                        failure = "getItemsInNetwork({label = ...}): " .. oneWhy
+                        break
+                    end
+                    how = "byLabel"
+                    for _, it in ipairs(one) do
+                        if type(it) == "table" and it.label == label then
+                            take(label, it.size)
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- Success is decided PER LABEL, not by whether some query worked. A read that
+    -- resolved three wants and then lost the id query for the fourth would otherwise
+    -- come back looking complete, with that want reading zero -- and a want that reads
+    -- zero is a want the fleet throws everything at.
+    --
+    -- A label counts as read when it has a figure, or when it is marked `false`: the
+    -- network was asked about that one on an earlier cycle and had never held any, so
+    -- zero is knowledge rather than a gap.
+    local unread = {}
+    for label in pairs(want) do
+        if out[label] == nil and ids[label] ~= false then unread[#unread + 1] = label end
+    end
+    if #unread > 0 then
+        table.sort(unread)
+        return nil, { calls = calls, found = 0, missing = missing, resolved = resolved,
+                      unresolved = unresolved,
+                      error = "the main net could not be read for "
+                          .. table.concat(unread, ", ") .. ": "
+                          .. tostring(failure or "no query worked") }
     end
 
     for label in pairs(want) do
@@ -603,8 +748,11 @@ function supply.mainStock(itf, labels)
         end
     end
     table.sort(missing)
+    table.sort(unresolved)
 
-    return out, { scanned = scanned, found = found, missing = missing }
+    return out, { how = how, calls = calls, found = found, missing = missing,
+                  resolved = resolved, unresolved = unresolved,
+                  note = failure }
 end
 
 -- Litres of plasma a module's input hatch should hold. Expressed in METEORS'

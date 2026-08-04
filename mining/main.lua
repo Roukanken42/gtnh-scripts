@@ -309,6 +309,20 @@ local moduleModes = modes.load()
 -- main net is expensive, so it happens on the slow cadence only.
 local mainStock, mainStockAt, mainStockInfo = nil, nil, nil
 
+-- Wanted label -> its AE2 item id, learned once and kept for the run. The main net
+-- cannot be listed whole -- thousands of item types exceed what an OpenComputers
+-- machine may hold, and the call simply returns nothing -- so the reading is by id,
+-- and these are what make that possible. See supply.mainStock.
+--
+-- A label the network has never held is marked `false` there and then left alone,
+-- because a misspelled one would otherwise cost a component call every heavy cycle
+-- for the rest of the run. Which means something made for the FIRST time would never
+-- be noticed either, so the marks are dropped every so often and the labels looked
+-- for again. Rarely: nothing that has waited this long to exist is urgent.
+local mainIds = {}
+local RETRY_LABELS_EVERY = 20        -- heavy cycles, so ~10 minutes at the defaults
+local mainIdsRetried = 0
+
 -- The hysteresis latch behind the want list: a want that fills stays filled until it
 -- falls back under cfg.auto.refillAt of its target. Carried across cycles, exactly
 -- like `satisfied` above does it for kits.
@@ -1656,10 +1670,13 @@ local function buildWantView()
     if mainStockInfo and mainStockInfo.error then
         notes[#notes + 1] = mainStockInfo.error
     end
-    if mainStockInfo and #(mainStockInfo.missing or {}) > 0 then
-        notes[#notes + 1] = "the main net lists none of: "
-            .. table.concat(mainStockInfo.missing, ", ")
-            .. " -- either you have none, or the label is spelled differently"
+    -- The unresolved ones, not merely the empty ones. A label the network holds none
+    -- of reads 0 in its own row and needs no note; a label the network has never held
+    -- could not even be given an item id, and that is what a misspelling looks like.
+    if mainStockInfo and #(mainStockInfo.unresolved or {}) > 0 then
+        notes[#notes + 1] = "the main net has never held: "
+            .. table.concat(mainStockInfo.unresolved, ", ")
+            .. " -- either none has ever been made, or the label is spelled differently"
     end
 
     local s = wantSummary or {}
@@ -1719,22 +1736,48 @@ function refreshWants(rows)
         end
         if #labels > 0 then
             local doneScan = profile.span("read main net stock")
-            local got, info = supply.mainStock(itf, labels)
+            -- Give the labels the network has never held another chance, occasionally.
+            mainIdsRetried = mainIdsRetried + 1
+            if mainIdsRetried >= RETRY_LABELS_EVERY then
+                mainIdsRetried = 0
+                for label, id in pairs(mainIds) do
+                    if id == false then mainIds[label] = nil end
+                end
+            end
+            -- mainIds is carried in and added to: after the first pass this is one
+            -- component call for the whole want list.
+            local got, info = supply.mainStock(itf, labels, mainIds)
             doneScan()
             local firstRead = (mainStockAt == nil)
             mainStockInfo = info
             if got then
                 mainStock, mainStockAt = got, os.date("%H:%M:%S")
-                -- Only on the first read: a label that matches nothing matches
-                -- nothing every cycle, and saying so every thirty seconds for the
-                -- rest of the run would bury everything else in the log.
                 if firstRead then
-                    log(string.format("main net: %d item type(s) scanned, %d of %d "
-                        .. "wanted label(s) in stock", info.scanned or 0,
-                        info.found or 0, #labels))
+                    -- Worth saying which way it read: by id is one call for the whole
+                    -- list, label by label is one each, and if it ever falls back to
+                    -- the slow form for good that is the line that says so.
+                    local how = (info.how == "byId") and "item id"
+                        or (info.how == "byLabel") and "label" or tostring(info.how)
+                    log(string.format("main net: read by %s, %d call(s), %d of %d "
+                        .. "wanted label(s) in stock", how,
+                        info.calls or 0, info.found or 0, #labels))
+                end
+                -- A label learned later is worth a line whenever it happens: it means
+                -- an item the fleet is for has appeared in the network for the first
+                -- time, and until it did its stock was a guess.
+                if (info.resolved or 0) > 0 and not firstRead then
+                    log(string.format("main net: %d more label(s) resolved to an item id",
+                        info.resolved))
+                end
+                -- Only on the first read for these two: a label that matches nothing
+                -- matches nothing every cycle, and saying so every thirty seconds
+                -- would bury everything else in the log.
+                if firstRead then
                     for _, miss in ipairs(info.missing or {}) do
-                        log("  none in stock: " .. miss .. " (check the label if that is a surprise)")
+                        log("  none in stock: " .. miss
+                            .. " (check the label if that is a surprise)")
                     end
+                    if info.note then log("  (" .. info.note .. ")") end
                 end
             elseif firstRead or (info and info.error) then
                 log("main net: " .. tostring(info and info.error or "unreadable"))

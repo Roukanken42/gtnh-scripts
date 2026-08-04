@@ -1627,6 +1627,10 @@ local function buildWantView()
             stock = stock,
             fill = fill,
             pct = pct,
+            -- The processing factor, and whether anybody said it. Every figure to its
+            -- right is scaled by it, so it is shown rather than assumed silently.
+            per = "x" .. string.format("%.3g", r.perOre or 1),
+            perStated = r.perStated,
             need = (r.rate > 0) and string.format("%.3f", r.rate) or "-",
             made = string.format("%.3f", r.produced or 0),
             making = (r.produced or 0) > 0,

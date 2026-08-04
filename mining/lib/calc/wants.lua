@@ -16,10 +16,36 @@
 -- component, so the arithmetic that decides where a fleet points can be exercised
 -- off-machine.
 --
+-- ---- TWO DIFFERENT ITEMS, AND THE RATIO BETWEEN THEM -------------------------
+-- The single most important thing in this file. A module mines ORE. What ends up in
+-- the main net is whatever that ore becomes after washing, crushing, centrifuging
+-- and whatever else the line does -- and the controller can see NONE of that. The
+-- two quantities are not the same item and not even the same count:
+--
+--   stock items = perOre * ore items mined
+--
+-- The relationship is linear and the factor is per material -- commonly 2 or 2.7,
+-- sometimes 1, occasionally lossy -- so it is stated per entry (`perOre` in
+-- wants.lua) and cannot be derived from anything here.
+--
+-- Getting this wrong is not a rounding error. Every number a player reads is in
+-- STOCK space (that is what they asked for and what the terminal shows), while
+-- everything the targeter and the allocator work in is ORE space (that is what a
+-- module produces). So this module is where the two meet, and it converts in both
+-- directions:
+--
+--   the ask, going down    ore/s needed = (deficit / horizon) / perOre
+--   the answer, coming up  stock/s made = ore/s mined * perOre
+--
+-- Mix them up and an ETA is out by the factor -- an hour reported as three -- and,
+-- worse, the ALLOCATION is biased between materials by the ratio of their factors,
+-- so a want whose ore triples silently outbids one whose ore doubles by 35% for no
+-- reason anybody asked for.
+--
 -- ---- the shape of the pressure ----------------------------------------------
 -- A want contributes two numbers, and they do different jobs:
 --
---   rate    HOW MUCH is missing, as items/s. Sizes the fleet -- it is what says
+--   rate    HOW MUCH is missing, as ORE items/s. Sizes the fleet -- it is what says
 --           whether one module can cover this or six cannot.
 --   weight  HOW MUCH IT MATTERS relative to the others at the same moment. It is
 --           what the targeter multiplies each material's rate by when it scores a
@@ -55,6 +81,13 @@ wants.DEFAULTS = {
     -- multiplied by criticalBoost.
     criticalAt = 0.15,
     criticalBoost = 3,
+
+    -- Stock items per ORE ITEM MINED, when an entry does not say. 1 means "assume
+    -- the processing neither multiplies nor loses", which is the only honest thing to
+    -- assume without being told -- and it errs towards over-mining rather than under,
+    -- since a factor of 1 against a real 2.7 asks the fleet for nearly three times
+    -- the ore it needs. Set it per entry, or fleet-wide in cfg.auto.
+    perOre = 1,
 }
 
 -- ---- what a meteor can actually yield ---------------------------------------
@@ -118,7 +151,8 @@ end
 -- than an entry that is missing and named in the log.
 --
 -- Each surviving entry:
---   { material, labels = { <label>, ... }, want, weight, keys, produced, index }
+--   { material, labels = { <label>, ... }, want, weight, perOre, keys, index }
+-- `perOre` is nil when the entry did not say, so the caller's default applies.
 function wants.load(raw)
     local entries, problems = {}, {}
     local items = (type(raw) == "table") and (raw.items or raw) or nil
@@ -145,6 +179,10 @@ function wants.load(raw)
 
             local want = tonumber(e.want)
             local weight = tonumber(e.weight or 1)
+            -- nil is "not said", which the caller's default fills in. `false` is not
+            -- accepted as a way of saying 1: it would read as "no processing" and
+            -- mean "no idea", and those are answers to different questions.
+            local perOre = e.perOre ~= nil and tonumber(e.perOre) or nil
 
             if type(material) ~= "string" or material == "" then
                 problems[#problems + 1] = where .. " has no `material`"
@@ -161,6 +199,10 @@ function wants.load(raw)
             elseif not weight or weight <= 0 then
                 problems[#problems + 1] = where .. " ('" .. material
                     .. "'): `weight` must be a positive number"
+            elseif e.perOre ~= nil and (not perOre or perOre <= 0) then
+                problems[#problems + 1] = where .. " ('" .. material
+                    .. "'): `perOre` must be a positive number of stock items per ore "
+                    .. "item mined"
             else
                 seen[material] = i
                 -- A missing label is not fatal: the material can still be mined,
@@ -177,6 +219,7 @@ function wants.load(raw)
                     labels = labels,
                     want = want,
                     weight = weight,
+                    perOre = perOre,
                     keys = wants.keysOf(material),
                 }
             end
@@ -235,19 +278,29 @@ function wants.weightOf(entry, fill, opts)
     return w, critical
 end
 
+-- The stock items one ore item becomes for this entry. See the header: this is the
+-- opaque processing line, stated rather than measured.
+function wants.perOre(entry, opts)
+    local per = entry.perOre or opt(opts, "perOre") or 1
+    if type(per) ~= "number" or per <= 0 then per = 1 end
+    return per
+end
+
 -- Everything the controller and the screen need about the want list, in one pass.
 --
 --   entries     from wants.load
 --   stock       { [label] = count } from the main net, or nil if unread
---   opts        cfg.auto (horizon / refillAt / criticalAt / criticalBoost)
+--   opts        cfg.auto (horizon / refillAt / criticalAt / criticalBoost / perOre)
 --   satisfied   caller-owned latch table, carried across cycles (see the header)
---   oreRates    { [yield key] = items/s } the fleet currently produces, optional
+--   oreRates    { [yield key] = ORE items/s } the fleet currently mines, optional
 --
 -- Returns rows, demand, summary:
---   rows      one per entry, in config order, everything the screen shows
+--   rows      one per entry, in config order, everything the screen shows -- and all
+--             of it in STOCK items, which is what the player asked for
 --   demand    { [material] = { rate, weight } } for target.search, or nil when
---             nothing is being asked for (every want full, or the list is empty)
---   summary   { n, demanded, satisfied, critical, unmined, fill, eta }
+--             nothing is being asked for (every want full, or the list is empty).
+--             `rate` is in ORE items/s, which is what a module produces
+--   summary   { n, demanded, satisfied, critical, fill }
 function wants.evaluate(entries, stock, opts, satisfied, oreRates)
     entries = entries or {}
     satisfied = satisfied or {}
@@ -277,9 +330,17 @@ function wants.evaluate(entries, stock, opts, satisfied, oreRates)
         end
         local asking = satisfied[e.material] ~= true
 
+        -- The conversion, in both directions. Everything named `...Stock` is in the
+        -- items the player asked for; everything named `...Ore` is in the items a
+        -- module actually mines, and they differ by this factor.
+        local per = wants.perOre(e, opts)
         local deficit = math.max(0, e.want - (have or 0))
-        local rate = asking and (deficit / horizon) or 0
-        local rateOut = made[e.material] or 0
+        local rateStock = asking and (deficit / horizon) or 0
+        local rateOre = rateStock / per
+        -- What the fleet mines of it, converted UP into stock items -- the only form
+        -- in which it can be compared with the want at all.
+        local madeOre = made[e.material] or 0
+        local madeStock = madeOre * per
 
         local state, note
         if not next(e.keys) then state = "NOT MINED"
@@ -289,11 +350,13 @@ function wants.evaluate(entries, stock, opts, satisfied, oreRates)
         elseif fill < 0.5 then state = "LOW"
         else state = "OK" end
 
-        -- The one number that says whether the fleet is actually serving this:
-        -- how long the deficit would take to close at what it is producing now.
+        -- The one number that says whether the fleet is actually serving this: how
+        -- long the deficit would take to close at what is being made. Both sides in
+        -- stock items, which is the entire reason perOre exists -- against the raw
+        -- mining rate this was out by the factor, and an hour read as three.
         local eta
-        if deficit > 0 and rateOut > 0 then eta = deficit / rateOut end
-        if rateOut <= 0 and deficit > 0 then note = "nothing is mining it" end
+        if deficit > 0 and madeStock > 0 then eta = deficit / madeStock end
+        if madeStock <= 0 and deficit > 0 then note = "nothing is mining it" end
 
         if not asking then summary.satisfied = summary.satisfied + 1 end
         if critical then summary.critical = summary.critical + 1 end
@@ -313,17 +376,33 @@ function wants.evaluate(entries, stock, opts, satisfied, oreRates)
             critical = critical,
             satisfied = not asking,
             deficit = deficit,
-            rate = rate,          -- items/s being asked for
-            produced = rateOut,   -- items/s the fleet makes now
-            covered = (rate > 0) and math.min(1, rateOut / rate) or (rateOut > 0 and 1 or 0),
+            perOre = per,
+            -- Whether the entry SAID so, or is running on the default. A defaulted
+            -- factor is not a setting, it is a gap -- and the screen says so, because
+            -- it is the difference between an ETA and a guess.
+            perStated = e.perOre ~= nil,
+            -- Both in STOCK items a second: what is being asked for, and what is
+            -- arriving. A row never mixes the two spaces.
+            rate = rateStock,
+            produced = madeStock,
+            -- What a module is being asked for, in the items a module makes. Shown
+            -- nowhere; kept so a caller can check the conversion without redoing it.
+            rateOre = rateOre,
+            minedOre = madeOre,
+            covered = (rateStock > 0) and math.min(1, madeStock / rateStock)
+                or (madeStock > 0 and 1 or 0),
             eta = eta,
             state = state,
             note = note,
         }
 
-        if asking and rate > 0 then
+        if asking and rateOre > 0 then
             demand = demand or {}
-            demand[e.material] = { rate = rate, weight = weight }
+            -- ORE space: the targeter scores configurations by what they MINE, and a
+            -- demand handed to it in stock items would ask every material for the
+            -- wrong amount -- each by its own factor, which is worse than uniformly
+            -- wrong because it silently reweights them against each other.
+            demand[e.material] = { rate = rateOre, weight = weight }
             n = n + 1
         end
     end

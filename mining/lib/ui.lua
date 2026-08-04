@@ -1284,8 +1284,12 @@ end
 -- ETA is the line that gets read. A want at 40% with three modules on it is fine; a
 -- want at 40% with an ETA of eleven hours is a fleet that is not really trying, and
 -- neither the fill nor the rate says so on its own.
-local WC = { bar = 0, pct = 11, material = 17, label = 42, stock = 72, need = 92,
-             made = 104, cover = 116, eta = 125, state = 136 }
+-- PER ORE earns a column of its own because it is the only figure on this screen the
+-- controller cannot work out, and every number to the right of it is scaled by it: a
+-- factor left at its default makes NEED/s, MAKING/s, COVER and FULL IN all wrong
+-- together, and consistently enough to look right.
+local WC = { bar = 0, pct = 11, material = 17, label = 40, stock = 66, per = 86,
+             need = 94, made = 106, cover = 118, eta = 127, state = 137 }
 
 local function drawWants(state, x, y, w, h)
     local wants = state.wants or {}
@@ -1298,9 +1302,10 @@ local function drawWants(state, x, y, w, h)
     local hy = y + 1
 
     cell(ix, hy, WC.bar, 10, "FILL", C.faint, inner)
-    cell(ix, hy, WC.material, 24, "MATERIAL", C.faint, inner)
-    cell(ix, hy, WC.label, 29, "ITEM", C.faint, inner)
+    cell(ix, hy, WC.material, 22, "MATERIAL", C.faint, inner)
+    cell(ix, hy, WC.label, 25, "ITEM", C.faint, inner)
     cell(ix, hy, WC.stock, 19, "STOCK / WANT", C.faint, inner)
+    cell(ix, hy, WC.per, 7, "PER ORE", C.faint, inner)
     cell(ix, hy, WC.need, 11, padL("NEED/s", 10), C.faint, inner)
     cell(ix, hy, WC.made, 11, padL("MAKING/s", 10), C.faint, inner)
     cell(ix, hy, WC.cover, 8, padL("COVER", 7), C.faint, inner)
@@ -1328,12 +1333,17 @@ local function drawWants(state, x, y, w, h)
                 e.fill and fillColor(e.fill) or C.faint, C.panelHi)
         end
         cell(ix, row, WC.pct, 6, padL(e.pct or "-", 5), col, inner)
-        cell(ix, row, WC.material, 24, e.material or "?", C.text, inner)
+        cell(ix, row, WC.material, 22, e.material or "?", C.text, inner)
         -- The label is what the stock figure was read from, so a wrong one shows up
         -- here as an item nobody recognises next to a stock of zero.
-        cell(ix, row, WC.label, 29, e.label or "(no item named)",
+        cell(ix, row, WC.label, 25, e.label or "(no item named)",
             e.label and C.mine or C.crit, inner)
         cell(ix, row, WC.stock, 19, e.stock or "-", C.dim, inner)
+        -- Warned rather than dimmed when it is a default: nothing is wrong with the
+        -- row, but nobody has said what the line yields, and every figure after this
+        -- column is scaled by the guess.
+        cell(ix, row, WC.per, 7, e.per or "-",
+            e.perStated and C.dim or C.warn, inner)
         cell(ix, row, WC.need, 11, padL(e.need or "-", 10), C.dim, inner)
         -- MAKING is the fleet's answer to this row, and the one number here that is
         -- about the hardware: green when something is coming, red when nothing is.

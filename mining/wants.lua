@@ -35,11 +35,42 @@
 --              deficit is what drives the fleet, and a want that is full stops
 --              asking (until it falls back under cfg.auto.refillAt of it).
 --
+--   perOre     how many of `label` you end up with per ORE ITEM MINED. The one
+--              number here the controller cannot work out for itself, and the one
+--              that makes everything else honest -- see below.
+--
 --   weight     optional, default 1. Multiplies this entry's pull when several
 --              compete: 2 means "twice as interesting as the rest, at the same
 --              fill". Prefer leaving it alone -- the fill fraction already does
 --              most of this -- and use it for the handful of things that really
 --              do matter more.
+--
+-- ---- perOre, and why it is not optional in practice ------------------------
+-- What a module mines is ORE. What arrives in the main net is whatever your line
+-- turns that ore into -- washed, crushed, centrifuged, macerated -- and the
+-- controller can see none of that. It knows how much ore comes out of a meteor and
+-- it can read how much of an ITEM you hold, and between those two numbers sits a
+-- multiplier only you know:
+--
+--     items in stock = perOre * ore items mined
+--
+-- In GTNH that is usually 2 or about 2.7 for an ore line ending in dust, 1 if you
+-- are stocking the raw ore itself, and less than 1 where the chain loses material.
+-- Left unsaid it defaults to cfg.auto.perOre (1), which is the honest assumption and
+-- an over-estimate of what the fleet has to mine -- so the fleet works harder than
+-- it needs to and every ETA reads several times too long.
+--
+-- It is worth measuring once rather than guessing: note what an ore line yields per
+-- ore item, and put that number here. Two things depend on it and nothing else can
+-- fix them --
+--
+--   the ETA         "full in 40m" against "full in 2h" is the difference between
+--                   waiting and going to build another module
+--   the ALLOCATION  the fleet is aimed by comparing what each want needs. Two wants
+--                   whose lines yield 2 and 2.7 are being asked for amounts that
+--                   differ by 35% before anything about the ore is considered, so a
+--                   wrong factor does not merely mis-size the fleet -- it points it
+--                   at the wrong material.
 --
 -- ---- how the list is served ------------------------------------------------
 -- Ore purity is dreadful when a material is targeted alone (1-2% is normal), so
@@ -64,11 +95,19 @@ local wants = {}
 -- Written as a list rather than a keyed table so the order you write is the order
 -- the WANTS screen shows.
 wants.items = {
-    -- { material = "Dilithium",     label = "Dilithium Ore",         want = 16384 },
-    -- { material = "Platinum",      label = "Raw Platinum",          want = 65536 },
-    -- { material = "BlackPlutonium",label = "Black Plutonium Ore",   want = 4096, weight = 2 },
+    -- Stocking the raw ore itself: one ore item per ore item mined.
+    -- { material = "Dilithium",     label = "Dilithium Ore",       want = 16384, perOre = 1 },
+
+    -- Stocking what the line makes of it. These factors are examples -- measure
+    -- your own, they are the difference between a useful ETA and a decorative one.
+    -- { material = "Platinum",      label = "Platinum Dust",       want = 65536, perOre = 2.7 },
+    -- { material = "BlackPlutonium",label = "Black Plutonium Dust",want = 4096,  perOre = 2,
+    --   weight = 2 },
+
+    -- Several labels count together, which is how to say "ore or its crushed form
+    -- both count as stock". perOre then describes the pair.
     -- { material = "Bedrockium",    label = { "Bedrockium Ore", "Crushed Bedrockium Ore" },
-    --   want = 4096 },
+    --   want = 4096, perOre = 1 },
 }
 
 return wants

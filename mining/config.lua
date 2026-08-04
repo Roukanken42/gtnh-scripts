@@ -326,6 +326,18 @@ cfg.auto = {
     -- when the fleet is sitting around; lengthen it when kits are the bottleneck.
     horizon = 3600,
 
+    -- Stock items per ORE ITEM MINED, for entries in wants.lua that do not say. A
+    -- module mines ore; what reaches the main net is whatever your line turns that ore
+    -- into, and the controller cannot see that step -- so this is the bridge between
+    -- "how much ore a meteor gives" and "how much of the item I hold". Commonly 2 or
+    -- about 2.7 for a line ending in dust, and 1 for stocking the raw ore.
+    --
+    -- 1 is the honest default and errs towards over-mining, but it makes every ETA
+    -- read several times too long, and it biases the fleet between two wants whose
+    -- lines yield differently. It belongs per entry in wants.lua, where the factor
+    -- actually lives; set it here only if your whole list happens to share one.
+    perOre = 1,
+
     -- Hysteresis, and the reason a fleet settles instead of oscillating. A want that
     -- reaches its target stops being asked for until it falls back below this
     -- fraction of it, so ore hovering at 100% cannot re-aim the fleet every cycle.

@@ -1,19 +1,32 @@
--- Mining controller -- MANUAL mode.
+-- Mining controller.
 --
--- You configure the modules at the machine (drone, distance, overdrive) and this
--- keeps them fed: plasma into every hatch, kits and plasma into the local net
--- from the main-net supply interface. It never touches a module's parameters and
--- never switches one on or off, so stopping the controller does not stop mining.
+-- Keeps a fleet of space-elevator mining modules fed -- plasma into every hatch,
+-- kits and plasma into the local net from the main-net supply interface -- and, for
+-- the modules you let it, decides what they should be mining.
 --
--- The one decision it does own is WHICH PLASMA the fleet runs on, because that is
--- fleet-wide (a hatch holds one fluid) and switching it means draining every
--- hatch that disagrees. Press P, choose, confirm.
+-- Every module is in one of two modes, per module and remembered across runs:
 --
--- Automatic mode -- picking configurations with target.lua instead of being told
--- them -- comes later; this is the half that has to work first.
+--   AUTO (the default)  the controller aims it. Once mining/wants.lua says what ore
+--                       you want and how much, it searches for the configurations
+--                       that serve that list and shares them out across the AUTO
+--                       modules -- and because a want stops paying once it is
+--                       covered, they spread over what is still missing instead of
+--                       all chasing the same thing. With no want list it changes
+--                       nothing, so an un-set-up controller is a harmless one.
+--   MANUAL              you own it. Setting anything on a module by hand claims it,
+--                       and the controller then leaves its parameters alone for
+--                       good -- while still feeding it. A on the dashboard hands it
+--                       back.
+--
+-- The one decision that is fleet-wide either way is WHICH PLASMA, because a hatch
+-- holds one fluid and switching it means draining every hatch that disagrees. Press
+-- P, choose, confirm.
+--
+-- Nothing here stops mining: quitting leaves every module running on what is in its
+-- hatches, in whatever configuration it was last given.
 --
 -- Run from the mining folder:  main
--- See `main --help`, and config.lua for the knobs.
+-- See `main --help`, config.lua for the knobs and wants.lua for the demand.
 
 local miners = require("lib.hw.miners")
 local supply = require("lib.hw.supply")
@@ -24,6 +37,9 @@ local drones = require("lib.gtnh.drones")
 local plasmas = require("lib.gtnh.plasmas")
 local estimate = require("lib.calc.estimate")
 local targeter = require("lib.calc.target")
+local wanted = require("lib.calc.wants")
+local allocate = require("lib.calc.allocate")
+local modes = require("lib.modes")
 local profile = require("lib.profile")
 local ui = require("lib.ui")
 local cli = require("lib.cli")
@@ -31,26 +47,48 @@ local cfg = require("config")
 local event = require("event")
 local computer = require("computer")
 
+-- The want list is a separate file so it can be edited without touching config.lua,
+-- and an install that has never had one is a working MANUAL-only controller rather
+-- than a crash.
+local wantsFile
+do
+    local ok, loaded = pcall(require, "wants")
+    wantsFile = ok and loaded or nil
+end
+
 local ctx = cli.start({
     name = "main",
-    summary = "Mining controller: keeps a manually-configured fleet fed.",
+    summary = "Mining controller: aims the fleet at what you want, and keeps it fed.",
     usage = {
         { "main",          "run the controller until stopped" },
         { "main --no-ui",  "run headless, logging to the console" },
         { "main --once",   "run a single maintenance cycle and exit" },
+        { "main --manual", "never aim a module; keep the fleet fed and nothing else" },
         { "main --profile","write a timing report to a file on exit" },
     },
     flags = {
         { "--no-ui", "no dashboard; print each cycle instead" },
         { "--once",  "one cycle, then exit (for checking a fresh setup)" },
+        { "--manual", "treat every module as MANUAL for this run, whatever their"
+            .. " modes say -- the want list is still read and shown" },
         { "--profile", "measure where the time goes; F shows it, and it is written"
             .. " to mining-profile.txt on exit" },
     },
     notes = {
-        "MANUAL mode. You set each module's drone, distance and overdrive yourself; "
-            .. "the controller only keeps the consumables flowing. It does not "
-            .. "enable, disable or reconfigure a module, so quitting leaves the fleet "
-            .. "mining -- with whatever is already in its hatches.",
+        "Every module is AUTO or MANUAL, and that is remembered between runs. An AUTO "
+            .. "module is aimed by the controller at whatever best serves "
+            .. "mining/wants.lua -- the file listing the ore you want and how much of "
+            .. "it. Setting anything on a module by hand claims it as MANUAL, so the "
+            .. "controller stops aiming it (it keeps feeding it); A on the dashboard "
+            .. "hands it back. With no want list nothing is ever aimed, and W shows "
+            .. "that list against what the fleet is actually producing.",
+        "AUTO changes nothing quickly. The main net is read on the slow cadence only, "
+            .. "a want that fills stays filled until it drops well below its target, "
+            .. "and a module is re-aimed only when the new configuration beats what it "
+            .. "is running by a clear margin (cfg.auto.margin) -- because every "
+            .. "re-aim costs a mining operation, and a plasma change drains a hatch.",
+        "The controller never enables or disables a module, so quitting leaves the "
+            .. "fleet mining -- with whatever is already in its hatches.",
         "The arrows move down the module list and ENTER opens one. That screen shows "
             .. "its meteor pool and the ore coming out of it (TAB switches between "
             .. "the two), and lets you drive its drone, distance, overdrive and "
@@ -136,10 +174,16 @@ end
 
 local scfg = cfg.supply or {}
 local ccfg = cfg.control or {}
+local acfg = cfg.auto or {}
 
 local interval = math.max(ccfg.interval or 5, 1)
 local uiRefresh = math.max(ccfg.uiRefresh or 1, 0.1)
 local jobLimits = ccfg.jobs or control.JOBS
+
+-- Automatic mode off for this run, whatever the modes file says. Not the same as
+-- switching every module to MANUAL, which would be written down and would still be
+-- off tomorrow: this is "not today".
+local manualRun = ctx.flags.manual and true or false
 
 -- ---- log ---------------------------------------------------------------------
 
@@ -249,6 +293,55 @@ local showLog = false
 local view = { miners = {}, kits = {}, plasmas = {}, totals = {} }
 local stock = { items = {}, fluids = {} }
 
+-- ---- the demand side ---------------------------------------------------------
+
+-- The want list, validated once. A bad entry is dropped and named rather than
+-- guessed at, so `wantProblems` is shown on the WANTS screen and logged at startup.
+local wantEntries, wantProblems = wanted.load(wantsFile)
+
+-- Which modules the controller may aim. AUTO unless written down; see lib/modes.lua
+-- for why the exceptions are the thing that gets stored.
+local moduleModes = modes.load()
+
+-- What the MAIN net holds of each wanted item. nil means NEVER READ, which is a
+-- different thing from "holds none" and is treated as such throughout: an unread
+-- network must not be able to declare every want critical. One unfiltered scan of a
+-- main net is expensive, so it happens on the slow cadence only.
+local mainStock, mainStockAt, mainStockInfo = nil, nil, nil
+
+-- The hysteresis latch behind the want list: a want that fills stays filled until it
+-- falls back under cfg.auto.refillAt of its target. Carried across cycles, exactly
+-- like `satisfied` above does it for kits.
+local wantSatisfied = {}
+
+-- What the last evaluation said, kept because it is only recomputed on the slow
+-- cadence -- the stock it is derived from is. `wantView` is the same thing formatted
+-- for the screen, and `wantMark` is what the ore and meteor tables look rows up in.
+local wantRows, wantDemand, wantSummary = {}, nil, { n = #wantEntries }
+local wantView = { rows = {}, notes = {}, summary = {} }
+local wantMark = {}
+
+-- Every yield key the want list absorbs -> the material it serves. What the ore and
+-- meteor tables mark.
+local wantKeys = wanted.wantedKeys(wantEntries)
+
+-- The fleet's own ore output, keyed as the estimator keys it, from the last heavy
+-- cycle. Feeds both the want rows ("is anything actually mining this?") and the
+-- allocation's idea of what a module is worth keeping.
+local fleetOreRates = {}
+
+-- What the allocator last did, for the log and the screen, plus the signature of the
+-- demand it did it for -- so a heavy cycle whose demand has not moved does not pay
+-- for a search that can only come back with the same answer.
+local autoNote, autoSignature = nil, nil
+local autoDue = true            -- forced after a mode change or a want-list reload
+
+-- Forward declarations. The demand side is built on top of the estimator glue and
+-- the searcher options that the detail and advisor screens further down already
+-- own -- reimplementing either would be two places to keep in step -- while the
+-- cycle that drives it all comes first. Declared here, assigned down there.
+local refreshWants, runAuto, fleetAggregate
+
 -- Drone tier -> how many the local net holds. A drone is a catalyst rather than a
 -- consumable, so this is a presence check: read alongside the stock, since it is
 -- the same kind of question and the same cadence.
@@ -313,6 +406,9 @@ local function readFleet(full)
             tierName = m.tierName, addr = m.address:sub(1, 8),
             hasFluid = st ~= nil and st:hasFluid(),
             hasItems = st ~= nil and st:hasItems(),
+            -- Whether the controller may aim it. Free -- it is a table lookup, not a
+            -- component call -- so it is read every cycle like the parameters.
+            auto = (not manualRun) and modes.isAuto(moduleModes, m.address) or false,
         }
 
         local snap = m:snapshot()
@@ -436,11 +532,31 @@ local function slotFor(p)
     return slot
 end
 
+-- Remembers that a module is the player's now. Called from every path a HUMAN can
+-- change a module by -- an edit, a paste, the advisor -- and from none that the
+-- allocator uses, which is the whole distinction between the two modes.
+--
+-- Written to disk immediately rather than on the way out: the interesting case for
+-- remembering this is the run that ends by having the power cut.
+local function claimModule(row)
+    if not modes.claim(moduleModes, row.miner.address) then return end
+    log(row.addr .. ": MANUAL now -- the controller will not aim it (A hands it back)")
+    local path, err = modes.save(moduleModes)
+    if not path then log("  (could not remember that: " .. tostring(err) .. ")") end
+    -- One fewer module to allocate over, so the rest may want re-sharing.
+    autoDue = true
+end
+
 -- Queues a committed edit. Nothing is written here: a parameter needs the module
 -- stopped, and a module mid-operation takes tens of seconds to get there, so the
 -- control thread works at it in the background and the dashboard shows it
 -- waiting. Which also means the key handler stays instant.
-local function commitEdit(row, field, value)
+--
+-- `byAuto` marks the allocator's own writes, which must NOT claim the module -- a
+-- controller that took a module off itself the first time it aimed one would never
+-- aim it twice.
+local function commitEdit(row, field, value, byAuto)
+    if not byAuto then claimModule(row) end
     local extra
     if field == "plasma" then
         local p = plasmas.byTier[value]
@@ -681,6 +797,23 @@ local function runCycle()
     donePlan()
     for _, n in ipairs(notes) do log(n) end
 
+    -- ---- what the fleet is FOR, and what to do about it ----
+    -- All of it on the heavy cadence: the main-net scan is the most expensive read
+    -- the controller makes, the fleet's own output only changes when a module is
+    -- reconfigured, and a fleet re-aimed every five seconds would spend its life
+    -- stopped for parameter writes.
+    if full then
+        local doneWants = profile.span("wants and allocation")
+        refreshWants(rows)
+        if not paused and runAuto(rows) then
+            -- Something was queued, so the rows in hand describe the fleet as it was
+            -- a moment ago. Re-read the cheap half so PENDING shows up at once
+            -- instead of at the next cycle.
+            rows = readFleet(false)
+        end
+        doneWants()
+    end
+
     -- ---- assemble the view ----
     local doneView = profile.span("assemble the view")
     local crafting = {}
@@ -730,13 +863,17 @@ local function runCycle()
         }
     end
 
-    local mining = 0
-    for _, r in ipairs(rows) do if r.state == "MINING" then mining = mining + 1 end end
+    local mining, auto = 0, 0
+    for _, r in ipairs(rows) do
+        if r.state == "MINING" then mining = mining + 1 end
+        if r.auto then auto = auto + 1 end
+    end
 
     view = {
         miners = rows, kits = kitView, plasmas = plasmaView,
+        wants = wantView, wanted = wantMark,
         totals = {
-            miners = #rows, mining = mining,
+            miners = #rows, mining = mining, auto = auto,
             jobsKit = jobs:count("kit"), jobsPlasma = jobs:count("plasma"),
             limitKit = jobLimits.kit, limitPlasma = jobLimits.plasma,
         },
@@ -761,6 +898,53 @@ local function si(n)
     if n < 1e6 then return string.format("%.2fk", n / 1e3) end
     if n < 1e9 then return string.format("%.2fM", n / 1e6) end
     return string.format("%.2fG", n / 1e9)
+end
+
+-- A long stretch of time, for "how long until this want is full". Hours matter here
+-- and seconds do not, which is the opposite of secs() above -- an ETA in seconds is
+-- noise, and one in "11h" is the whole message.
+local function longSecs(t)
+    if not t or t <= 0 or t == math.huge then return nil end
+    if t < 90 then return string.format("%ds", math.floor(t)) end
+    if t < 5400 then return string.format("%dm", math.floor(t / 60 + 0.5)) end
+    if t < 86400 then
+        return string.format("%dh%02dm", math.floor(t / 3600), math.floor((t % 3600) / 60))
+    end
+    if t < 8640000 then return string.format("%dd", math.floor(t / 86400 + 0.5)) end
+    return "never"
+end
+
+-- ---- marking what the fleet is for -------------------------------------------
+--
+-- The wants a meteor serves, as a short label, or nil for one that serves none.
+-- `keys` is any table whose KEYS are yield keys the way the estimator reports them
+-- (the bare material where there is one, else the oredict), which is the shape both
+-- the per-module pool and the fleet aggregate already have to hand.
+--
+-- Truncated to three, because the column is not wide and the point of it is the
+-- yes/no: a meteor serving four wants and one serving seven are the same answer.
+local function servesLabel(keys)
+    local seen, names = {}, {}
+    for key in pairs(keys or {}) do
+        local mat = wantKeys[key]
+        if mat and not seen[mat] then seen[mat] = true; names[#names + 1] = mat end
+    end
+    if #names == 0 then return nil end
+    table.sort(names)
+    if #names > 3 then
+        names = { names[1], names[2], names[3], "+" .. (#names - 3) }
+    end
+    return table.concat(names, ", ")
+end
+
+-- The yield keys of one meteor, as a set servesLabel can read.
+local function yieldKeys(yields)
+    local set = {}
+    for _, y in ipairs(yields or {}) do
+        if y.mat then set[y.mat] = true end
+        if y.oredict then set[y.oredict] = true end
+    end
+    return set
 end
 
 -- What the module would be doing at `cur`, whether or not that is what it is set
@@ -895,6 +1079,10 @@ local function buildDetail(rows)
             time = secs(e.time), eut = si(e.eut), computation = si(e.computation),
             runtime = string.format("%.1f%%", (e.timeShare or 0) * 100),
             note = e.limit and ("capped by " .. e.limit) or nil,
+            -- Which of the wants this meteor is worth rolling for. The table is
+            -- sorted by share of running time, so this column is where "a third of
+            -- this module's life goes on something nobody asked for" shows up.
+            serves = servesLabel(yieldKeys(e.yield)),
         }
     end
     -- Meteors in range that the module cannot power or compute are shown too,
@@ -1011,7 +1199,7 @@ end
 -- screens asks for it and not again until the next cycle.
 local fleetSums, fleetSumsAt = nil, -1
 
-local function fleetAggregate(rows)
+function fleetAggregate(rows)
     if fleetSumsAt == cycle and fleetSums then return fleetSums end
 
     local byMeteor, byOre = {}, {}
@@ -1122,6 +1310,7 @@ local function buildFleet(rows)
             meteors = string.format("%.3f", m.meteors),
             eut = si(m.avgEut),
             ore = m.top or "",
+            serves = servesLabel(m.ore),
         }
     end
     for _, o in ipairs(agg.ore) do
@@ -1163,8 +1352,12 @@ local function searchOpts(row, pins, showAll)
         budget = cfg.budget,
         computation = cfg.computation,
         -- The module tier is hardware, not a choice: only this module's own tier
-        -- is searched, so a recommendation is always one it can actually run.
+        -- is searched, so a recommendation is always one it can actually run. Same
+        -- for the parallels it is set to -- every rate reported scales with them, and
+        -- a recommendation quoting eight parallels' throughput to a module running
+        -- two is a recommendation about a different machine.
         modules = { row.miner.tier },
+        parallels = row.parallels,
         drones = onlyDrones,
         plasmas = onlyPlasmas,
         distance = pins.distance,
@@ -1334,16 +1527,15 @@ local function buildAdvise(rows)
     return a
 end
 
--- Applies a recommendation: the four parameters, queued like any other change.
--- Returns a sentence describing what happened, which the advisor puts on screen --
--- because everything this does is invisible from there otherwise. The changes go
--- on the queue, the log is hidden unless asked for, and a parameter write waits
--- for the module to finish its operation, so without a word here pressing ENTER
--- looks exactly like pressing nothing.
-local function applyAdvice(row, c)
-    if not c then
-        return "nothing selected to apply"
-    end
+-- Queues a candidate's four parameters onto a module -- only the ones that DIFFER,
+-- since writing back a value a module already has would stop it, write what was
+-- already there, and start it again for nothing.
+--
+-- The one path by which any configuration reaches hardware, whether a player chose
+-- it in the advisor or the allocator did. `byAuto` is what tells those two apart:
+-- it decides whether the module is claimed as MANUAL, and nothing else.
+-- Returns the list of field names that were queued.
+local function applyCandidate(row, c, byAuto)
     local want = {
         drone = c.drone,
         -- The pool is identical across the whole interval the candidate reports,
@@ -1356,10 +1548,24 @@ local function applyAdvice(row, c)
     local changed = {}
     for _, f in ipairs(control.FIELDS) do
         if want[f.key] ~= nil and want[f.key] ~= cur[f.key] then
-            commitEdit(row, f.key, want[f.key])
+            commitEdit(row, f.key, want[f.key], byAuto)
             changed[#changed + 1] = f.label:lower()
         end
     end
+    return changed
+end
+
+-- Applies a recommendation the player chose. Returns a sentence describing what
+-- happened, which the advisor puts on screen -- because everything this does is
+-- invisible from there otherwise. The changes go on the queue, the log is hidden
+-- unless asked for, and a parameter write waits for the module to finish its
+-- operation, so without a word here pressing ENTER looks exactly like pressing
+-- nothing.
+local function applyAdvice(row, c)
+    if not c then
+        return "nothing selected to apply"
+    end
+    local changed = applyCandidate(row, c, false)
     if #changed == 0 then
         log(row.addr .. ": already set to the recommendation")
         return "this module is already set to that"
@@ -1369,6 +1575,387 @@ local function applyAdvice(row, c)
         .. "may take an operation to land", table.concat(changed, ", "))
 end
 
+-- ---- automatic mode ----------------------------------------------------------
+--
+-- Two steps, both on the heavy cadence, and deliberately separate:
+--
+--   refreshWants   what is wanted and what is happening about it. Reads the main
+--                  net (expensive) and the fleet's own output (an estimate per
+--                  module), and turns the two into a demand table and the rows the
+--                  WANTS screen shows. Runs whether or not anything is AUTO -- the
+--                  screen is worth having in a fully manual fleet.
+--   runAuto        what to do about it. Searches per hardware group, shares the
+--                  candidates out over the AUTO modules, and queues the ones worth
+--                  a stop.
+--
+-- Nothing here is allowed to be the only path to hardware: it queues changes with
+-- exactly the same commitEdit the keyboard uses, and every guard that applies to a
+-- player's edit applies to its own.
+
+-- The four parameters of a candidate, in a few words -- for the log, where one line
+-- per re-aimed module is the whole record of what the controller decided.
+local function candidateLabel(c)
+    local d = drones.get(c.drone)
+    local p = plasmas.byTier[c.plasma]
+    return string.format("%s  d%d  OD%.2f  %s",
+        d and ("MK-" .. d.roman) or ("drone " .. tostring(c.drone)),
+        c.distance[1], c.overdrive,
+        p and (p.name:gsub(" Plasma$", "")) or ("plasma " .. tostring(c.plasma)))
+end
+
+-- The want rows, formatted, plus the marking table every ore and meteor table reads.
+-- Rebuilt whenever the evaluation is, and never in between: the numbers in it are
+-- only as fresh as the main-net read they came from, and the panel title says when
+-- that was rather than pretending otherwise.
+local function buildWantView()
+    local rowsOut, marks = {}, {}
+    local askSum, gotSum = 0, 0
+
+    for i, r in ipairs(wantRows) do
+        local fill = r.fill and math.min(1, r.fill) or nil
+        local pct = fill and string.format("%d%%", math.floor(fill * 100 + 0.5)) or "-"
+        local stock = (r.have and si(r.have) or "?") .. " / " .. si(r.want)
+
+        if r.rate > 0 then
+            askSum = askSum + r.rate
+            gotSum = gotSum + math.min(r.rate, r.produced or 0)
+        end
+
+        rowsOut[i] = {
+            material = r.material,
+            label = (r.label ~= "") and r.label or nil,
+            stock = stock,
+            fill = fill,
+            pct = pct,
+            need = (r.rate > 0) and string.format("%.3f", r.rate) or "-",
+            made = string.format("%.3f", r.produced or 0),
+            making = (r.produced or 0) > 0,
+            cover = (r.rate > 0) and r.covered or nil,
+            coverPct = (r.rate > 0)
+                and string.format("%d%%", math.floor((r.covered or 0) * 100 + 0.5)) or "-",
+            eta = longSecs(r.eta),
+            state = r.state,
+            note = r.note,
+        }
+
+        -- Every key the entry absorbs points at the same mark, so an ore table can
+        -- ask about "dustPlatinum" and get the Platinum want back.
+        local e = wantEntries[i]
+        if e then
+            local mark = { material = r.material, fill = fill, pct = pct, stock = stock }
+            for key in pairs(e.keys) do marks[key] = mark end
+        end
+    end
+
+    local notes = {}
+    for _, p in ipairs(wantProblems) do notes[#notes + 1] = p end
+    if mainStockInfo and mainStockInfo.error then
+        notes[#notes + 1] = mainStockInfo.error
+    end
+    if mainStockInfo and #(mainStockInfo.missing or {}) > 0 then
+        notes[#notes + 1] = "the main net lists none of: "
+            .. table.concat(mainStockInfo.missing, ", ")
+            .. " -- either you have none, or the label is spelled differently"
+    end
+
+    local s = wantSummary or {}
+    local base
+    if (s.n or 0) == 0 then
+        base = "mining/wants.lua lists nothing, so no module is being aimed."
+    else
+        base = string.format("%d of %d want(s) met   --   %d%% average fill",
+            (s.n or 0) - (s.demanded or 0), s.n or 0,
+            math.floor((s.fill or 0) * 100 + 0.5))
+        if (s.critical or 0) > 0 then
+            base = base .. string.format("   --   %d CRITICAL", s.critical)
+        end
+        if askSum > 0 then
+            base = base .. string.format("   --   the fleet covers %d%% of what is asked",
+                math.floor(gotSum / askSum * 100 + 0.5))
+        end
+    end
+
+    wantView = {
+        rows = rowsOut, notes = notes, read = mainStockAt,
+        -- The counts as well as the sentence: the KPI card on the dashboard reads
+        -- these, and the sentence is only for the footer of the want screen itself.
+        summary = {
+            base = base, line = base,
+            n = s.n or 0, demanded = s.demanded or 0,
+            satisfied = s.satisfied or 0, critical = s.critical or 0,
+            fill = s.fill or 0,
+        },
+    }
+    wantMark = marks
+end
+
+-- Whatever the allocator last said, kept on the WANTS screen footer next to the ask
+-- -- the two questions being "what do I want" and "what is being done about it", and
+-- there is no other place the second one is answered.
+local function setAutoNote(note)
+    autoNote = note
+    local s = wantView.summary or {}
+    wantView.summary = s
+    s.line = note and ((s.base or "") .. "   --   " .. note) or (s.base or "")
+end
+
+function refreshWants(rows)
+    if #wantEntries == 0 then
+        wantRows, wantDemand, wantSummary = {}, nil, { n = 0 }
+        buildWantView()
+        return
+    end
+
+    -- 1. What the main net holds. The expensive one: a single unfiltered scan, which
+    -- is why this whole function is on the heavy cadence.
+    if itf then
+        local labels = {}
+        for _, e in ipairs(wantEntries) do
+            for _, l in ipairs(e.labels) do labels[#labels + 1] = l end
+        end
+        if #labels > 0 then
+            local doneScan = profile.span("read main net stock")
+            local got, info = supply.mainStock(itf, labels)
+            doneScan()
+            local firstRead = (mainStockAt == nil)
+            mainStockInfo = info
+            if got then
+                mainStock, mainStockAt = got, os.date("%H:%M:%S")
+                -- Only on the first read: a label that matches nothing matches
+                -- nothing every cycle, and saying so every thirty seconds for the
+                -- rest of the run would bury everything else in the log.
+                if firstRead then
+                    log(string.format("main net: %d item type(s) scanned, %d of %d "
+                        .. "wanted label(s) in stock", info.scanned or 0,
+                        info.found or 0, #labels))
+                    for _, miss in ipairs(info.missing or {}) do
+                        log("  none in stock: " .. miss .. " (check the label if that is a surprise)")
+                    end
+                end
+            elseif firstRead or (info and info.error) then
+                log("main net: " .. tostring(info and info.error or "unreadable"))
+            end
+        end
+    end
+
+    -- 2. What the fleet is actually producing. One estimate per configured module,
+    -- pure arithmetic -- no component calls -- and cached for the rest of the cycle,
+    -- so the fleet screens get it for free if they are opened.
+    local agg = fleetAggregate(rows)
+    fleetOreRates = {}
+    for _, o in ipairs(agg.ore) do fleetOreRates[o.name] = o.items end
+
+    -- 3. Fill, weight, rate, and the latch.
+    wantRows, wantDemand, wantSummary =
+        wanted.evaluate(wantEntries, mainStock, acfg, wantSatisfied, fleetOreRates)
+    buildWantView()
+end
+
+-- What the allocation was computed against, coarsely. Re-searching costs thousands
+-- of pool evaluations and can only produce a different answer if the demand or the
+-- fleet has actually moved, so a heavy cycle where neither has is skipped.
+--
+-- Coarse on purpose: rates to two significant figures (a 5%-ish bucket) and weights
+-- to two decimals. Mining changes the stock continuously, so an exact signature
+-- would differ every single cycle and the check would never save anything.
+local function autoSignatureOf(targets, list)
+    local parts = {}
+    for _, t in ipairs(targets) do
+        parts[#parts + 1] = string.format("%s:%.2g:%.2f", t.name, t.need, t.weight)
+    end
+    table.sort(parts)
+    local mods = {}
+    for _, m in ipairs(list) do
+        mods[#mods + 1] = string.format("%s:%d:%d:%s", m.key, m.tier, m.parallels,
+            m.current and "set" or "bare")
+    end
+    table.sort(mods)
+    return table.concat(parts, "|") .. "//" .. table.concat(mods, "|")
+end
+
+function runAuto(rows)
+    if manualRun then return false end
+    if #wantEntries == 0 then setAutoNote(nil); return false end
+    if not wantDemand then
+        -- Everything is full. Note that this is where a satisfied fleet SITS: no
+        -- demand, no search, no changes, and every module left exactly as it is
+        -- until a want falls back under cfg.auto.refillAt.
+        setAutoNote("every want is met -- nothing to re-aim")
+        return false
+    end
+
+    -- Who can be aimed at all. A module the controller cannot both put a drone in
+    -- and feed plasma to cannot be configured by it either -- three of the four
+    -- parameters would fail at the queue -- so it is counted and skipped.
+    local list, unfed, busy = {}, 0, 0
+    for _, r in ipairs(rows) do
+        if r.auto then
+            if not (r.station and r.hasItems and r.hasFluid) then
+                unfed = unfed + 1
+            elseif #queue:pending(r.addr) > 0 then
+                -- A change is still landing. Re-deciding now would replace it
+                -- mid-flight, and the queue is already stopping the machine.
+                busy = busy + 1
+            else
+                list[#list + 1] = {
+                    key = r.addr, row = r,
+                    tier = r.miner.tier,
+                    parallels = r.parallels or r.parallelCap or 1,
+                    -- Bigger modules choose first: they have the most parallels and
+                    -- so the most say in what is left for everyone else.
+                    size = (r.parallels or r.parallelCap or 1) * 10 + r.miner.tier,
+                }
+            end
+        end
+    end
+
+    if #list == 0 then
+        local why = "nothing to aim"
+        if busy > 0 then why = busy .. " module(s) still working through a change" end
+        if unfed > 0 then
+            why = why .. string.format(" (%d without a station or plasma feed)", unfed)
+        end
+        setAutoNote(why)
+        return false
+    end
+
+    -- The demand, as the allocator wants it. Built from the entries rather than the
+    -- rows because the allocator needs each want's KEYS to recognise the material in
+    -- a module's estimated output.
+    local targets = {}
+    for _, e in ipairs(wantEntries) do
+        local d = wantDemand[e.material]
+        if d then
+            targets[#targets + 1] = { name = e.material, need = d.rate,
+                                      weight = d.weight, keys = e.keys }
+        end
+    end
+    if #targets == 0 then setAutoNote("nothing being asked for"); return false end
+
+    -- What each module is worth as it stands, which is what KEEP is measured
+    -- against. Straight off the estimator, in the same points the searcher scores
+    -- candidates in.
+    local costs = { ingot = cfg.kitCost, plasma = cfg.plasmaCost, eu = cfg.euCost }
+    for _, m in ipairs(list) do
+        local cur = currentOf(m.row)
+        if cur.drone and cur.distance and cur.plasma then
+            local est = estimate.run{
+                distance = cur.distance, drone = cur.drone, module = m.tier,
+                plasma = cur.plasma, overdrive = cur.overdrive or 1,
+                parallels = m.parallels, computation = cfg.computation,
+            }
+            if est then
+                m.current = {
+                    rates = allocate.ratesFromEstimate(est, targets),
+                    cost = allocate.costFromEstimate(est, costs),
+                }
+            end
+        end
+    end
+
+    local signature = autoSignatureOf(targets, list)
+    if not autoDue and signature == autoSignature then return false end
+    autoSignature, autoDue = signature, false
+    -- Anything that goes wrong below sets this again: the signature has already been
+    -- recorded, so without it a search that failed once would not be retried until
+    -- the demand happened to move -- which, with the stock unreadable, could be never.
+    local retry = false
+
+    -- One search per HARDWARE GROUP, not per module: the demand is fleet-wide, so
+    -- two modules of the same tier running the same parallels have the same
+    -- candidates and searching twice would buy nothing.
+    local doneSearch = profile.span("auto: search")
+    local pools, groups = {}, 0
+    for _, m in ipairs(list) do
+        local gk = m.tier .. "/" .. m.parallels
+        local pool = pools[gk]
+        if pool == nil then
+            groups = groups + 1
+            local ok, res, err = pcall(targeter.search, wantDemand,
+                searchOpts(m.row, {}, false))
+            if not ok then
+                log("auto: the search failed -- " .. tostring(res))
+                pool, retry = {}, true
+            elseif not res then
+                log("auto: " .. tostring(err))
+                pool, retry = {}, true
+            else
+                -- Not res.candidates directly: that list is ranked over the whole
+                -- demand and one prolific material can fill it, leaving nothing that
+                -- serves the others. See allocate.poolFrom.
+                local extra
+                pool, extra = allocate.poolFrom(res, targets)
+                if extra > 0 then
+                    log(string.format("auto: +%d specialist configuration(s) for want(s) "
+                        .. "the ranking crowded out", extra))
+                end
+                if #pool == 0 then
+                    -- Worth saying which, because the usual cause is a want no
+                    -- meteor yields at this tier, or nothing left after the
+                    -- availability filter.
+                    log(string.format("auto: no configuration of a T%d module on %d "
+                        .. "parallel(s) serves the want list", m.tier, m.parallels))
+                    for _, note in ipairs(res.skipped or {}) do log("  " .. note) end
+                end
+            end
+            pools[gk] = pool
+        end
+        m.candidates = pool
+    end
+    doneSearch()
+
+    local plan = allocate.plan(list, targets, acfg)
+
+    -- DRY RUN plans and says what it would do, and writes nothing. cfg.dryRun ships
+    -- as true, and it would be a poor joke for the flag that means "let me watch it
+    -- first" to be the one setting under which a fleet quietly re-aims itself. It
+    -- gates only the WRITING: the search, the allocation and the whole want screen
+    -- still run, which is exactly what there is to watch.
+    local aimed, would = 0, 0
+    for _, ch in ipairs(plan.choices) do
+        if ch.action == "set" and ch.candidate then
+            if cfg.dryRun then
+                would = would + 1
+                log(string.format("auto %s: WOULD set %s  [dry run]", ch.module.key,
+                    candidateLabel(ch.candidate)))
+            else
+                local changed = applyCandidate(ch.module.row, ch.candidate, true)
+                if #changed > 0 then
+                    aimed = aimed + 1
+                    log(string.format("auto %s: %s  (%s)", ch.module.key,
+                        candidateLabel(ch.candidate), table.concat(changed, ", ")))
+                end
+            end
+        end
+    end
+
+    local share = (plan.maxCoverage > 0)
+        and math.floor(plan.coverage / plan.maxCoverage * 100 + 0.5) or 0
+    if would > 0 then
+        -- Nothing was written, so nothing has settled: say so every time rather than
+        -- letting a dry run look like a fleet that has finished being aimed.
+        setAutoNote(string.format("DRY RUN: would re-aim %d of %d AUTO module(s) for "
+            .. "%d%% of the ask -- set cfg.dryRun = false to let it", would, #list, share))
+        autoDue = true
+        return false
+    end
+    local note = string.format("aimed %d of %d AUTO module(s), %d%% of the ask covered",
+        aimed, #list, share)
+    if busy > 0 then note = note .. string.format(" (%d still landing a change)", busy) end
+    if aimed == 0 then
+        -- The common case once a fleet has settled, and it needs saying: "nothing
+        -- changed" and "nothing was considered" look identical from outside.
+        note = string.format("%d AUTO module(s) already well aimed, %d%% of the ask "
+            .. "covered", #list, share)
+    end
+    setAutoNote(note)
+    if aimed > 0 then
+        log("auto: " .. note .. string.format("  [%d group(s) searched]", groups))
+    end
+    if retry then autoDue = true end
+    return aimed > 0
+end
+
 -- ---- rendering ---------------------------------------------------------------
 
 local tick = 0
@@ -1376,8 +1963,18 @@ local tick = 0
 local function render()
     if not ui.active then return end
     tick = tick + 1
+    -- The fleet's mode in one word, which is a summary and not a setting: AUTO with
+    -- a count when the controller is aiming anything, MANUAL when it is not -- and
+    -- MANUAL is what an empty want list looks like, because that is what it is.
+    local t = view.totals or {}
+    local mode = "MANUAL"
+    if manualRun then mode = "MANUAL (--manual)"
+    elseif (t.auto or 0) > 0 and #wantEntries > 0 then
+        mode = string.format("AUTO %d/%d", t.auto, t.miners or 0)
+    end
+
     ui.render({
-        mode = "MANUAL", dryRun = cfg.dryRun, paused = paused, showLog = showLog,
+        mode = mode, dryRun = cfg.dryRun, paused = paused, showLog = showLog,
         screen = nav.screen, moduleCursor = nav.module, clipboard = nav.clipboard,
         profile = (nav.screen == "profile") and profile.snapshot() or nil,
         advise = (nav.screen == "advise") and buildAdvise(view.miners) or nil,
@@ -1391,15 +1988,25 @@ local function render()
         switching = pendingPlasma and pendingPlasma.name or nil,
         cycle = cycle, tick = tick, updated = os.date("%H:%M:%S"),
         miners = view.miners, kits = view.kits, plasmas = view.plasmas,
+        wants = view.wants, wanted = view.wanted,
         totals = view.totals, supplyErr = supplyErr, messages = messages,
     })
 end
 
 -- Console summary for a headless run, so --no-ui is not silent.
 local function printCycle()
-    log(string.format("cycle #%d -- %d/%d mining, plasma %s", cycle,
-        view.totals.mining, view.totals.miners,
+    log(string.format("cycle #%d -- %d/%d mining, %d auto, plasma %s", cycle,
+        view.totals.mining, view.totals.miners, view.totals.auto or 0,
         activePlasma and activePlasma.name or "(none)"))
+    -- The want list is the reason the fleet exists, so a headless run says where it
+    -- stands before it gets to the consumables.
+    for _, r in ipairs((view.wants or {}).rows or {}) do
+        if r.state ~= "FULL" then
+            log(string.format("  %-22s %-14s %s  making %s/s%s", r.material,
+                r.pct or "-", r.stock or "-", r.made or "0",
+                r.eta and ("  full in " .. r.eta) or ""))
+        end
+    end
     for _, k in ipairs(view.kits) do
         if k.fill < 1 then
             log(string.format("  %-20s %d / %d kits%s", k.name, k.have, k.target,
@@ -1485,6 +2092,7 @@ end
 -- How many rows the table on the current screen has, so control.key can clamp the
 -- scroll offset. ui.tableRows says how many of them fit, as of the last render.
 local function tableRowCount()
+    if nav.screen == "wants" then return #((view.wants or {}).rows or {}) end
     if nav.screen == "fleetMeteors" or nav.screen == "fleetOre" then
         local agg = fleetAggregate(view.miners)
         return (nav.screen == "fleetOre") and #agg.ore or #agg.meteors
@@ -1533,6 +2141,29 @@ local function handleKey(char, code)
             nav.advise = control.newAdvise(want)
             nav.screen = "advise"
             if want then runAdvise(row, nav.advise) end
+        end
+    elseif action == "auto" then
+        local row = view.miners[nav.module]
+        if row then
+            if manualRun then
+                log("started with --manual: nothing is aimed this run whatever the mode")
+            elseif row.auto then
+                -- Taking a module off the controller by hand, rather than by editing
+                -- something on it. Same claim either way.
+                claimModule(row)
+            else
+                modes.set(moduleModes, row.miner.address, modes.AUTO)
+                local path, err = modes.save(moduleModes)
+                log(row.addr .. ": AUTO now -- the controller will aim it"
+                    .. ((#wantEntries == 0) and " once wants.lua lists something" or ""))
+                if not path then
+                    log("  (could not remember that: " .. tostring(err) .. ")")
+                end
+                -- One more module to share the demand over, so re-plan rather than
+                -- waiting for the demand to happen to move.
+                autoDue = true
+            end
+            view.miners = readFleet(false)
         end
     elseif action == "copy" then
         local row = view.miners[nav.module]
@@ -1595,8 +2226,32 @@ end
 local uiActive = (not ctx.flags["no-ui"]) and (not ctx.flags.once)
     and (cfg.ui ~= false) and ui.init()
 
-log(string.format("Mining controller (MANUAL) -- %d module(s), %ds cycle%s",
-    #fleet, interval, cfg.dryRun and "  [DRY RUN]" or ""))
+do
+    local addrs = {}
+    for _, m in ipairs(fleet) do addrs[#addrs + 1] = m.address end
+    local auto, manual = modes.count(moduleModes, addrs)
+    if manualRun then auto, manual = 0, #fleet end
+    log(string.format("Mining controller -- %d module(s) (%d AUTO, %d MANUAL), %ds cycle%s",
+        #fleet, auto, manual, interval, cfg.dryRun and "  [DRY RUN]" or ""))
+
+    -- The want list, and what is wrong with it. Said at startup because a dropped
+    -- entry is invisible everywhere else -- it is not in the list any more.
+    if #wantEntries > 0 then
+        local parts = {}
+        for _, e in ipairs(wantEntries) do
+            parts[#parts + 1] = e.material .. " x" .. tostring(e.want)
+        end
+        log(string.format("Wanted (%d): %s", #wantEntries, table.concat(parts, ", ")))
+    elseif wantsFile then
+        log("mining/wants.lua lists nothing -- no module will be aimed. W shows the list.")
+    else
+        log("No mining/wants.lua -- MANUAL only. W shows what that means.")
+    end
+    for _, p in ipairs(wantProblems) do log("wants.lua: " .. p) end
+    if manualRun then
+        log("--manual: no module is aimed this run, whatever its mode says.")
+    end
+end
 if profile.enabled then
     log("Profiling on -- press F for the report, S to write it to a file.")
 end

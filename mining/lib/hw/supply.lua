@@ -536,6 +536,77 @@ function supply.resolveOutput(itf, entry, handle)
     return true
 end
 
+-- ---- what the MAIN net holds ------------------------------------------------
+--
+-- Automatic mode is driven by the stock of the ore the fleet is FOR, and that ore
+-- lives on the main net -- not the local one, which only ever holds consumables on
+-- their way to a module. The supply interface's adapter reaches the main net (that
+-- is the whole reason it is the bridge), so this asks it.
+--
+-- ONE UNFILTERED SCAN, and the wanted labels picked out of it. The alternative --
+-- getItemsInNetwork({label = ...}) per want -- is one component call each, and an
+-- OpenComputers call that is not direct returns on the NEXT TICK, so ten wants
+-- would be half a second of cycle every time. One call is one tick however long the
+-- list is, at the price of a large table arriving all at once.
+--
+-- Which is why THIS IS NOT A CHEAP READ, and the caller is expected to do it on the
+-- slow cadence only (main.lua's `full` cycles). A main net with thousands of item
+-- types makes a big table, and an OpenComputers machine has little memory; the call
+-- is under pcall for exactly that reason, and a failure comes back as an error
+-- rather than taking the controller down with it.
+--
+-- Returns stock, info:
+--   stock  { [label] = count } -- every wanted label, present or not, so a caller
+--          can tell "none in stock" from "never asked about"... except that it
+--          cannot, which is what `info.missing` is for
+--   info   { scanned = <item types seen>, found = <labels with any stock>,
+--            missing = { <label>, ... } }   -- and .error if the scan failed
+--
+-- A label in `missing` held nothing AND appeared nowhere in the network. AE2 does
+-- not list a type it holds none of, so that is usually simply "you have none" --
+-- but it is also exactly what a mistyped label looks like, and the two are worth
+-- being able to tell apart on screen.
+function supply.mainStock(itf, labels)
+    local want, out, missing = {}, {}, {}
+    for _, l in ipairs(labels or {}) do
+        if type(l) == "string" and l ~= "" then want[l] = true end
+    end
+    if not next(want) then return out, { scanned = 0, found = 0, missing = missing } end
+
+    if not itf or itf.getItemsInNetwork == nil then
+        return nil, { scanned = 0, found = 0, missing = missing,
+                      error = "the supply interface cannot list the main net's items" }
+    end
+
+    local ok, items = pcall(itf.getItemsInNetwork)
+    if not ok or type(items) ~= "table" then
+        return nil, { scanned = 0, found = 0, missing = missing,
+                      error = "reading the main net failed: " .. tostring(items) }
+    end
+
+    local scanned, found = 0, 0
+    for _, it in ipairs(items) do
+        scanned = scanned + 1
+        local label = type(it) == "table" and it.label or nil
+        if label and want[label] then
+            -- Summed, not assigned: the same label can appear more than once when
+            -- the stacks differ in damage or NBT, and every one of them is stock.
+            if out[label] == nil then found = found + 1 end
+            out[label] = (out[label] or 0) + (it.size or 0)
+        end
+    end
+
+    for label in pairs(want) do
+        if out[label] == nil then
+            out[label] = 0
+            missing[#missing + 1] = label
+        end
+    end
+    table.sort(missing)
+
+    return out, { scanned = scanned, found = found, missing = missing }
+end
+
 -- Litres of plasma a module's input hatch should hold. Expressed in METEORS'
 -- worth, so it scales itself with the plasma tier -- 64 meteors is 52,800 L of
 -- Helium but only 9,600 L of Plutonium-241, which is the whole point of running a

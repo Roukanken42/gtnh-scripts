@@ -323,7 +323,7 @@ end
 -- noticed until it has drained nine hatches.
 --
 --   screen   "dashboard" | "detail" | "profile" | "advise"
---            | "fleetMeteors" | "fleetOre"
+--            | "fleetMeteors" | "fleetOre" | "wants"
 --   module   cursor in the module list; in "detail", which module is open
 --   focus    nil | "plasma"          -- dashboard: is the plasma picker open
 --   cursor   row in the plasma picker
@@ -356,7 +356,7 @@ control.KEY = {
 }
 control.CH = { space = 32, a = 97, c = 99, f = 102, l = 108, m = 109,
                o = 111, p = 112, q = 113, r = 114, s = 115, v = 118,
-               x = 120 }
+               w = 119, x = 120 }
 
 -- The parameters a module can be driven with, in the order they are listed.
 -- `list` fields cycle through a fixed set (the caller maps index -> thing);
@@ -436,7 +436,8 @@ end
 -- which is what an edit starts from. Returns the action for the caller and whether anything changed, so
 -- a key that did nothing does not force a repaint.
 --
--- Actions: "open" | "close" | "commit" | "apply-plasma" | "pause" | "log" | "quit".
+-- Actions: "open" | "close" | "commit" | "apply-plasma" | "auto" | "copy" |
+-- "paste" | "advise" | "pause" | "log" | "quit" (plus the profile screen's two).
 -- On "commit", st.edit still holds { field, value }; on "apply-plasma",
 -- st.confirm still holds the row. The caller reads and clears them, because only
 -- the caller knows whether the change can actually be carried out.
@@ -470,24 +471,22 @@ function control.key(st, ctx, char, code)
         return nil, false
     end
 
-    -- ---- the fleet breakdowns ----
-    -- Read-only tables, so the arrows are free to scroll them. M and O switch
-    -- between the two without going back to the dashboard first, since comparing
-    -- "where does the time go" with "what comes out" is the whole point of having
-    -- both.
-    if st.screen == "fleetMeteors" or st.screen == "fleetOre" then
+    -- ---- the fleet breakdowns and the want list ----
+    -- Read-only tables, so the arrows are free to scroll them. M, O and W switch
+    -- between the three without going back to the dashboard first: "what is the
+    -- fleet spending its time on", "what comes out of it" and "what was it FOR" are
+    -- the same question asked three ways, and the answer is in comparing them.
+    -- Pressing the key for the screen you are already on goes back, so each of them
+    -- is its own toggle.
+    if st.screen == "fleetMeteors" or st.screen == "fleetOre" or st.screen == "wants" then
         if code == KEY.up then return nil, scrollBy(st, -1, ctx) end
         if code == KEY.down then return nil, scrollBy(st, 1, ctx) end
         if code == KEY.pageUp then return nil, scrollBy(st, -(ctx.page or 1), ctx) end
         if code == KEY.pageDown then return nil, scrollBy(st, ctx.page or 1, ctx) end
-        if char == CH.m then
-            if st.screen == "fleetMeteors" then toScreen(st, "dashboard")
-            else toScreen(st, "fleetMeteors") end
-            return nil, true
-        end
-        if char == CH.o then
-            if st.screen == "fleetOre" then toScreen(st, "dashboard")
-            else toScreen(st, "fleetOre") end
+        local jump = { [CH.m] = "fleetMeteors", [CH.o] = "fleetOre", [CH.w] = "wants" }
+        local to = char and jump[char]
+        if to then
+            toScreen(st, (st.screen == to) and "dashboard" or to)
             return nil, true
         end
         if char == CH.q then toScreen(st, "dashboard"); return nil, true end
@@ -589,10 +588,20 @@ function control.key(st, ctx, char, code)
         return "paste", true
     end
 
+    -- Hand a module back to the controller, or take it off it. Editing anything
+    -- already claims a module (that is main.lua's job, not the keyboard's), so this
+    -- key exists mainly for the way BACK -- but it toggles, because a module you are
+    -- about to fiddle with by hand is one you want the controller off first.
+    if char == CH.a then
+        if nMod <= 0 then return nil, false end
+        return "auto", true
+    end
+
     -- Only when there is something to show: without --profile nothing is
     -- measured, and a screen of zeroes is worse than no screen.
     if char == CH.m then toScreen(st, "fleetMeteors"); return nil, true end
     if char == CH.o then toScreen(st, "fleetOre"); return nil, true end
+    if char == CH.w then toScreen(st, "wants"); return nil, true end
     if char == CH.f and ctx.profiling then toScreen(st, "profile"); return nil, true end
     if char == CH.space then return "pause", true end
     if char == CH.l then return "log", true end

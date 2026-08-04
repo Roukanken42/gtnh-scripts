@@ -38,28 +38,46 @@ Inside a program folder, the split is by what a file *is*:
 
 ```
 mining/
-  main.lua               The controller. Keeps a manually-configured fleet fed.
+  main.lua               The controller. Aims the fleet at what you want, and
+                         keeps it fed.
   setup.lua drone.lua    Programs you run. Every one takes --help and --verbose.
   plan.lua stock.lua
   plasma.lua
-  config.lua             The one file you edit. Never overwritten by `install`.
+  config.lua             How the controller behaves. Never overwritten by
+                         `install`.
+  wants.lua              WHAT YOU WANT: the ore, and how much of it to keep.
+                         Drives automatic mode; also never overwritten.
   lib/
     gtnh/                What the game gives us: meteor, plasma and drone data,
                          extracted from GTNH and regenerable (see each header).
     calc/                Pure maths over that data -- no components touched, so
                          it runs in any Lua interpreter. target.lua answers
-                         "what should this module be set to", which the
-                         controller's advisor screen asks directly.
+                         "what should THIS module be set to"; wants.lua turns a
+                         stock level into a demand; allocate.lua shares the
+                         answers out over a fleet, which is a different question
+                         and the one automatic mode actually asks.
     hw/                  Everything that talks to a component.
     control.lua          What the controller decides: what to stock, what to
                          request, and the plasma picker's keyboard.
+    modes.lua            Which modules the controller may aim (AUTO/MANUAL).
     ui.lua               The dashboard. Renders a state table, decides nothing.
     profile.lua          Where each cycle's time goes, and how many component
                          calls it took to get there.
     cli.lua              Argument parsing, --help, and progress output.
     stations.lua         Where the generated station map lives.
-  data/                  Generated on the machine by `setup`. Not in the repo.
+  data/                  Generated on the machine by `setup` and by the
+                         controller. Not in the repo.
 ```
+
+Automatic mode is the reason `calc/` is split the way it is. A mining module
+cannot be aimed at an item -- you set a distance, a drone and a plasma, and the
+game rolls a weighted meteor -- so what a module produces has to be searched for
+(`target.lua`), and because ore purity is dreadful when one material is targeted
+alone, the useful configurations serve several wants at once. That makes the
+fleet-level question a coverage problem rather than a ranking one: two modules
+aimed differently frequently serve more of the list than two modules both aimed
+at all of it. `allocate.lua` is where that is decided, and it stays pure so the
+decision can be exercised off-machine.
 
 Anything shared, or that the controller will want later, belongs in `lib/`. A
 top-level script should be arguments, orchestration and output.

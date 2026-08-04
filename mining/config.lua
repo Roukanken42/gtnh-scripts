@@ -55,8 +55,12 @@ cfg.database = nil
 -- module; revisit once we know whether parallels want a drone each.
 cfg.dronesPerModule = 1
 
--- Safety: when true, drone moves are only LOGGED, never performed. Flip to false
--- once you have watched a drone move correctly in-game.
+-- Safety: when true, nothing is actually MOVED or WRITTEN -- drone moves are only
+-- logged, and automatic mode plans, reports what it would set, and leaves every
+-- module alone. Everything that only reads still runs, so the dashboard, the want
+-- list and the log show exactly what would happen. Flip to false once you have
+-- watched a drone move correctly in-game and you agree with what AUTO says it would
+-- do.
 cfg.dryRun = true
 
 -- Seconds to wait for AE2 to stock a requested drone into the interface before
@@ -297,6 +301,54 @@ cfg.control = {
     -- an uncapped controller could take the whole crafting bank. Plasma is one
     -- because manual mode runs a single plasma fleet-wide.
     jobs = { kit = 2, plasma = 1 },
+}
+
+-- ---- Automatic mode --------------------------------------------------------
+-- WHAT the fleet is for lives in wants.lua, deliberately in its own file. These are
+-- the knobs for HOW EAGERLY it is served, and every one of them exists because
+-- mining is slow and imprecise: an operation runs for tens of seconds, a parameter
+-- write needs the module stopped, and no configuration yields one material cleanly.
+-- So the defaults are all on the side of leaving a settled fleet alone.
+--
+-- A module is only aimed if it is in AUTO (they all start there; setting anything by
+-- hand claims a module, and A on the dashboard hands it back). `main --manual` turns
+-- the whole thing off for one run without changing any of that.
+cfg.auto = {
+    -- Seconds to close a shortfall in. This is the only thing that converts "I am
+    -- 60,000 items short" into a rate a fleet can be asked for, so it sets how hard
+    -- the whole list pulls: an hour means an empty want of 60k asks for ~17 items a
+    -- second, which is several modules' worth, while a day asks for less than one.
+    --
+    -- It is also the dial for how much of the fleet gets used. The targeter throttles
+    -- overdrive down to the rate demanded and no further, and the allocator stops
+    -- assigning modules once the demand is covered -- so a long horizon leaves
+    -- modules idle and a short one puts them all to work at full speed. Shorten it
+    -- when the fleet is sitting around; lengthen it when kits are the bottleneck.
+    horizon = 3600,
+
+    -- Hysteresis, and the reason a fleet settles instead of oscillating. A want that
+    -- reaches its target stops being asked for until it falls back below this
+    -- fraction of it, so ore hovering at 100% cannot re-aim the fleet every cycle.
+    refillAt = 0.75,
+
+    -- Below this share of its target a want is CRITICAL and its weight is multiplied
+    -- by criticalBoost, which is how "nearly out" outbids "getting low" when they
+    -- want different meteors. The boost is deliberately blunt: purity is so poor
+    -- that a small nudge would change nothing about which pool wins.
+    criticalAt = 0.15,
+    criticalBoost = 3,
+
+    -- How much better a configuration has to be before a module is STOPPED to write
+    -- it: 0.25 means "a quarter more of the demand covered, or don't bother". Every
+    -- re-aim costs a mining operation and a plasma change drains a hatch, so this is
+    -- the difference between a fleet that mines and one that spends its life
+    -- stopping. 0 re-aims on any improvement; a large number freezes the fleet.
+    margin = 0.25,
+
+    -- Sweeps of the allocator's coverage search. Two settle the normal case -- the
+    -- first hands out the broad configurations, the second is where a module notices
+    -- its neighbour has covered its materials and moves to what is still missing.
+    passes = 3,
 }
 
 -- ---- What `setup` discovered -----------------------------------------------

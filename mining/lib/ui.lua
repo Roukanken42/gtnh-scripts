@@ -15,8 +15,15 @@
 --   confirming state.confirm names the plasma awaiting a second keypress
 --   idle       neither; the active plasma is simply marked
 --
+-- ---- marking what the fleet is FOR ------------------------------------------
+-- Every table that lists ore, or the meteors ore comes out of, marks the rows that
+-- serve a want (state.wants). It is the same question in four places -- "is any of
+-- this what I asked for?" -- and the answer is what says whether a fleet is
+-- effective or merely busy. Wanted ore is drawn in C.mine and carries its stock and
+-- fill; everything else stays dim, and a meteor row says which wants it serves.
+--
 -- State contract (all fields optional-safe):
---   mode        "MANUAL"
+--   mode        "MANUAL" | "AUTO" | "AUTO 4/8"   -- the fleet's overall mode
 --   dryRun / paused / showLog        booleans
 --   focus       nil | "plasma"       -- which panel has the keyboard
 --   cursor      integer              -- 1-based row in state.plasmas when focused
@@ -24,9 +31,15 @@
 --   switching   string               -- plasma name being applied right now
 --   cycle / tick / updated
 --   screen      "dashboard" | "detail" | "profile" | "advise"
---               | "fleetMeteors" | "fleetOre"
+--               | "fleetMeteors" | "fleetOre" | "wants"
 --   scroll      rows the current table is scrolled down by
 --   fleet       { meteors, ore, modules, totalItems, empty } -- the fleet sums
+--   wants       { rows, summary, notes, empty, read } -- what the fleet is for;
+--               a row is { material, label, stock, fill, pct, need, made, cover,
+--               coverPct, eta, state, note }. Also read by the ore/meteor tables
+--               through `wanted` below.
+--   wanted      { [ore key] = { fill, pct, stock, material } } -- what to mark in
+--               any table that lists ore. Absent means nothing is wanted.
 --   advise      { miner, settings, cursor, settingsCount, results, picking,
 --                 summary, error, empty, notes, rateLabel, edit,
 --                 applied, pending, pendingNote }
@@ -38,7 +51,8 @@
 --   miners      { { tierName, addr, state, stateKind, drone, distance,
 --                   parallels, parallelCap, overdrive, material, hatchLevel,
 --                   hatchCapacity, hatchTarget, hatchFluid, staged,
---                   pending }, ... }   -- pending: a queued change, in words
+--                   auto, pending }, ... }   -- pending: a queued change, in words;
+--                   auto: whether the controller may aim this module
 --   kits        { { name, have, target, fill, crafts, settling, from }, ... }
 --   plasmas     { { tier, name, have, target, fill, crafts, settling, from,
 --                   active }, ... }
@@ -142,11 +156,15 @@ local function padL(s, w) s = trunc(s, w); return string.rep(" ", math.max(0, w 
 -- this: column offsets are arithmetic over an elastic width, and the failure mode
 -- of getting one wrong is text painted across the frame and into the next panel.
 -- Clipping turns that into a truncated column, which is visible and harmless.
-local function cell(x, y, off, width, s, fg, inner)
+-- `bg` is for the rows that are highlighted rather than merely coloured -- wanted
+-- ore, which every ore table marks. The row's whole width is filled with it first
+-- (see rowBg), because the column offsets leave a space or two between cells and a
+-- highlight with the panel showing through the gaps reads as a rendering fault.
+local function cell(x, y, off, width, s, fg, inner, bg)
     local avail = inner - off
     if avail <= 0 then return end
     if width > avail then width = avail end
-    text(x + off, y, padR(s, width), fg, C.panel)
+    text(x + off, y, padR(s, width), fg, bg or C.panel)
 end
 
 local HUMAN_PREFIX = { "k", "M", "G", "T", "P", "E", "Z", "Y", "R", "Q" }
@@ -269,6 +287,44 @@ local STATE_COLOR = {
     ["NO DRONE"] = C.warn, ["NO STATION"] = C.crit, OFF = C.faint,
 }
 
+-- How a want is doing. FULL and OK are both fine and read differently on purpose:
+-- one is done, the other is holding.
+local WANT_COLOR = {
+    FULL = C.good, OK = C.good, LOW = C.warn, CRITICAL = C.crit,
+    UNKNOWN = C.faint, ["NOT MINED"] = C.crit,
+}
+
+-- The want an ore row serves, or nil. `key` is a yield key as the estimator reports
+-- it -- the bare material where there is one, else the oredict.
+local function wantOf(state, key)
+    if not key then return nil end
+    local w = state.wanted
+    return w and w[key] or nil
+end
+
+-- Fills a table row's background, for the rows that are wanted. Returns the colour
+-- the row's cells must then be drawn on.
+local function rowBg(x, y, inner, wanted)
+    if not wanted then return C.panel end
+    rect(x, y, inner, 1, C.panelHi)
+    return C.panelHi
+end
+
+-- The two columns every ore table grows when there is a want list: what is in stock
+-- against what was asked for, and how full that is. `off` is where they start.
+local function drawWantCells(x, y, inner, w, off, bg)
+    if w then
+        cell(x, y, off, 20, w.stock or "-", C.dim, inner, bg)
+        cell(x, y, off + 20, 6, padL(w.pct or "-", 5),
+            w.fill and fillColor(w.fill) or C.faint, inner, bg)
+    else
+        -- Deliberately not blank: "this ore is not on the list" is information, and
+        -- a run of dots down the column is how you see at a glance how much of what
+        -- the fleet makes nobody asked for.
+        cell(x, y, off, 26, MIDDOT, C.faint, inner, bg)
+    end
+end
+
 -- ---- lifecycle ---------------------------------------------------------------
 function ui.available()
     return component.isAvailable("gpu") and component.isAvailable("screen")
@@ -328,8 +384,9 @@ local LEFTRIGHT = "\xE2\x86\x90\xE2\x86\x92"
 local SCROLL = "[" .. "\xE2\x86\x91\xE2\x86\x93" .. "/PgUp/PgDn] scroll"
 
 local function hintFor(state)
-    if state.screen == "fleetMeteors" or state.screen == "fleetOre" then
-        return SCROLL .. "  [M] pool  [O] ore  [L] log  [Q] back"
+    if state.screen == "fleetMeteors" or state.screen == "fleetOre"
+        or state.screen == "wants" then
+        return SCROLL .. "  [M] pool  [O] ore  [W] wants  [L] log  [Q] back"
     end
     if state.screen == "advise" then
         local a = state.advise or {}
@@ -370,9 +427,10 @@ local function hintFor(state)
         return "[" .. UPDOWN .. "] module  [V] paste  [C] copy another  [Q] done copying"
     end
     -- Tight: the whole line has to fit beside the status block and what overflows
-    -- is cut off the end. Pause and the log toggle are in --help; the navigation
-    -- keys are the ones worth the space.
-    return "[" .. UPDOWN .. "] module [ENTER] detail [C] copy [P] plasma"
+    -- is cut off the end. Pause, copy and the log toggle are in --help; the keys
+    -- that move you somewhere are the ones worth the space, and [A] earns its place
+    -- because it is the only way to hand a module back to the controller.
+    return "[" .. UPDOWN .. "] module [ENTER] detail [A] auto [W] wants [P] plasma"
         .. " [M] pool [O] ore [Q] quit"
 end
 
@@ -422,12 +480,30 @@ end
 
 local function drawKPIs(state, y)
     local t = state.totals or {}
-    local n, gap = 5, 1
+    local n, gap = 6, 1
     local w = math.floor((W - 2 - (n - 1) * gap) / n)
     local x = 2
 
-    kpiCard(x, y, w, "MINING", (t.mining or 0) .. " / " .. (t.miners or 0),
+    -- How much of the fleet is running, and how much of it the controller is
+    -- allowed to aim -- the second number being the one that says whether anything
+    -- is going to happen when a want runs down.
+    kpiCard(x, y, w, "MINING", (t.mining or 0) .. " / " .. (t.miners or 0)
+        .. ((t.auto and t.auto > 0) and ("   " .. t.auto .. " AUTO") or ""),
         (t.mining or 0) > 0 and C.good or C.dim)
+    x = x + w + gap
+
+    -- What the fleet is FOR, in one number: how many wants are met, and the average
+    -- fill across them. Blank-ish rather than alarming when nothing is asked for --
+    -- an empty want list is a setup that has not been finished, not a failure.
+    local wsum = (state.wants or {}).summary
+    if wsum and (wsum.n or 0) > 0 then
+        local met = (wsum.n - (wsum.demanded or 0))
+        kpiCard(x, y, w, "WANTS MET", string.format("%d / %d   %d%%", met, wsum.n,
+            math.floor((wsum.fill or 0) * 100 + 0.5)),
+            (wsum.critical or 0) > 0 and C.crit or fillColor(wsum.fill or 0))
+    else
+        kpiCard(x, y, w, "WANTS MET", "(none listed)", C.faint)
+    end
     x = x + w + gap
 
     local pName, pColor = "(none chosen)", C.warn
@@ -465,10 +541,14 @@ end
 -- has to show which row they are on.
 -- The first THREE columns are the gutter: the selection arrow, the clipboard
 -- marker, and a space so a marked row does not read as "CT3".
+-- MODE sits second, right after the tier: whether the controller may aim a module
+-- changes the meaning of every column after it, so it belongs where the eye lands
+-- rather than out past the plasma. The five columns it costs come off LEVEL, STAGED
+-- and PLASMA, each of which had a couple to spare.
 local MC = {
-    tier = 3, addr = 8, state = 18, drone = 29, dist = 39, par = 46,
-    od = 53, material = 59, bar = 78, level = 89, staged = 103, fluid = 112,
-    pending = 135,
+    tier = 3, mode = 8, addr = 14, state = 24, drone = 35, dist = 44, par = 51,
+    od = 58, material = 64, bar = 84, level = 95, staged = 108, fluid = 117,
+    pending = 139,
 }
 
 local function drawMiners(state, x, y, w, h)
@@ -485,17 +565,18 @@ local function drawMiners(state, x, y, w, h)
     local hy = y + 1
 
     cell(ix, hy, MC.tier, 4, "TIER", C.faint, inner)
+    cell(ix, hy, MC.mode, 5, "MODE", C.faint, inner)
     cell(ix, hy, MC.addr, 9, "ADDRESS", C.faint, inner)
     cell(ix, hy, MC.state, 10, "STATE", C.faint, inner)
-    cell(ix, hy, MC.drone, 9, "DRONE", C.faint, inner)
+    cell(ix, hy, MC.drone, 8, "DRONE", C.faint, inner)
     cell(ix, hy, MC.dist, 6, "DIST", C.faint, inner)
     cell(ix, hy, MC.par, 6, "PAR", C.faint, inner)
     cell(ix, hy, MC.od, 5, "OD", C.faint, inner)
     cell(ix, hy, MC.material, 19, "KIT MATERIAL", C.faint, inner)
     cell(ix, hy, MC.bar, 11, "HATCH", C.faint, inner)
-    cell(ix, hy, MC.level, 14, "LEVEL", C.faint, inner)
-    cell(ix, hy, MC.staged, 9, "STAGED", C.faint, inner)
-    cell(ix, hy, MC.fluid, 22, "PLASMA", C.faint, inner)
+    cell(ix, hy, MC.level, 12, "LEVEL", C.faint, inner)
+    cell(ix, hy, MC.staged, 8, "STAGED", C.faint, inner)
+    cell(ix, hy, MC.fluid, 21, "PLASMA", C.faint, inner)
     cell(ix, hy, MC.pending, inner - MC.pending, "PENDING", C.faint, inner)
 
     if #list == 0 then
@@ -520,10 +601,14 @@ local function drawMiners(state, x, y, w, h)
         cell(ix, row, 1, 1, (clip and clip.addr == m.addr) and "C" or " ",
             C.accent2, inner)
         cell(ix, row, MC.tier, 4, m.tierName or "?", C.accent, inner)
+        -- AUTO is the fleet doing its job, so it is the quiet one; MAN is the
+        -- exception and is coloured like the other things a player has pinned.
+        cell(ix, row, MC.mode, 5, m.auto and "auto" or "MAN",
+            m.auto and C.dim or C.accent2, inner)
         cell(ix, row, MC.addr, 9, m.addr or "", C.dim, inner)
         cell(ix, row, MC.state, 10, m.state or "",
             STATE_COLOR[m.stateKind or m.state] or C.dim, inner)
-        cell(ix, row, MC.drone, 9, m.drone or MIDDOT, m.drone and C.text or C.faint, inner)
+        cell(ix, row, MC.drone, 8, m.drone or MIDDOT, m.drone and C.text or C.faint, inner)
         cell(ix, row, MC.dist, 6,
             padL(m.distance and string.format("%d", m.distance) or "-", 5), C.text, inner)
         cell(ix, row, MC.par, 6, padL(m.parallels and
@@ -538,14 +623,14 @@ local function drawMiners(state, x, y, w, h)
             if inner - MC.bar >= 10 then
                 bar(ix + MC.bar, row, 10, frac, fillColor(frac), C.panelHi)
             end
-            cell(ix, row, MC.level, 14,
+            cell(ix, row, MC.level, 12,
                 human(m.hatchLevel or 0) .. "/" .. human(m.hatchTarget), fillColor(frac), inner)
         else
             cell(ix, row, MC.bar, 25, m.hasFluid and "no target yet" or "no plasma feed",
                 C.faint, inner)
         end
-        cell(ix, row, MC.staged, 9, m.staged and human(m.staged) or "-", C.dim, inner)
-        cell(ix, row, MC.fluid, 22, m.hatchFluid or "(empty)",
+        cell(ix, row, MC.staged, 8, m.staged and human(m.staged) or "-", C.dim, inner)
+        cell(ix, row, MC.fluid, 21, m.hatchFluid or "(empty)",
             m.hatchFluid and C.mine or C.faint, inner)
         -- A change asked for but not yet made. Without this a parameter write
         -- that is waiting on a forty-second mining operation looks like one that
@@ -669,7 +754,11 @@ end
 local function drawParams(state, x, y, w, h)
     local d = state.detail or {}
     local m = d.miner or {}
-    panel(x, y, w, h, "MODULE  " .. (m.tierName or "?") .. "  " .. (m.addr or ""),
+    -- The mode belongs in this title above all: editing anything on this screen is
+    -- what CLAIMS a module, so "AUTO" here is a warning that pressing ENTER changes
+    -- more than the value being dialled.
+    panel(x, y, w, h, "MODULE  " .. (m.tierName or "?") .. "  " .. (m.addr or "")
+        .. "  " .. MIDDOT .. "  " .. (m.auto and "AUTO" or "MANUAL"),
         d.edit ~= nil)
     local ix, inner = x + 2, w - 4
 
@@ -706,7 +795,9 @@ local function drawParams(state, x, y, w, h)
         cell(ix, sy, 0, inner, d.editHint or "", C.focus, inner)
     else
         cell(ix, sy, 0, inner,
-            "State " .. (m.state or "?") .. "   " .. (d.summary or ""),
+            "State " .. (m.state or "?") .. "   " .. (d.summary or "")
+            .. (m.auto and "   " .. MIDDOT .. "  editing anything here takes this "
+                .. "module off the controller" or ""),
             STATE_COLOR[m.stateKind or m.state] or C.dim, inner)
     end
     cell(ix, y + h - 2, 0, inner, d.rates or "", C.dim, inner)
@@ -721,6 +812,9 @@ end
 -- badly. Something rolled one time in seven that takes four times as long as the
 -- rest is where a third of the module's life goes, so it is RUNTIME that says which
 -- meteor is setting the throughput. The rows are sorted by it too.
+-- SERVES shares the last stretch with the note, because they are never both worth
+-- saying: a meteor the module cannot power serves nothing whatever it yields, so the
+-- note wins where there is one and the wants fill the space the rest of the time.
 local PC = { bar = 0, pct = 11, name = 17, size = 45, time = 58, chance = 67,
              par = 78, eut = 84, comp = 95, note = 105 }
 
@@ -741,7 +835,7 @@ local function drawPool(state, x, y, w, h)
     cell(ix, hy, PC.par, 5, "PAR", C.faint, inner)
     cell(ix, hy, PC.eut, 10, "EU/t", C.faint, inner)
     cell(ix, hy, PC.comp, 9, "COMP", C.faint, inner)
-    cell(ix, hy, PC.note, inner - PC.note, "", C.faint, inner)
+    cell(ix, hy, PC.note, inner - PC.note, "SERVES", C.faint, inner)
 
     if d.error then
         cell(ix, y + 3, 0, inner, d.error, C.warn, inner)
@@ -765,27 +859,36 @@ local function drawPool(state, x, y, w, h)
     for i = first, last do
         local e = list[i]
         local row = y + 1 + (i - first) + 1
-        local col = e.blocked and C.crit or C.text
+        -- A meteor is highlighted when it serves a want AND can actually be run:
+        -- highlighting one the module cannot power would advertise ore that is not
+        -- coming, which is the opposite of what the marking is for.
+        local serving = e.serves ~= nil and not e.blocked
+        local bg = rowBg(ix, row, inner, serving)
+        local col = e.blocked and C.crit or (serving and C.mine or C.text)
         if inner - PC.bar >= 10 then
             bar(ix + PC.bar, row, 10, (top > 0) and ((e.share or 0) / top) or 0,
-                e.blocked and C.crit or C.accent2, C.panelHi)
+                e.blocked and C.crit or C.accent2, serving and C.panel or C.panelHi)
         end
         cell(ix, row, PC.pct, 6, padL(e.runtime or "-", 5),
-            e.blocked and C.faint or C.text, inner)
-        cell(ix, row, PC.name, 27, e.name or "?", col, inner)
-        cell(ix, row, PC.size, 12, e.size or "-", C.dim, inner)
-        cell(ix, row, PC.time, 8, e.time or "-", C.dim, inner)
+            e.blocked and C.faint or C.text, inner, bg)
+        cell(ix, row, PC.name, 27, e.name or "?", col, inner, bg)
+        cell(ix, row, PC.size, 12, e.size or "-", C.dim, inner, bg)
+        cell(ix, row, PC.time, 8, e.time or "-", C.dim, inner, bg)
         cell(ix, row, PC.chance, 10,
-            padL(string.format("%.1f%%", (e.chance or 0) * 100), 9), C.dim, inner)
-        cell(ix, row, PC.par, 5, tostring(e.parallels or "-"), C.dim, inner)
-        cell(ix, row, PC.eut, 10, e.eut or "-", C.dim, inner)
-        cell(ix, row, PC.comp, 9, e.computation or "-", C.dim, inner)
-        cell(ix, row, PC.note, inner - PC.note, e.note or "", C.crit, inner)
+            padL(string.format("%.1f%%", (e.chance or 0) * 100), 9), C.dim, inner, bg)
+        cell(ix, row, PC.par, 5, tostring(e.parallels or "-"), C.dim, inner, bg)
+        cell(ix, row, PC.eut, 10, e.eut or "-", C.dim, inner, bg)
+        cell(ix, row, PC.comp, 9, e.computation or "-", C.dim, inner, bg)
+        cell(ix, row, PC.note, inner - PC.note, e.note or e.serves or "",
+            e.note and C.crit or C.mine, inner, bg)
     end
 end
 
--- SHARE | ORE | ITEMS/s | STACKS/s | PER HOUR, with a bar for the share.
-local YC = { bar = 0, pct = 11, name = 17, items = 47, stacks = 60, hour = 73 }
+-- SHARE | ORE | ITEMS/s | STACKS/s | PER HOUR | STOCK / WANT | FILL, with a bar for
+-- the share. The last two are the marking: they say whether the ore this
+-- configuration is producing is ore anybody asked for.
+local YC = { bar = 0, pct = 11, name = 17, items = 47, stacks = 60, hour = 73,
+             want = 88 }
 
 local function drawYield(state, x, y, w, h)
     local d = state.detail or {}
@@ -800,6 +903,7 @@ local function drawYield(state, x, y, w, h)
     cell(ix, hy, YC.items, 12, padL("ITEMS/s", 11), C.faint, inner)
     cell(ix, hy, YC.stacks, 12, padL("STACKS/s", 11), C.faint, inner)
     cell(ix, hy, YC.hour, 12, padL("PER HOUR", 11), C.faint, inner)
+    cell(ix, hy, YC.want, 26, "STOCK / WANT", C.faint, inner)
 
     if d.error then
         cell(ix, y + 3, 0, inner, d.error, C.warn, inner)
@@ -814,17 +918,24 @@ local function drawYield(state, x, y, w, h)
     for i = first, last do
         local e = list[i]
         local row = y + 1 + (i - first) + 1
+        local want = wantOf(state, e.name)
+        local bg = rowBg(ix, row, inner, want)
         if inner - YC.bar >= 10 then
-            bar(ix + YC.bar, row, 10, e.share or 0, C.mine, C.panelHi)
+            -- The empty half of the bar has to invert on a highlighted row: its
+            -- usual colour IS the highlight, and a full-looking bar on every wanted
+            -- ore would be a lie told by the palette.
+            bar(ix + YC.bar, row, 10, e.share or 0, C.mine,
+                want and C.panel or C.panelHi)
         end
         cell(ix, row, YC.pct, 6, padL(string.format("%.1f%%", (e.share or 0) * 100), 5),
-            C.dim, inner)
-        cell(ix, row, YC.name, 29, e.name or "?", C.text, inner)
-        cell(ix, row, YC.items, 12, padL(rate(e.itemsPerSecond), 11), C.good, inner)
+            C.dim, inner, bg)
+        cell(ix, row, YC.name, 29, e.name or "?", want and C.mine or C.text, inner, bg)
+        cell(ix, row, YC.items, 12, padL(rate(e.itemsPerSecond), 11), C.good, inner, bg)
         cell(ix, row, YC.stacks, 12, padL(string.format("%.3f", e.stacksPerSecond or 0), 11),
-            C.dim, inner)
+            C.dim, inner, bg)
         cell(ix, row, YC.hour, 12, padL(human((e.itemsPerSecond or 0) * 3600), 11),
-            C.dim, inner)
+            C.dim, inner, bg)
+        drawWantCells(ix, row, inner, want, YC.want, bg)
     end
 end
 
@@ -1078,7 +1189,11 @@ local function drawFleetPool(state, x, y, w, h)
     cell(ix, hy, FM.time, 8, padL("TIME", 7), C.faint, inner)
     cell(ix, hy, FM.met, 13, padL("METEORS/s", 12), C.faint, inner)
     cell(ix, hy, FM.eut, 12, padL("EU/t", 11), C.faint, inner)
-    cell(ix, hy, FM.ore, inner - FM.ore, "TOP ORE", C.faint, inner)
+    -- The wants it serves where it serves any, and what it mostly drops otherwise.
+    -- "Top ore" alone answered a question nobody was asking: the useful thing to
+    -- know about a meteor eating a fifth of the fleet's clock is whether that fifth
+    -- is going anywhere.
+    cell(ix, hy, FM.ore, inner - FM.ore, "SERVES / TOP ORE", C.faint, inner)
 
     if #list == 0 then
         cell(ix, y + 3, 0, inner, f.empty
@@ -1094,22 +1209,25 @@ local function drawFleetPool(state, x, y, w, h)
     for i = first, last do
         local e = list[i]
         local row = y + 1 + (i - first) + 1
+        local serving = e.serves ~= nil
+        local bg = rowBg(ix, row, inner, serving)
         if inner - FM.bar >= 10 then
             bar(ix + FM.bar, row, 10, (top > 0) and (e.share / top) or 0,
-                C.accent2, C.panelHi)
+                C.accent2, serving and C.panel or C.panelHi)
         end
-        cell(ix, row, FM.pct, 6, padL(e.runtime or "-", 5), C.text, inner)
-        cell(ix, row, FM.name, 29, e.name or "?", C.text, inner)
-        cell(ix, row, FM.mods, 8, e.modules or "-", C.dim, inner)
-        cell(ix, row, FM.time, 8, padL(e.time or "-", 7), C.dim, inner)
-        cell(ix, row, FM.met, 13, padL(e.meteors or "-", 12), C.good, inner)
-        cell(ix, row, FM.eut, 12, padL(e.eut or "-", 11), C.dim, inner)
-        cell(ix, row, FM.ore, inner - FM.ore, e.ore or "", C.faint, inner)
+        cell(ix, row, FM.pct, 6, padL(e.runtime or "-", 5), C.text, inner, bg)
+        cell(ix, row, FM.name, 29, e.name or "?", serving and C.mine or C.text, inner, bg)
+        cell(ix, row, FM.mods, 8, e.modules or "-", C.dim, inner, bg)
+        cell(ix, row, FM.time, 8, padL(e.time or "-", 7), C.dim, inner, bg)
+        cell(ix, row, FM.met, 13, padL(e.meteors or "-", 12), C.good, inner, bg)
+        cell(ix, row, FM.eut, 12, padL(e.eut or "-", 11), C.dim, inner, bg)
+        cell(ix, row, FM.ore, inner - FM.ore, e.serves or e.ore or "",
+            serving and C.mine or C.faint, inner, bg)
     end
 end
 
 local FO = { bar = 0, pct = 11, name = 17, mods = 47, items = 56, stacks = 70,
-             hour = 84 }
+             hour = 84, want = 99 }
 
 local function drawFleetOre(state, x, y, w, h)
     local f = state.fleet or {}
@@ -1127,6 +1245,7 @@ local function drawFleetOre(state, x, y, w, h)
     cell(ix, hy, FO.items, 13, padL("ITEMS/s", 12), C.faint, inner)
     cell(ix, hy, FO.stacks, 13, padL("STACKS/s", 12), C.faint, inner)
     cell(ix, hy, FO.hour, 13, padL("PER HOUR", 12), C.faint, inner)
+    cell(ix, hy, FO.want, 26, "STOCK / WANT", C.faint, inner)
 
     if #list == 0 then
         cell(ix, y + 3, 0, inner, f.empty
@@ -1137,16 +1256,108 @@ local function drawFleetOre(state, x, y, w, h)
     for i = first, last do
         local e = list[i]
         local row = y + 1 + (i - first) + 1
+        local want = wantOf(state, e.name)
+        local bg = rowBg(ix, row, inner, want)
         if inner - FO.bar >= 10 then
-            bar(ix + FO.bar, row, 10, e.share or 0, C.mine, C.panelHi)
+            bar(ix + FO.bar, row, 10, e.share or 0, C.mine,
+                want and C.panel or C.panelHi)
         end
         cell(ix, row, FO.pct, 6, padL(string.format("%.1f%%", (e.share or 0) * 100), 5),
-            C.dim, inner)
-        cell(ix, row, FO.name, 29, e.name or "?", C.text, inner)
-        cell(ix, row, FO.mods, 8, e.modules or "-", C.dim, inner)
-        cell(ix, row, FO.items, 13, padL(e.items or "-", 12), C.good, inner)
-        cell(ix, row, FO.stacks, 13, padL(e.stacks or "-", 12), C.dim, inner)
-        cell(ix, row, FO.hour, 13, padL(e.hour or "-", 12), C.dim, inner)
+            C.dim, inner, bg)
+        cell(ix, row, FO.name, 29, e.name or "?", want and C.mine or C.text, inner, bg)
+        cell(ix, row, FO.mods, 8, e.modules or "-", C.dim, inner, bg)
+        cell(ix, row, FO.items, 13, padL(e.items or "-", 12), C.good, inner, bg)
+        cell(ix, row, FO.stacks, 13, padL(e.stacks or "-", 12), C.dim, inner, bg)
+        cell(ix, row, FO.hour, 13, padL(e.hour or "-", 12), C.dim, inner, bg)
+        drawWantCells(ix, row, inner, want, FO.want, bg)
+    end
+end
+
+-- ---- the want list ----------------------------------------------------------
+--
+-- What the fleet is FOR, against what it is doing about it. Every other screen
+-- answers a question about the hardware; this one is the only place the two sides
+-- meet, so it carries both -- the ask (stock, want, fill) and the answer (what is
+-- being produced, what share of the ask that covers, how long the shortfall would
+-- take at that rate).
+--
+-- ETA is the line that gets read. A want at 40% with three modules on it is fine; a
+-- want at 40% with an ETA of eleven hours is a fleet that is not really trying, and
+-- neither the fill nor the rate says so on its own.
+local WC = { bar = 0, pct = 11, material = 17, label = 42, stock = 72, need = 92,
+             made = 104, cover = 116, eta = 125, state = 136 }
+
+local function drawWants(state, x, y, w, h)
+    local wants = state.wants or {}
+    local list = wants.rows or {}
+    local first, last, span = window(list, state.scroll, h - 4)
+    panel(x, y, w, h, "WANTS  " .. span .. "  " .. MIDDOT .. "  what the fleet is for"
+        .. (wants.read and ("  " .. MIDDOT .. "  main net read " .. wants.read) or "")
+        .. "  " .. MIDDOT .. "  [M] pool  [O] ore  [Q] back")
+    local ix, inner = x + 2, w - 4
+    local hy = y + 1
+
+    cell(ix, hy, WC.bar, 10, "FILL", C.faint, inner)
+    cell(ix, hy, WC.material, 24, "MATERIAL", C.faint, inner)
+    cell(ix, hy, WC.label, 29, "ITEM", C.faint, inner)
+    cell(ix, hy, WC.stock, 19, "STOCK / WANT", C.faint, inner)
+    cell(ix, hy, WC.need, 11, padL("NEED/s", 10), C.faint, inner)
+    cell(ix, hy, WC.made, 11, padL("MAKING/s", 10), C.faint, inner)
+    cell(ix, hy, WC.cover, 8, padL("COVER", 7), C.faint, inner)
+    cell(ix, hy, WC.eta, 10, padL("FULL IN", 9), C.faint, inner)
+    cell(ix, hy, WC.state, inner - WC.state, "STATE", C.faint, inner)
+
+    if #list == 0 then
+        cell(ix, y + 3, 0, inner, wants.empty
+            or "Nothing is wanted: mining/wants.lua lists no items.", C.warn, inner)
+        cell(ix, y + 4, 0, inner, "Every AUTO module is left exactly as it is until "
+            .. "something is listed there.", C.faint, inner)
+        for i, note in ipairs(wants.notes or {}) do
+            if y + 5 + i > y + h - 2 then break end
+            cell(ix, y + 5 + i, 0, inner, note, C.crit, inner)
+        end
+        return
+    end
+
+    for i = first, last do
+        local e = list[i]
+        local row = y + 1 + (i - first) + 1
+        local col = WANT_COLOR[e.state] or C.dim
+        if inner - WC.bar >= 10 then
+            bar(ix + WC.bar, row, 10, e.fill or 0,
+                e.fill and fillColor(e.fill) or C.faint, C.panelHi)
+        end
+        cell(ix, row, WC.pct, 6, padL(e.pct or "-", 5), col, inner)
+        cell(ix, row, WC.material, 24, e.material or "?", C.text, inner)
+        -- The label is what the stock figure was read from, so a wrong one shows up
+        -- here as an item nobody recognises next to a stock of zero.
+        cell(ix, row, WC.label, 29, e.label or "(no item named)",
+            e.label and C.mine or C.crit, inner)
+        cell(ix, row, WC.stock, 19, e.stock or "-", C.dim, inner)
+        cell(ix, row, WC.need, 11, padL(e.need or "-", 10), C.dim, inner)
+        -- MAKING is the fleet's answer to this row, and the one number here that is
+        -- about the hardware: green when something is coming, red when nothing is.
+        cell(ix, row, WC.made, 11, padL(e.made or "-", 10),
+            (e.making and C.good) or C.crit, inner)
+        cell(ix, row, WC.cover, 8, padL(e.coverPct or "-", 7),
+            e.cover and fillColor(e.cover) or C.faint, inner)
+        cell(ix, row, WC.eta, 10, padL(e.eta or "-", 9), C.dim, inner)
+        -- The state alone. A row's note is always some form of "nothing is mining
+        -- it", which the red 0.000 in MAKING/s and the 0% in COVER have already said
+        -- twice -- and appending it here only truncated the state off the screen.
+        cell(ix, row, WC.state, inner - WC.state, e.state or "", col, inner)
+    end
+
+    local sy = y + h - 2
+    cell(ix, sy, 0, inner, (wants.summary and wants.summary.line or ""), C.dim, inner)
+    -- A config problem is shown on the screen the config is about, not only in the
+    -- log: a mistyped material is invisible everywhere else, since the entry it
+    -- belongs to was dropped before any of this ran.
+    local notes = wants.notes or {}
+    if #notes > 0 then
+        cell(ix, y + h - 3, 0, inner, notes[1]
+            .. ((#notes > 1) and ("   (+" .. (#notes - 1) .. " more in the log)") or ""),
+            C.crit, inner)
     end
 end
 
@@ -1194,6 +1405,9 @@ function ui.render(state)
 
     elseif state.screen == "fleetOre" then
         drawFleetOre(state, 2, contentY, W - 2, contentH)
+
+    elseif state.screen == "wants" then
+        drawWants(state, 2, contentY, W - 2, contentH)
 
     elseif state.screen == "advise" then
         local a = state.advise or {}

@@ -1,0 +1,74 @@
+-- WHAT THE FLEET IS FOR: the ore you actually want, and how much of it.
+--
+-- This file is the input to AUTOMATIC mode. A module set to AUTO is aimed by the
+-- controller at whatever best serves this list; a module set to MANUAL is left
+-- alone entirely. Nothing here touches the consumables -- kits and plasma are
+-- worked out from what the fleet is running (cfg.control in config.lua).
+--
+-- Like config.lua this is marked `?` in the manifest, so re-running `install`
+-- never overwrites it.
+--
+-- ---- why an entry names two things -----------------------------------------
+-- A mining module cannot be aimed at an item. You set a distance, a drone and a
+-- plasma, and the game rolls a weighted meteor out of whatever pool that exposes,
+-- so what comes out is decided by the MATERIAL a meteor yields. But what you have
+-- in stock is an ITEM with a localized label, and the two are not the same string:
+-- the material is "BlackPlutonium" while the item on the terminal reads "Black
+-- Plutonium Ore". Guessing one from the other would be wrong for exactly the ores
+-- that are worth automating, so an entry says both:
+--
+--   material   the name a METEOR yields. Either form works -- the bare material
+--              ("Dilithium") or the full oredict ("oreDilithium") -- and the bare
+--              form covers every prefix at once, so "Platinum" absorbs both
+--              dustPlatinum and oreEndstonePlatinum. Checked at startup against
+--              every name the meteor tables can produce, and anything unknown is
+--              reported by name rather than silently mined for ever.
+--
+--   label      the item to COUNT, exactly as the ME terminal spells it. This is
+--              what "how much do I have" is read from, so it is also where you
+--              decide what counts as stock: point it at the raw ore to say "keep
+--              ore on hand", or at the processed form to say "keep the product on
+--              hand and mine only when it runs down". A list counts several
+--              labels together (ore plus its crushed form, say).
+--
+--   want       how many of that item to keep. This is a LEVEL, not a rate: the
+--              deficit is what drives the fleet, and a want that is full stops
+--              asking (until it falls back under cfg.auto.refillAt of it).
+--
+--   weight     optional, default 1. Multiplies this entry's pull when several
+--              compete: 2 means "twice as interesting as the rest, at the same
+--              fill". Prefer leaving it alone -- the fill fraction already does
+--              most of this -- and use it for the handful of things that really
+--              do matter more.
+--
+-- ---- how the list is served ------------------------------------------------
+-- Ore purity is dreadful when a material is targeted alone (1-2% is normal), so
+-- the controller does NOT hand each module one material. It searches for the
+-- configurations that serve the whole list at once and then shares them out, and
+-- because a material already covered stops paying, modules spread out over what is
+-- still missing rather than all piling onto the same broad pool. Two modules aimed
+-- differently frequently serve more of this list than two modules both trying to
+-- serve all of it -- and that is the allocation doing its job, not a bug.
+--
+-- The upshot is that a single entry is a poor way to use this. The list works best
+-- FULL: ten wants give the search something to satisfy jointly, one gives it a
+-- needle to chase at 2% purity.
+
+local wants = {}
+
+-- ---- the list ---------------------------------------------------------------
+-- Empty by default: an invented list would aim the whole fleet at ore nobody
+-- asked for the moment the controller started. Until something is in here, every
+-- AUTO module is simply left where it is and the dashboard says so.
+--
+-- Written as a list rather than a keyed table so the order you write is the order
+-- the WANTS screen shows.
+wants.items = {
+    -- { material = "Dilithium",     label = "Dilithium Ore",         want = 16384 },
+    -- { material = "Platinum",      label = "Raw Platinum",          want = 65536 },
+    -- { material = "BlackPlutonium",label = "Black Plutonium Ore",   want = 4096, weight = 2 },
+    -- { material = "Bedrockium",    label = { "Bedrockium Ore", "Crushed Bedrockium Ore" },
+    --   want = 4096 },
+}
+
+return wants

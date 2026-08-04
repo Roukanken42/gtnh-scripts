@@ -9,14 +9,20 @@
 # Rules:
 #   - Only *.lua files are included (docs, images, tooling, etc. are skipped).
 #   - Files under excluded top-level folders (.git, tools, docs) are skipped.
-#   - Any file named `config.lua` (or *.config.lua) is written with a leading
-#     `? ` marker, so install.lua will NOT overwrite a machine's local config.
+#   - Any file named `config.lua` (or *.config.lua), plus anything listed in
+#     $userOwned below, is written with a leading `? ` marker, so install.lua will
+#     NOT overwrite a machine's local copy. Those are the files a player edits:
+#     losing one to an update would lose their settings, or in wants.lua's case the
+#     entire description of what their fleet is for.
 
 $ErrorActionPreference = "Stop"
 
 # Repo root = parent of the folder this script lives in.
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $excludedTopDirs = @(".git", "tools", "docs")
+
+# Repo-relative paths the player owns, beyond the config.lua naming rule.
+$userOwned = @("mining/wants.lua")
 
 $files = Get-ChildItem -Path $repoRoot -Recurse -File -Filter *.lua |
     ForEach-Object {
@@ -38,7 +44,7 @@ $lines = @(
 
 foreach ($rel in $files) {
     $name = ($rel -split "/")[-1]
-    if ($name -eq "config.lua" -or $name -like "*.config.lua") {
+    if ($name -eq "config.lua" -or $name -like "*.config.lua" -or $userOwned -contains $rel) {
         $lines += "? $rel"
     } else {
         $lines += $rel

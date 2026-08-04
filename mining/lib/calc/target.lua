@@ -481,6 +481,12 @@ end
 --     budget      = { ingots = { [material] = <per second> },
 --                     plasma = { [tier] = <L per second> }, eu = <per second> },
 --     computation = <n>,           -- computation on tap; caps parallels
+--     parallels   = <n>,           -- what the module is SET to, if not its tier's
+--                                  -- maximum. Clamped to the tier. Cost per item
+--                                  -- barely moves -- yield and every cost scale
+--                                  -- alike -- but the RATES scale with it, and a
+--                                  -- caller sizing a fleet against a demanded rate
+--                                  -- is asking about exactly those.
 --     mode        = "throttle" | "fast" | <overdrive>,
 --     modules     = { <tier>, ... },  -- only these module tiers
 --     drones      = <tier> | { <tier>, ... },   -- only these drone tiers
@@ -581,7 +587,13 @@ function target.search(demand, opts)
         local mod = estimate.MODULES[moduleTier]
         if mod then
             ctx.module, ctx.moduleName = moduleTier, mod.name
-            ctx.parallels = mod.parallels
+            -- A module held below its tier's maximum runs a proportionally smaller
+            -- pool of parallels, and every rate reported here scales with it.
+            local parallels = mod.parallels
+            if opts.parallels then
+                parallels = math.max(1, math.min(math.floor(opts.parallels), mod.parallels))
+            end
+            ctx.parallels = parallels
 
             for _, ud in ipairs(usableDrones) do
                 ctx.drone, ctx.droneName = ud.tier, ud.drone.name
@@ -602,7 +614,7 @@ function target.search(demand, opts)
                     end
                     if d and d <= maxDistance then
                         local sums = poolSums(d, ud.tier, moduleTier, mod.voltage,
-                            mod.parallels, opts.computation, targets)
+                            parallels, opts.computation, targets)
 
                         if sums and prevSums and sameSums(sums, prevSums) then
                             for _, c in ipairs(prevCands) do c.distance[2] = hi end

@@ -329,11 +329,16 @@ cfg.auto = {
     -- the whole list pulls: an hour means an empty want of 60k asks for ~17 items a
     -- second, which is several modules' worth, while a day asks for less than one.
     --
-    -- It is also the dial for how much of the fleet gets used. The targeter throttles
+    -- It is also THE DIAL FOR HOW MUCH OF THE FLEET GETS USED, and the answer to
+    -- "why are four of my six modules doing nothing". The targeter throttles
     -- overdrive down to the rate demanded and no further, and the allocator stops
-    -- assigning modules once the demand is covered -- so a long horizon leaves
-    -- modules idle and a short one puts them all to work at full speed. Shorten it
-    -- when the fleet is sitting around; lengthen it when kits are the bottleneck.
+    -- assigning modules once the demand is covered -- so a want that is only a
+    -- little short becomes a small rate, a small rate needs one or two modules, and
+    -- the rest are genuinely not needed. They are now STOPPED rather than left
+    -- mining, and the WANTS screen says how many and why.
+    --
+    -- Shorten it when the fleet is sitting around: half an hour asks for twice the
+    -- rate and so uses twice the modules. Lengthen it when kits are the bottleneck.
     horizon = 3600,
 
     -- Stock items per ORE ITEM MINED, for entries in wants.lua that do not say. A
@@ -359,6 +364,28 @@ cfg.auto = {
     -- that a small nudge would change nothing about which pool wins.
     criticalAt = 0.15,
     criticalBoost = 3,
+
+    -- How the fleet is split when it CANNOT cover everything on the list -- which is
+    -- the usual state of a want that has just been added, or one whose ore is rare.
+    --
+    -- The allocator maximises how much of the demand is served. Left as a straight
+    -- sum of items that has one nasty property: a want nowhere near its target pays
+    -- full price for every extra item, so the fleet piles onto whichever want yields
+    -- the most per module and the rare one is never mined at all. Two wants short by
+    -- the same amount do NOT get half the fleet each -- the commoner one gets all
+    -- six modules, and nothing on screen says why.
+    --
+    -- This discounts a want the more of it is already covered, so getting an
+    -- untouched want started outbids adding another sixth to one already going.
+    --
+    --   1.0   maximum total items. Winner takes all when the fleet is short.
+    --   0.5   the default: a rare want gets a module or two, the common one keeps
+    --         the rest.
+    --   0.2   spread hard -- every want gets something before any gets seconds.
+    --
+    -- Irrelevant once the fleet can cover its demand: every want then reaches its
+    -- rate whatever this says, and cost alone picks between the ways of doing it.
+    spread = 0.5,
 
     -- How much better a configuration has to be before a module is STOPPED to write
     -- it: 0.25 means "a quarter more of the demand covered, or don't bother". Every

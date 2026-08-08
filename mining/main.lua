@@ -358,11 +358,37 @@ local fleetOreRates = {}
 local autoNote, autoSignature = nil, nil
 local autoDue = true            -- forced after a mode change or a want-list reload
 
+-- ---- whether a module should be RUNNING at all -------------------------------
+--
+-- The allocator can decide a module is not needed -- every want it could serve is
+-- already covered, or the whole list is full -- and until this existed there was
+-- nothing to do about it. "Not needed" came back as KEEP, KEEP means "carry on
+-- doing exactly what you were", and so a fleet whose wants had all been met went on
+-- mining them for ever: kits and plasma spent on ore nobody was waiting for, and
+-- nothing on any screen saying why.
+--
+-- Two tables rather than one, because they answer different questions:
+--   autoWanted[addr]   what automatic mode has DECIDED. Survives a cycle in which
+--                      no allocation ran (an unchanged demand skips the search), so
+--                      the decision does not evaporate between searches.
+--   autoRunning[addr]  what has actually been WRITTEN. The write only happens when
+--                      the two disagree, so a settled fleet costs no calls at all.
+--
+-- Cleared for one module whenever a queued parameter change settles: that path
+-- stops the machine and puts it back to what it was BEFORE, which is not
+-- necessarily what automatic mode wants -- and a module aimed while it happened to
+-- be stopped would otherwise stay stopped for good.
+--
+-- MANUAL modules are never touched by any of this. Turning somebody else's module
+-- off is exactly the kind of thing that makes an automatic controller impossible to
+-- trust.
+local autoWanted, autoRunning = {}, {}
+
 -- Forward declarations. The demand side is built on top of the estimator glue and
 -- the searcher options that the detail and advisor screens further down already
 -- own -- reimplementing either would be two places to keep in step -- while the
 -- cycle that drives it all comes first. Declared here, assigned down there.
-local refreshWants, runAuto, fleetAggregate
+local refreshWants, runAuto, fleetAggregate, enforceRunning
 
 -- Drone tier -> how many the local net holds. A drone is a catalyst rather than a
 -- consumable, so this is a presence check: read alongside the stock, since it is
@@ -480,7 +506,13 @@ local function readFleet(full)
 
         -- Precedence is worst-first: a module with no station cannot be helped at
         -- all, and an empty hatch explains an idle module better than "IDLE" does.
+        -- OFF sits above MINING because a module that has been told to stop is
+        -- still active until its operation finishes, and "MINING" for the next
+        -- forty seconds would read as the controller having ignored the decision.
         if not st then row.state = "NO STATION"
+        -- Not under a dry run: nothing was written, the module is still mining, and
+        -- a state column is a report of the hardware rather than of an intention.
+        elseif autoWanted[m.address] == false and not cfg.dryRun then row.state = "OFF"
         elseif not row.drone then row.state = "NO DRONE"
         elseif row.hasFluid and (row.hatchLevel or 0) <= 0 then row.state = "DRY"
         elseif m:isActive() then row.state = "MINING"
@@ -563,6 +595,16 @@ end
 local function claimModule(row)
     if not modes.claim(moduleModes, row.miner.address) then return end
     log(row.addr .. ": MANUAL now -- the controller will not aim it (A hands it back)")
+    -- Handed back running. A module the controller had stopped for want of anything
+    -- to mine would otherwise arrive in the player's hands switched off, with the
+    -- only clue a state column reading OFF -- and nothing on the keyboard to undo
+    -- it, since taking a module MANUAL is the way to say "I will drive this".
+    if autoWanted[row.miner.address] == false then
+        row.miner:setEnabled(true)
+        log("  (it was stopped for want of anything to mine -- started again)")
+    end
+    autoWanted[row.miner.address] = nil
+    autoRunning[row.miner.address] = nil
     local path, err = modes.save(moduleModes)
     if not path then log("  (could not remember that: " .. tostring(err) .. ")") end
     -- One fewer module to allocate over, so the rest may want re-sharing.
@@ -752,6 +794,13 @@ local function runCycle()
             -- finished swap would sit there with the pending gone and the old drone
             -- still named until the slow cadence came round half a minute later.
             slowDue[r.miner.address] = true
+            -- Carrying a parameter change out stops the machine and puts it back to
+            -- whatever it was BEFORE the change (control.restoreEnabled). That is
+            -- right for a module the player is driving and wrong for one automatic
+            -- mode has an opinion about -- in particular a module that was stopped
+            -- for want of work and has just been aimed at something would come back
+            -- still stopped. Forgetting what was written re-asserts it.
+            autoRunning[r.miner.address] = nil
             landed = true
         end
     end
@@ -916,6 +965,11 @@ local function runCycle()
             -- instead of at the next cycle.
             rows = readFleet(false)
         end
+        -- Again, unconditionally: runAuto returns early on the cycles where the
+        -- demand has not moved -- which is most of them -- and a decision that has
+        -- been undone by a parameter write since then still has to be put back.
+        -- Costs nothing when nothing has changed, which is the normal case.
+        if not paused then enforceRunning(rows) end
         doneWants()
     end
 
@@ -1932,14 +1986,74 @@ local function autoSignatureOf(targets, list)
     return table.concat(parts, "|") .. "//" .. table.concat(mods, "|")
 end
 
+-- Records what automatic mode wants each AUTO module to be doing. `wanted` is a
+-- table addr -> boolean; anything not in it is left alone, which is how MANUAL
+-- modules and modules the controller cannot reach stay out of it.
+local function decideRunning(rows, wanted)
+    for _, r in ipairs(rows) do
+        local addr = r.miner.address
+        if r.auto and wanted[addr] ~= nil then autoWanted[addr] = wanted[addr] end
+    end
+end
+
+-- Writes the decisions that have not been written yet. Separate from making them
+-- because they are not made every cycle -- an unchanged demand skips the search
+-- entirely -- while the writing has to be re-asserted after anything else has
+-- touched the machine.
+--
+-- Returns how many modules were stopped and how many started, for the log.
+function enforceRunning(rows)
+    local stopped, started = 0, 0
+    for _, r in ipairs(rows) do
+        local addr = r.miner.address
+        local want = autoWanted[addr]
+        if r.auto and want ~= nil and autoRunning[addr] ~= want then
+            if cfg.dryRun then
+                log(string.format("auto %s: WOULD %s it  [dry run]", r.addr,
+                    want and "start" or "stop"))
+            else
+                r.miner:setEnabled(want)
+            end
+            -- Recorded either way. Under a dry run this is a record of the decision
+            -- rather than of a write, which is what keeps the line above to one per
+            -- change instead of one per cycle.
+            autoRunning[addr] = want
+            if want then started = started + 1 else stopped = stopped + 1 end
+        end
+    end
+    return stopped, started
+end
+
 function runAuto(rows)
     if manualRun then return false end
     if #wantEntries == 0 then setAutoNote(nil); return false end
     if not wantDemand then
-        -- Everything is full. Note that this is where a satisfied fleet SITS: no
-        -- demand, no search, no changes, and every module left exactly as it is
-        -- until a want falls back under cfg.auto.refillAt.
-        setAutoNote("every want is met -- nothing to re-aim")
+        -- EVERY WANT IS MET, and this is where a satisfied fleet stops.
+        --
+        -- It used to sit here instead: no demand, no search, no changes, and every
+        -- module left exactly as it was -- which meant "exactly as it was" was
+        -- MINING, for ever, for ore already at target. The fleet went on eating kits
+        -- and plasma to overfill something nobody had asked for since the last time
+        -- a want ran low.
+        --
+        -- Nothing is re-aimed, which is still right: the configurations stay where
+        -- they are, so when a want falls back under cfg.auto.refillAt the fleet
+        -- starts again on what it was already set up to mine, with no search and no
+        -- parameter writes to wait for.
+        local wanted = {}
+        for _, r in ipairs(rows) do
+            if r.auto then wanted[r.miner.address] = false end
+        end
+        decideRunning(rows, wanted)
+        local stopped = enforceRunning(rows)
+        if stopped > 0 then
+            log(string.format("auto: every want is met -- %s %d module(s)",
+                cfg.dryRun and "would stop" or "stopped", stopped))
+        end
+        setAutoNote(string.format("every want is met -- fleet %s until one falls "
+            .. "below %d%% of its target",
+            cfg.dryRun and "WOULD BE STOPPED [dry run]" or "stopped",
+            math.floor((acfg.refillAt or 0.75) * 100 + 0.5)))
         return false
     end
 
@@ -1997,7 +2111,18 @@ function runAuto(rows)
     local costs = { ingot = cfg.kitCost, plasma = cfg.plasmaCost, eu = cfg.euCost }
     for _, m in ipairs(list) do
         local cur = currentOf(m.row)
-        if cur.drone and cur.distance and cur.plasma then
+        -- A module the controller has STOPPED keeps its parameters, and they still
+        -- describe a perfectly good configuration -- but it is not mining, and KEEP
+        -- must not be credited with ore that is not coming. Left in, the fleet reads
+        -- as producing what it would produce if it were running: the demand looks
+        -- covered by machines that are switched off, so nothing is ever started
+        -- again and the want drains to nothing with six idle modules watching.
+        --
+        -- No `current` also means nothing to protect, so the hysteresis test lets it
+        -- be aimed freely -- which is right for a module that is doing nothing.
+        if autoWanted[m.row.miner.address] == false then
+            m.current = nil
+        elseif cur.drone and cur.distance and cur.plasma then
             local est = estimate.run{
                 distance = cur.distance, drone = cur.drone, module = m.tier,
                 plasma = cur.plasma, overdrive = cur.overdrive or 1,
@@ -2065,6 +2190,25 @@ function runAuto(rows)
 
     local plan = allocate.plan(list, targets, acfg)
 
+    -- Who is worth running. A module contributes nothing when every want it could
+    -- serve is already covered by the rest of the fleet -- which is not a fault, it
+    -- is the demand being smaller than the fleet, and cfg.auto.horizon is the dial
+    -- that decides how often it happens: a long horizon turns a big shortfall into a
+    -- small rate, and a small rate needs few modules.
+    --
+    -- Done before the aiming, so a module about to be pointed at something is
+    -- started rather than being stopped and restarted a moment later.
+    local wanted = {}
+    for _, ch in ipairs(plan.choices) do
+        wanted[ch.module.row.miner.address] = ch.needed
+    end
+    decideRunning(rows, wanted)
+    local stopped, started = enforceRunning(rows)
+    if stopped > 0 or started > 0 then
+        log(string.format("auto: %d module(s) stopped, %d started -- the demand needs "
+            .. "%d of %d", stopped, started, plan.needed or 0, #list))
+    end
+
     -- DRY RUN plans and says what it would do, and writes nothing. cfg.dryRun ships
     -- as true, and it would be a poor joke for the flag that means "let me watch it
     -- first" to be the one setting under which a fleet quietly re-aims itself. It
@@ -2106,6 +2250,14 @@ function runAuto(rows)
         -- changed" and "nothing was considered" look identical from outside.
         note = string.format("%d AUTO module(s) already well aimed, %d%% of the ask "
             .. "covered", #list, share)
+    end
+    -- Why part of the fleet is sitting there, and what to do if that is not what was
+    -- wanted. A row of stopped modules with no explanation reads as a broken
+    -- controller; it is almost always the horizon, and there is no way to guess that
+    -- from the dashboard.
+    if (plan.spare or 0) > 0 then
+        note = note .. string.format("   --   %d not needed at this demand "
+            .. "(shorten cfg.auto.horizon to use them)", plan.spare)
     end
     setAutoNote(note)
     if aimed > 0 then

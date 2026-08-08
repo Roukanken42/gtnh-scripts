@@ -20,16 +20,17 @@
 -- ---- the objective ----------------------------------------------------------
 -- For a set of choices, the fleet produces `produced[t]` of each want, and
 --
---   coverage = sum over wants of  weight[t] * min(need[t], produced[t])
+--   coverage = sum over wants of  weight[t] * need[t] * share[t]^spread
+--   where    share[t] = min(1, produced[t] / need[t])
 --
 -- is what is being maximised. Cost is the tie-break, and strictly that: coverage
 -- is compared first and cost only settles allocations that cover the SAME amount.
 --
 -- Which is not a rare case to have thought about -- it is the important one. Once
--- the fleet saturates the demand, every remaining allocation covers exactly the
--- same total (each want is capped at its need, so the sums are identical to the
--- last bit), and cost is then the only thing left to choose on. That is where the
--- fleet settles onto the cheap end of what serves the list.
+-- the fleet saturates the demand, every want is at share 1 whatever the exponent,
+-- so every remaining allocation covers exactly the same total and cost is then the
+-- only thing left to choose on. That is where the fleet settles onto the cheap end
+-- of what serves the list.
 --
 -- Weighing the two against each other instead -- coverage minus some multiple of
 -- cost -- reads as more principled and is worse: any exchange rate small enough to
@@ -37,6 +38,37 @@
 -- rounding, and any rate big enough to matter will sooner or later refuse a genuine
 -- improvement because it costs points. There is no good value, so there is no
 -- multiplier.
+--
+-- ---- why the exponent -------------------------------------------------------
+-- `spread` = 1 makes the formula above collapse to weight * min(need, produced) --
+-- a straight weighted sum of items, which is what this used to be. That has one
+-- failure, and on a real fleet it is the common case rather than the corner:
+--
+--   IT ONLY DIVERSIFIES WHEN THE CAP IS REACHABLE. Capping each want at its rate
+--   is what draws the second module towards what the first did not cover -- but a
+--   want nowhere near its cap goes on paying full price for every extra item, so a
+--   fleet that cannot cover its demand puts EVERYTHING on whichever want yields the
+--   most items per module and leaves the rest at zero.
+--
+-- Two wants short by the same amount, one of them ten times rarer in the meteor
+-- tables: six modules all go to the common one, because 6 items a second of it
+-- beats 3 of it plus 0.3 of the other. The rare want is never mined at all, and
+-- nothing about that is visible -- it looks like a fleet that is simply busy.
+--
+-- An exponent below 1 makes each want's SHARE worth less the more of it is already
+-- covered, so the first module pointed at an untouched want is worth more than the
+-- sixth pointed at one already a third served. That is the whole mechanism: no rule
+-- says "diversify", the curve just stops paying for piling on.
+--
+--   1.0   a weighted sum of items -- maximum total, winner takes all when the
+--         fleet is short of the demand
+--   0.5   the default. Roughly "getting a rare want started is worth as much as
+--         adding another sixth to a common one"
+--   ->0   spread as thinly as possible: every want gets something before any want
+--         gets seconds
+--
+-- Nothing changes for a fleet that CAN cover its demand: every share reaches 1, the
+-- exponent stops mattering, and cost settles it exactly as before.
 --
 -- ---- how it is searched -----------------------------------------------------
 -- Coordinate ascent from the fleet as it stands. Every module starts at KEEP (what
@@ -71,6 +103,10 @@ allocate.DEFAULTS = {
     margin = 0.25,
     -- Sweeps to run. Two settles the normal case; the third is insurance.
     passes = 3,
+    -- How much a want's share is discounted the more of it is already covered.
+    -- 1 is a straight weighted sum of items; below 1 spreads the fleet over the
+    -- wants it cannot all cover. See the header.
+    spread = 0.5,
 }
 
 local function opt(opts, key)
@@ -81,19 +117,28 @@ end
 
 -- ---- coverage ---------------------------------------------------------------
 
--- Weighted demand served, capped per want. `produced` maps want name -> items/s.
+-- Weighted demand served, capped per want and discounted by `spread`. `produced`
+-- maps want name -> items/s.
 --
 -- The cap is unconditional, which also settles the degenerate case: a want asking
 -- for nothing -- one that is currently satisfied, or was passed in without a rate
 -- -- is worth nothing however much of it comes out. Nothing is owed, so nothing is
 -- earned by serving it, and a module cannot win an allocation by flooding it.
-function allocate.coverage(targets, produced)
+function allocate.coverage(targets, produced, opts)
+    local spread = opt(opts, "spread")
     local total = 0
     for _, t in ipairs(targets or {}) do
-        local made = produced[t.name] or 0
         local need = t.need or 0
-        if made > need then made = need end
-        total = total + (t.weight or 1) * made
+        -- A want owed nothing contributes nothing, and dividing by it would be an
+        -- error rather than an answer.
+        if need > 0 then
+            local share = (produced[t.name] or 0) / need
+            if share > 1 then share = 1 end
+            -- Skipped at 1 so the plain weighted sum stays bit-for-bit what it was,
+            -- and because 0^0 is not something to leave to the runtime.
+            if spread ~= 1 and share > 0 then share = share ^ spread end
+            total = total + (t.weight or 1) * need * share
+        end
     end
     return total
 end
@@ -255,10 +300,10 @@ function allocate.plan(modules, targets, opts)
     local margin = opt(opts, "margin")
 
     local choice = {}          -- module index -> candidate, or nil for KEEP
-    local baseline = allocate.coverage(targets, producedBy(modules, choice, targets))
+    local baseline = allocate.coverage(targets, producedBy(modules, choice, targets), opts)
 
     local function score()
-        return allocate.coverage(targets, producedBy(modules, choice, targets)),
+        return allocate.coverage(targets, producedBy(modules, choice, targets), opts),
                costOf(modules, choice)
     end
 
@@ -346,13 +391,13 @@ function allocate.plan(modules, targets, opts)
             -- since a nil choice means "keep", which is one of the things being
             -- measured.
             others[i] = { rates = {}, cost = { total = 0 } }
-            local without = allocate.coverage(targets, producedBy(modules, others, targets))
+            local without = allocate.coverage(targets, producedBy(modules, others, targets), opts)
             -- What it is worth as it stands...
             others[i] = nil
-            local keepCov = allocate.coverage(targets, producedBy(modules, others, targets))
+            local keepCov = allocate.coverage(targets, producedBy(modules, others, targets), opts)
             -- ...against what it would be worth changed.
             others[i] = c
-            local setCov = allocate.coverage(targets, producedBy(modules, others, targets))
+            local setCov = allocate.coverage(targets, producedBy(modules, others, targets), opts)
 
             local keepGain, setGain = keepCov - without, setCov - without
             if setGain <= keepGain * (1 + margin) then
@@ -373,6 +418,56 @@ function allocate.plan(modules, targets, opts)
             or ((produced[t.name] or 0) > 0 and 1 or 0)
     end
 
+    -- ---- which modules are worth running at all ----
+    --
+    -- What this is for: the allocation otherwise has only "set" and "keep", and KEEP
+    -- means "carry on doing exactly what you were" -- so a fleet whose demand has
+    -- been met goes on mining it for ever, burning kits and plasma on ore nobody is
+    -- waiting for. Nothing in the choices can be read to spot it either: a module
+    -- with nothing left to do and a module doing something useful both say KEEP.
+    --
+    -- ---- and why it is cumulative rather than leave-one-out ----
+    -- The obvious test is "how much coverage would the fleet lose if this module
+    -- stopped". It is wrong, and dangerously so. Six modules covering a want that
+    -- needs two: remove ANY one of them and the remaining five still cover it, so
+    -- every module measures as worth nothing -- and acting on that stops the entire
+    -- fleet. Redundancy makes every individual contribution zero.
+    --
+    -- So the fleet is instead built up: in sweep order, each module is added to the
+    -- ones already kept and asked whether it moves the coverage. The first two get
+    -- kept because the want is not covered yet when their turn comes; the other four
+    -- add nothing to what is by then already there and are handed back. Which is the
+    -- same question asked in a form that has an answer -- and it settles WHICH of a
+    -- set of equals goes, rather than concluding that all of them can.
+    --
+    -- Sweep order is biggest module first, so the spare capacity given up is the
+    -- smallest modules rather than an arbitrary pick.
+    local NOTHING = { rates = {}, cost = { total = 0 } }
+    local kept, contribution, needed = {}, {}, 0
+    for j = 1, #modules do kept[j] = NOTHING end
+
+    local held = 0            -- coverage of the modules kept so far
+    for _, i in ipairs(order) do
+        -- nil is KEEP, which is what produces m.current -- so this has to go through
+        -- the table rather than being read off `choice` directly.
+        kept[i] = choice[i]
+        local with = allocate.coverage(targets, producedBy(modules, kept, targets), opts)
+        local c = with - held
+        -- Coverage is a sum of floats over the whole demand, so an exactly-zero
+        -- contribution is not something to wait for. eps is scaled to the demand for
+        -- the same reason the search's is.
+        if c > eps then
+            contribution[i] = c
+            held = with
+            needed = needed + 1
+        else
+            contribution[i] = 0
+            -- Put back, so the modules after it are measured against a fleet that
+            -- does not include one already decided against.
+            kept[i] = NOTHING
+        end
+    end
+
     local choices = {}
     for i, m in ipairs(modules) do
         local d = decided[i] or {}
@@ -386,6 +481,12 @@ function allocate.plan(modules, targets, opts)
             -- both marginal. The pair the margin was applied to.
             keepGain = d.keepGain,
             gain = d.gain,
+            -- What this module adds to the fleet built out of the ones before it, and
+            -- so whether it should be running at all. A caller that ignores these two
+            -- gets exactly the old behaviour, which is why they are extra fields
+            -- rather than a new action.
+            contribution = contribution[i],
+            needed = contribution[i] > 0,
         }
     end
 
@@ -393,12 +494,18 @@ function allocate.plan(modules, targets, opts)
         choices = choices,
         produced = produced,
         served = served,
-        coverage = allocate.coverage(targets, produced),
+        coverage = allocate.coverage(targets, produced, opts),
         baseline = baseline,
         maxCoverage = maxCov,
         cost = costOf(modules, choice),
         passes = passes,
         changes = changes,
+        -- How many of the modules offered are actually earning their kits. The
+        -- difference between this and #modules is the fleet the demand does not
+        -- need -- which is a number worth putting on a screen rather than leaving
+        -- as a row of modules that are mysteriously doing nothing.
+        needed = needed,
+        spare = #modules - needed,
     }
 end
 

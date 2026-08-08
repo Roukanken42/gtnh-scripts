@@ -222,6 +222,17 @@ function supply.kitsInStock(entry, stock)
     return (n == math.huge) and 0 or n
 end
 
+-- The name a catalog entry is tracked under everywhere a level is compared with a
+-- target: the material for kits, the fluid name for plasma. An entry of any other
+-- kind has no target and so no key. plan, the order book and the CPU scan all key
+-- on this, which is what lets the three be lined up against each other.
+function supply.keyOf(entry)
+    if type(entry) ~= "table" then return nil end
+    if entry.kind == "kit" then return entry.material end
+    if entry.kind == "plasma" then return entry.plasma and entry.plasma.name end
+    return nil
+end
+
 -- ---- pure: deciding what to request -----------------------------------------
 
 -- What the local net holds for each catalog entry, keyed the way plan and the
@@ -244,29 +255,61 @@ end
 --   stock      { items = { [label] = count }, fluids = { [name] = litres } }
 --   cfg        cfg.supply (target / plasma / plasmaPerCraft / lowWater / maxCrafts)
 --   satisfied  caller-owned latch table, carried across cycles for hysteresis
--- Returns a list of { entry, key, have, target, deficit, crafts }, plus a list of
--- notes for anything that has a target but cannot be acted on.
+--   coming     what the MAIN net is already making, from supply.inFlight -- keyed
+--              the same way, either a plain number of units or the record that
+--              function returns. Omitting it plans blind, exactly as before.
+-- Returns a list of { entry, key, have, target, deficit, coming, crafts }, plus a
+-- list of notes for anything that has a target but cannot be acted on.
 --
--- This compares the target against WHAT IS ACTUALLY THERE, and nothing else. An
--- earlier version also counted what had been requested but not yet seen, to stop
--- the same shortfall being ordered every cycle -- but it had to guess when an
--- order had arrived by watching the stock rise, and the modules eat kits as fast
--- as they land, so a delivery that was immediately consumed never looked like a
--- delivery and the phantom order stuck around until it timed out.
+-- ---- WHY `coming` EXISTS -----------------------------------------------------
+-- The level in the local net is the only honest measure of what is THERE, and this
+-- used to plan on it alone. That is right up until the main net gets busy: the
+-- shortfall is real, it is ordered, and the order then sits on a crafting CPU for
+-- minutes while the local net goes on reading empty. Every cycle after that reads
+-- the same shortfall and orders it AGAIN -- and each order takes another CPU, so
+-- the busier the main net gets the harder this pushes on it. It is a feedback loop
+-- with the sign the wrong way round, and a fleet that is merely waiting for kits
+-- can bury a crafting bank in duplicate jobs for the same kits.
 --
--- Guessing was the mistake. The caller re-reads the stock the moment a craft
--- finishes, so by the time this runs again the answer is simply known. What stops
--- the re-requesting is a fresh reading, not a prediction.
+-- An earlier version tried to fix this by remembering what had been requested and
+-- not yet seen -- and it had to GUESS when an order had arrived, by watching the
+-- stock rise. The modules eat kits as fast as they land, so a delivery that was
+-- immediately consumed never looked like a delivery, and the phantom order stuck
+-- around until it timed out. Guessing was the mistake.
+--
+-- `coming` is not a guess. It is read off the main net's own crafting CPUs, which
+-- is the one place that knows what is genuinely still being made -- and knows it
+-- across a controller restart, and about orders this controller never placed.
+-- So the comparison here is now
+--
+--     short by      target - have          what the net is missing
+--     minus         coming                 what is already on its way
+--     equals        what to order now      which is nothing, in the normal case
+--
+-- and a rising target still gets served: the difference is ordered, and AE2 merges
+-- it into the job already running for that output.
 --
 -- Hysteresis stays, as pump/main.lua's computeNeedy does it: once a material
 -- reaches its target it stays "satisfied" until it drops below lowWater * target,
--- so a slow drain cannot make this ask every cycle.
-function supply.plan(catalog, stock, cfg, satisfied)
+-- so a slow drain cannot make this ask every cycle. The latch tracks WHAT IS
+-- THERE and nothing else -- a craft in flight is not stock, and letting it set the
+-- latch would suppress the re-order that a failed craft has to be followed by.
+function supply.plan(catalog, stock, cfg, satisfied, coming)
     cfg = cfg or {}
     stock = stock or {}
     satisfied = satisfied or {}
     local lowWater = cfg.lowWater or 0.9
     local work, notes = {}, {}
+
+    -- Units already being made for a key, and whether the amount is unknowable.
+    -- A bare number is accepted as well as inFlight's record, so the pure half of
+    -- this module can be exercised without one.
+    local function onTheWay(key)
+        local c = coming and coming[key]
+        if type(c) == "number" then return c, false end
+        if type(c) == "table" then return c.units or 0, c.unknown == true end
+        return 0, false
+    end
 
     local function consider(entry, key, have, target, perCraft)
         if not target or target <= 0 then return end
@@ -282,8 +325,23 @@ function supply.plan(catalog, stock, cfg, satisfied)
                 .. ", but how much one craft delivers is unknown"
             return
         end
+
         local deficit = target - have
-        local wanted = math.ceil(deficit / perCraft)
+        local onWay, unknown = onTheWay(key)
+        if unknown then
+            -- A CPU is demonstrably making this and would not say how much. Waiting
+            -- is the only safe answer: ordering the whole deficit on top of an order
+            -- of unknown size is precisely the runaway this guard is here to stop.
+            notes[#notes + 1] = key .. ": short " .. deficit
+                .. ", but a crafting CPU is already making it and will not say how much"
+            return
+        end
+        -- Covered by what is already on its way. Not a note and not a work item:
+        -- this is the NORMAL state of a healthy supply line while a craft runs, and
+        -- a line of log every cycle for it would drown everything that matters.
+        if deficit - onWay <= 0 then return end
+
+        local wanted = math.ceil((deficit - onWay) / perCraft)
         local crafts, capped = wanted, nil
         if cfg.maxCrafts and crafts > cfg.maxCrafts then
             -- Reported, not just applied. A cap that quietly turns "3000 kits short"
@@ -294,8 +352,12 @@ function supply.plan(catalog, stock, cfg, satisfied)
         work[#work + 1] = {
             entry = entry, key = key, have = have, target = target,
             deficit = deficit, crafts = crafts,
-            -- What one craft delivers, and what the deficit really asked for: enough
-            -- for a caller to say "13 crafts, 3328 kits" rather than just "13".
+            -- What is already being made for this key, so a caller can say "1,200
+            -- short, 1,024 on the way, ordering the other 176" rather than leaving
+            -- the small order looking like a miscalculation.
+            coming = onWay,
+            -- What one craft delivers, and how many crafts the RESIDUAL asked for:
+            -- enough for a caller to say "13 crafts, 3328 kits" rather than just "13".
             perCraft = perCraft, wanted = wanted, capped = capped,
         }
     end
@@ -313,10 +375,13 @@ function supply.plan(catalog, stock, cfg, satisfied)
         end
     end
 
+    -- Emptiest first, counting what is on its way as good as arrived: the caps in
+    -- control.issue mean this order decides who is served now and who waits, and a
+    -- material that is empty BUT ALREADY BEING MADE is not the one in trouble.
     table.sort(work, function(a, b)
-        local ra = a.target > 0 and a.have / a.target or 0
-        local rb = b.target > 0 and b.have / b.target or 0
-        if ra ~= rb then return ra < rb end      -- emptiest first
+        local ra = a.target > 0 and (a.have + (a.coming or 0)) / a.target or 0
+        local rb = b.target > 0 and (b.have + (b.coming or 0)) / b.target or 0
+        if ra ~= rb then return ra < rb end
         return a.key < b.key
     end)
     return work, notes
@@ -421,6 +486,22 @@ function supply.catalog(itf, handle)
     return usable, unknown
 end
 
+-- Whether `stack` is the item a resolved pattern output names. The WHOLE identity
+-- is compared, because a renamed fake output shares its name and damage with the
+-- plain item and only the label tells the two apart.
+--
+-- Both the request and the CPU scan go through this, and they have to: one decides
+-- what to ask AE2 for and the other decides whether that thing is already being
+-- made, so a difference between them would show up as a restock loop that never
+-- recognises its own order.
+local function isOutput(want, stack)
+    if type(want) ~= "table" or type(stack) ~= "table" then return false end
+    if stack.label ~= want.label then return false end
+    if want.name ~= nil and stack.name ~= want.name then return false end
+    if want.damage ~= nil and stack.damage ~= want.damage then return false end
+    return true
+end
+
 -- Requests `crafts` of a catalog entry from the SUPPLY network, which pushes that
 -- many lots of its inputs into the local net. Returns an AECraftingJob, or
 -- nil + error. The label is re-checked after filtering because the ME filter's
@@ -455,16 +536,11 @@ function supply.request(itf, entry, crafts)
         return nil, "getCraftables failed for '" .. tostring(want.label) .. "'"
     end
 
-    -- Match on the whole identity. A renamed fake output shares its name and
-    -- damage with the plain item, so the label is what separates them -- and the
-    -- filter's matching is not reliably exact, hence the re-check.
+    -- The filter's matching is not reliably exact, hence the re-check.
     local found
     for _, c in ipairs(list) do
         local okStack, stack = pcall(c.getItemStack)
-        if okStack and type(stack) == "table"
-            and stack.label == want.label
-            and (want.name == nil or stack.name == want.name)
-            and (want.damage == nil or stack.damage == want.damage) then
+        if okStack and isOutput(want, stack) then
             if found then
                 return nil, "'" .. tostring(want.label) .. "' matches more than one craftable"
                     .. " -- give the fake pattern's output a name nothing else crafts"
@@ -794,10 +870,157 @@ function supply.hatchLitres(plasma, cfg)
     return (cfg.hatchMeteors or 64) * plasma.consumed
 end
 
+-- ---- what the MAIN net is already making ------------------------------------
+--
+-- The crafting CPUs, and which of them are busy making something this catalog
+-- would otherwise ask for. This is the guard against re-ordering a shortfall that
+-- is already being worked on -- see the long note on supply.plan for why that
+-- matters and what it used to cost.
+--
+-- The AECraftingJob handle a request hands back is NOT a substitute for this. It
+-- describes ONE request made by THIS run: it says nothing about an order the
+-- player placed by hand, or one this controller placed before it was restarted,
+-- and it is gone from memory the moment the process is. The CPU is the main net's
+-- own record, and it outlives all of that.
+--
+-- ---- what a CPU can be asked ----
+--   getCpus()          -> AECpuMetadata[] { name, busy, storage, coprocessors, cpu }
+--                         ONE component call for the whole bank, and `busy` comes
+--                         with it -- which is what makes this affordable.
+--   cpu.finalOutput()  -> the ItemStack the whole job is FOR, not the sub-craft it
+--                         happens to be running. A CPU making the Infinity ingots
+--                         that a fake pattern needs still reports the fake
+--                         pattern's output, which is exactly the attribution
+--                         wanted here. Its `size` is what is LEFT to make, so it
+--                         falls towards zero as the job delivers.
+--
+-- finalOutput is a component call PER BUSY CPU, and a call that is not direct
+-- costs a tick. Idle CPUs are skipped on the `busy` flag that came free with the
+-- listing, and the caller is expected to run this only on the cycles it actually
+-- plans on (main.lua does).
+--
+-- The documentation warns that finalOutput needs a Crafting Monitor in the CPU
+-- multiblock to answer at all. A busy CPU that will not say what it is making is
+-- COUNTED AND REPORTED rather than assumed empty -- but it does not block
+-- restocking, because a bank with no monitors anywhere would otherwise wedge the
+-- supply line permanently, which is worse than the fault being fixed.
+--
+-- Returns coming, info:
+--   coming  { [key] = { units, items, cpus, unknown } } -- only keys being made
+--           units    in the units plan compares against: kits, or litres
+--           items    the OUTPUT ITEMS still to come, which is what AE2 counts
+--           unknown  a matching CPU would not say how much is left
+--   info    { cpus, busy, matched, unreadable, error,
+--             jobs = { { cpu, label, size, key }, ... } }
+--           jobs is one entry per BUSY cpu, in the order the bank reported them,
+--           with `key` set only where it matched a catalog entry -- so `stock cpus`
+--           shows exactly what the planner saw, rather than re-deriving it and
+--           being subtly kinder than the code that matters.
+function supply.inFlight(itf, catalog)
+    local coming = {}
+    local info = { cpus = 0, busy = 0, matched = 0, unreadable = 0, jobs = {} }
+
+    if not itf or itf.getCpus == nil then
+        info.error = "the supply interface cannot list the main net's crafting CPUs"
+            .. " -- it has no getCpus"
+        return coming, info
+    end
+
+    -- Only entries whose real output has been resolved can be recognised on a CPU:
+    -- what the CPU reports is the item, and for a renamed fake output the pattern
+    -- slot's own name is a different item entirely (see resolveOutput). An entry
+    -- without one cannot be requested either, so nothing is lost by skipping it.
+    local wanted = {}
+    for _, e in ipairs(catalog or {}) do
+        local key = supply.keyOf(e)
+        if key and e.output and e.output.label then
+            wanted[#wanted + 1] = { entry = e, key = key, want = e.output }
+        end
+    end
+    if #wanted == 0 then
+        info.note = "no catalog entry has a resolved output, so nothing on a CPU"
+            .. " could be recognised -- catalog() needs a database"
+        return coming, info
+    end
+
+    local ok, cpus = pcall(itf.getCpus)
+    if not ok then
+        info.error = "getCpus errored (" .. tostring(cpus) .. ")"
+        return coming, info
+    end
+    if type(cpus) ~= "table" then
+        info.error = "getCpus returned " .. type(cpus)
+        return coming, info
+    end
+
+    for _, meta in pairs(cpus) do
+        if type(meta) == "table" and meta.cpu ~= nil then
+            info.cpus = info.cpus + 1
+            -- `busy` rides along with the listing, so an idle CPU costs nothing.
+            -- Where a build does not report it, ask -- one call, and still cheaper
+            -- than reading the output of a CPU that is doing nothing.
+            local busy = meta.busy
+            if busy == nil then
+                local okBusy, b = pcall(meta.cpu.isBusy)
+                busy = okBusy and b == true
+            end
+
+            if busy then
+                info.busy = info.busy + 1
+                local seen = { cpu = meta.name }
+                info.jobs[#info.jobs + 1] = seen
+
+                local okOut, stack = pcall(meta.cpu.finalOutput)
+                if not okOut or type(stack) ~= "table" then
+                    info.unreadable = info.unreadable + 1
+                else
+                    seen.label, seen.size = stack.label, tonumber(stack.size)
+                    for _, w in ipairs(wanted) do
+                        if isOutput(w.want, stack) then
+                            seen.key = w.key
+                            local rec = coming[w.key]
+                            if not rec then
+                                rec = { units = 0, items = 0, cpus = 0, unknown = false }
+                                coming[w.key] = rec
+                            end
+                            rec.cpus = rec.cpus + 1
+                            info.matched = info.matched + 1
+
+                            local size = seen.size
+                            if size and size > 0 then
+                                rec.items = rec.items + size
+                                -- Items back into the units the target is set in. One
+                                -- craft is worth perCraft of them and produces
+                                -- outputCount items, so an output that stacks is
+                                -- divided out here rather than being counted as one
+                                -- craft apiece.
+                                rec.units = rec.units
+                                    + size * (w.entry.perCraft or 0)
+                                        / math.max(1, w.entry.outputCount or 1)
+                            else
+                                -- Something IS being made and how much is the one
+                                -- thing that cannot be inferred. Marked, so the
+                                -- planner waits rather than ordering on top of it.
+                                rec.unknown = true
+                            end
+                            break       -- one CPU makes one thing
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return coming, info
+end
+
 -- State of a crafting job: "computing" | "done" | "failed" | "canceled".
 -- Fake-crafting patterns finish as soon as their inputs are pushed, so this
 -- settles quickly -- but it is still polled rather than waited on, so several
 -- requests can be in flight together.
+--
+-- This tracks ONE request, and only until AE2 accepts it. What happens to the
+-- goods afterwards is supply.inFlight's question, not this one's.
 function supply.jobState(job)
     if type(job) ~= "table" and type(job) ~= "userdata" then return "failed" end
     local function ask(name)

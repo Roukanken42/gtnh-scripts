@@ -286,6 +286,13 @@ cfg.control = {
     -- second order; this only covers the tick or two between the goods being
     -- pushed and the network showing them. Short on purpose -- if a craft really
     -- did under-deliver, this is how long before the shortfall is noticed.
+    --
+    -- Nothing here has to cover a SLOW craft. What is still being made is read off
+    -- the main net's crafting CPUs every time the controller plans, and subtracted
+    -- from the shortfall before anything is ordered -- so a main net that takes ten
+    -- minutes over a job is waited on rather than asked again. `stock cpus` shows
+    -- what that guard can see; if it cannot read your crafting bank it says so in
+    -- the log, once, at startup.
     settleGrace = 5,
 
     -- How long to keep waiting for a module to finish its operation before
@@ -300,6 +307,9 @@ cfg.control = {
     -- crafting CPU on the main net until the fake pattern's inputs are pushed, so
     -- an uncapped controller could take the whole crafting bank. Plasma is one
     -- because manual mode runs a single plasma fleet-wide.
+    --
+    -- This is about not monopolising the crafting bank, not about avoiding
+    -- duplicate orders -- see settleGrace above for what handles those.
     jobs = { kit = 2, plasma = 1 },
 }
 

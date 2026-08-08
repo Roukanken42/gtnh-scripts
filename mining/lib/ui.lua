@@ -56,8 +56,10 @@
 --                   hatchCapacity, hatchTarget, hatchFluid, staged,
 --                   auto, pending }, ... }   -- pending: a queued change, in words;
 --                   auto: whether the controller may aim this module
---   kits        { { name, have, target, fill, crafts, settling, from }, ... }
---   plasmas     { { tier, name, have, target, fill, crafts, settling, from,
+--   kits        { { name, have, target, fill, crafts, coming, settling, from }, ... }
+--                   coming: units the main net's CPUs are already making, -1 when
+--                   one is making it and will not say how much
+--   plasmas     { { tier, name, have, target, fill, crafts, coming, settling, from,
 --                   active }, ... }
 --   totals      { miners, mining, jobsKit, jobsPlasma, limitKit, limitPlasma }
 --   supplyErr   string | nil
@@ -688,12 +690,24 @@ local function drawStockRow(x, y, inner, e, gutter, gutterColor)
         cell(x, y, SC.bar, 16, "", C.faint, inner)
     end
 
-    -- Why a row that is short is not being acted on. "craft xN" while the job is
-    -- still on a CPU; "settling" for the moment after one lands, while the network
-    -- catches up with what was pushed into it; "no pattern" when there is nothing
-    -- that could deliver it at all.
+    -- Why a row that is short is not being acted on. In order of how much it tells
+    -- you: "no pattern" when nothing could ever deliver it; "+2.05k" for what the
+    -- main net's crafting CPUs are already making, in this row's own units, which is
+    -- the reason a short row is being left alone; "craft xN" for a request AE2 has
+    -- not yet put on a CPU; "settling" for the moment after one lands, while the
+    -- network catches up with what was pushed into it.
+    --
+    -- The middle one is the line that matters. A row at 12% with nothing in this
+    -- column is a supply line in trouble; a row at 12% with "+2.05k" is one that is
+    -- simply waiting, and telling them apart is the whole point of reading the CPUs.
     if e.missing then
         cell(x, y, SC.job, 11, "no pattern", C.crit, inner)
+    elseif (e.coming or 0) > 0 then
+        cell(x, y, SC.job, 9, "+" .. human(e.coming), C.accent2, inner)
+    elseif e.coming == -1 then
+        -- Being made, and the CPU would not say how much. Distinct from a figure,
+        -- because it is also why nothing more is being ordered for this row.
+        cell(x, y, SC.job, 9, "+?", C.accent2, inner)
     elseif (e.crafts or 0) > 0 then
         cell(x, y, SC.job, 9, "craft x" .. e.crafts, C.accent2, inner)
     elseif e.settling then

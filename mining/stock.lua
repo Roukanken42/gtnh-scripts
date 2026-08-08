@@ -15,6 +15,7 @@ local ctx = cli.start({
         { "stock",                   "what is on offer, and stock against target" },
         { "stock list",              "the same" },
         { "stock patterns",          "raw pattern dump -- run this one first" },
+        { "stock cpus",              "what the main net's crafting bank is making" },
         { "stock <material> [kits]", "push kits of a drone material (default 1)" },
         { "stock plasma <name> [L]", "push litres of a plasma pattern" },
         { "stock auto",              "request whatever the targets say is missing" },
@@ -27,6 +28,9 @@ local ctx = cli.start({
         "Consumables cross from the main net through fake crafting patterns: "
             .. "requesting one pushes that pattern's INPUTS over. The output is a "
             .. "cosmetic handle, so what a pattern is FOR is read off its inputs.",
+        "Nothing is ordered that a crafting CPU is already making, so a busy main "
+            .. "net is waited on rather than piled on. `stock cpus` is how to see "
+            .. "what that guard can see -- a bank it cannot read plans blind.",
         "The supply interface address and the target levels live in config.lua.",
     },
 }, ...)
@@ -82,6 +86,33 @@ local function targetFor(entry)
     if entry.kind == "kit" then return (scfg.target or {})[entry.material] end
     if entry.kind == "plasma" then return (scfg.plasma or {})[entry.plasma.name] end
     return nil
+end
+
+-- What a crafting CPU is already making for a catalog key, as a column. "?" is a
+-- CPU that is demonstrably making it and would not say how much -- which is not the
+-- same as none, and is the case that stops an order rather than shrinking one.
+local function comingText(coming, key)
+    local c = key and coming and coming[key]
+    if not c then return "-" end
+    if c.unknown then return "?" end
+    return tostring(math.floor((c.units or 0) + 0.5))
+end
+
+-- Why the guard might be seeing less than the whole crafting bank. Printed under
+-- anything that plans, because a blind guard and an idle bank look the same from
+-- the outside and only one of them will re-order what is already on its way.
+local function reportCpus(info)
+    if info.error then
+        print("  (the crafting bank could not be read: " .. info.error .. ")")
+        print("   nothing can be told about what is already being made, so a slow")
+        print("   main net may be asked for the same thing twice")
+    elseif info.note then
+        print("  (" .. info.note .. ")")
+    elseif info.unreadable > 0 then
+        print(string.format("  (%d of %d busy CPU(s) would not say what they are "
+            .. "making -- finalOutput needs a Crafting Monitor in the CPU)",
+            info.unreadable, info.busy))
+    end
 end
 
 -- Blocks until a craft request settles. Fake-crafting patterns finish as soon as
@@ -179,8 +210,12 @@ local function cmdList()
     end
 
     local stock = supply.stock(catalog, net)
-    print(string.format("%-16s %-22s %-9s %-9s %s",
-        "KIND", "WHAT", "HAVE", "TARGET", "PER CRAFT"))
+    -- COMING is read off the main net's crafting CPUs, and it is what turns "this
+    -- is 2,000 kits short" into either "and nothing is happening about it" or "and
+    -- it is already being made". The plan below acts on the difference.
+    local coming, cpuInfo = supply.inFlight(itf, catalog)
+    print(string.format("%-16s %-22s %-9s %-9s %-9s %s",
+        "KIND", "WHAT", "HAVE", "TARGET", "COMING", "PER CRAFT"))
     for _, entry in ipairs(catalog) do
         local what, have, unit
         if entry.kind == "kit" then
@@ -194,24 +229,78 @@ local function cmdList()
             have = supply.kitsInStock(entry, stock.items)
         end
         local target = targetFor(entry)
-        print(string.format("%-16s %-22s %-9s %-9s %d %s",
+        print(string.format("%-16s %-22s %-9s %-9s %-9s %d %s",
             entry.kind, what, tostring(have) .. " " .. unit,
-            target and tostring(target) or "-", entry.perCraft or 0, unit))
+            target and tostring(target) or "-",
+            comingText(coming, supply.keyOf(entry)), entry.perCraft or 0, unit))
     end
 
     for _, entry in ipairs(unknown) do
         print(string.format("  ? %-30s %s", tostring(entry.label), entry.reason or ""))
     end
 
-    local work, notes = supply.plan(catalog, stock, scfg, {})
+    local work, notes = supply.plan(catalog, stock, scfg, {}, coming)
     if #work == 0 and #notes == 0 then
-        print("Everything at target.")
+        print("Nothing to order: everything is at target or already being made.")
     end
     for _, w in ipairs(work) do
-        print(string.format("  short %-20s %d of %d -- %d craft(s)",
-            w.key, w.have, w.target, w.crafts))
+        print(string.format("  short %-20s %d of %d%s -- %d craft(s)",
+            w.key, w.have, w.target,
+            (w.coming or 0) > 0
+                and string.format(", %d on the way", math.floor(w.coming + 0.5)) or "",
+            w.crafts))
     end
     for _, n in ipairs(notes) do print("  note: " .. n) end
+    reportCpus(cpuInfo)
+end
+
+-- What the main net's crafting bank is busy with, and which of it is ours. The
+-- companion to `stock patterns`: that one says what COULD be pushed across, this
+-- one says what is being made right now -- and it is the same read the planner
+-- makes, so a job listed here as ours is one that will not be ordered again.
+local function cmdCpus()
+    local catalog = getCatalog()
+    local coming, info = supply.inFlight(itf, catalog)
+
+    if info.error then
+        print("Cannot read the crafting bank: " .. info.error)
+        print("The adapter has to be on an interface belonging to the MAIN net --")
+        print("the same one the patterns live on.")
+        return
+    end
+    if info.note then
+        -- The bank was never asked, so the counts below would all read zero and
+        -- look like an idle main net rather than a scan that could not start.
+        print("Nothing to look for: " .. info.note)
+        print("Run `setup`, or set cfg.database, then try again.")
+        return
+    end
+
+    print(string.format("%d CPU(s) on the main net, %d busy.", info.cpus, info.busy))
+    if #info.jobs == 0 then
+        print("  Nothing is being crafted.")
+    end
+    for _, j in ipairs(info.jobs) do
+        local name = (j.cpu and j.cpu ~= "") and j.cpu or "(unnamed)"
+        if not j.label then
+            print(string.format("  %-20s ? would not say what it is making", name))
+        else
+            print(string.format("  %-20s %s x%s%s", name, tostring(j.label),
+                tostring(j.size or "?"),
+                j.key and ("   <- ours: " .. j.key) or ""))
+        end
+    end
+
+    local any = false
+    for key, rec in pairs(coming) do
+        if not any then print("Already on its way:"); any = true end
+        print(string.format("  %-22s %s (%d output item(s) across %d CPU(s))",
+            key, rec.unknown and "amount unknown"
+                or (math.floor(rec.units + 0.5) .. " unit(s)"),
+            math.floor(rec.items or 0), rec.cpus or 0))
+    end
+    if not any then print("None of it is anything this catalog would ask for.") end
+    reportCpus(info)
 end
 
 local function cmdMaterial(name, kits)
@@ -251,18 +340,30 @@ end
 local function cmdAuto()
     local catalog = getCatalog()
     local stock = supply.stock(catalog, net)
+    -- The crafting bank is consulted here exactly as the controller consults it.
+    -- Run by hand while the controller is also running -- or twice in a row while
+    -- the main net is slow -- this is what stops the second run ordering the first
+    -- run's shortfall all over again.
+    local coming, cpuInfo = supply.inFlight(itf, catalog)
     -- A fresh latch each run: the hysteresis in supply.plan is for the
     -- controller's loop, where the table persists across cycles.
-    local work, notes = supply.plan(catalog, stock, scfg, {})
+    local work, notes = supply.plan(catalog, stock, scfg, {}, coming)
     if #work == 0 then
-        print("Nothing to request -- everything at target.")
+        print("Nothing to request -- everything is at target or already being made.")
     end
     for _, w in ipairs(work) do
-        print(string.format("%s: %d of %d, requesting %d craft(s)",
-            w.key, w.have, w.target, w.crafts))
+        if (w.coming or 0) > 0 then
+            print(string.format("%s: %d of %d, %d already on the way, "
+                .. "requesting the other %d craft(s)", w.key, w.have, w.target,
+                math.floor(w.coming + 0.5), w.crafts))
+        else
+            print(string.format("%s: %d of %d, requesting %d craft(s)",
+                w.key, w.have, w.target, w.crafts))
+        end
         request(w.entry, w.crafts, w.key)
     end
     for _, n in ipairs(notes) do print("note: " .. n) end
+    reportCpus(cpuInfo)
 end
 
 -- ---- dispatch --------------------------------------------------------------
@@ -273,6 +374,8 @@ if a1 == nil or a1 == "list" or a1 == "ls" then
     cmdList()
 elseif a1 == "patterns" or a1 == "raw" then
     cmdPatterns()
+elseif a1 == "cpus" or a1 == "cpu" then
+    cmdCpus()
 elseif a1 == "auto" then
     cmdAuto()
 elseif a1 == "plasma" and a2 then

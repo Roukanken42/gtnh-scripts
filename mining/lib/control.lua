@@ -20,6 +20,24 @@
 --    concurrency is limited per kind and the plan's emptiest-first order decides
 --    who goes now and who waits for the next cycle.
 --
+--    The cap is the last of three guards, not the only one, and they cover
+--    different windows -- which is worth keeping straight, because the failure they
+--    exist to stop is a feedback loop that gets worse the closer it comes to
+--    working:
+--
+--      supply.inFlight   what the main net is ALREADY making, read off its crafting
+--                        CPUs. The real guard, and the only one that survives a
+--                        restart or notices an order somebody placed by hand.
+--                        supply.plan subtracts it before deciding anything.
+--      Jobs:has          the gap the CPUs cannot cover: between asking AE2 for
+--                        something and AE2 putting it on a CPU, nothing is crafting
+--                        it and nothing would say so.
+--      Jobs:isCooling    the gap after: goods pushed a tick ago that the local net
+--                        has not listed yet.
+--
+--    So the caps are about not monopolising the crafting bank, and no longer about
+--    stopping duplicate orders -- which they never really did.
+--
 -- Everything except the two component-touching helpers at the bottom is pure, so
 -- the caps, the demand arithmetic and the top-up threshold can be exercised
 -- off-machine the way target.lua is.
@@ -208,8 +226,14 @@ function Jobs:room(kind)
     return limit - self:count(kind)
 end
 
--- True if something is already being fetched for `key` -- one job per material or
--- plasma at a time, so a slow craft cannot be requested again every cycle.
+-- True if a request for `key` has been made and AE2 has not settled it yet.
+--
+-- This covers ONE window, and a narrow one: a request that is still computing has
+-- not reached a crafting CPU, so supply.inFlight cannot see it and would report
+-- nothing coming. Once AE2 has taken the job the CPUs know about it, and from then
+-- on they are what the planner subtracts -- which is what lets a target that has
+-- gone UP be topped up while a craft is still running, rather than being refused
+-- until it finishes.
 function Jobs:has(key)
     for _, j in ipairs(self.active) do
         if j.key == key then return true end
@@ -249,6 +273,11 @@ end
 -- Requests as much of `work` (from supply.plan, already sorted emptiest-first) as
 -- the caps allow. Returns the jobs started, how many were held back, and any
 -- errors -- a refused request is reported rather than retried in a tight loop.
+--
+-- What each item asks for is the RESIDUAL: plan has already taken off whatever the
+-- main net's CPUs are making, so an item that appears here is genuinely short of
+-- everything in flight. Ordering it is safe even mid-craft -- AE2 merges the
+-- request into the job already running for that output.
 function control.issue(itf, work, jobs, at)
     local issued, blocked, errs = {}, 0, {}
     for _, w in ipairs(work or {}) do
@@ -263,10 +292,11 @@ function control.issue(itf, work, jobs, at)
             local job, items = supply.request(itf, w.entry, w.crafts)
             if job then
                 issued[#issued + 1] = jobs:add(kind, w.key, job, w.crafts, at, {
-                    -- Everything needed to check the delivery against the promise.
+                    -- Everything needed to check the delivery against the promise,
+                    -- and to say why the order is smaller than the shortfall.
                     before = w.have, target = w.target, perCraft = w.perCraft,
                     expected = w.perCraft and (w.crafts * w.perCraft) or nil,
-                    items = items, capped = w.capped,
+                    items = items, capped = w.capped, coming = w.coming,
                 })
             else
                 errs[#errs + 1] = w.key .. ": " .. tostring(items)

@@ -279,6 +279,11 @@ local jobs = control.newJobs(jobLimits)
 -- controller works at these in the background instead of waiting.
 local queue = control.newQueue()
 local satisfied = {}            -- hysteresis latch, carried across cycles
+-- What the main net's crafting CPUs are already making for us, refreshed on every
+-- cycle that plans. Held here rather than inside the cycle so the dashboard can
+-- show it on the repaints in between.
+local coming = {}
+local cpuWarned = false         -- the "cannot see the crafting bank" warning, once
 -- The plasma most of the fleet is on. DISPLAY ONLY -- the KPI card and the marker
 -- in the plasma picker. No decision reads it: what a given module should be on is
 -- control.plasmaFor, which deliberately never consults the fleet.
@@ -817,18 +822,54 @@ local function runCycle()
         doneStock()
     end
 
-    -- Planning only ever happens against a FRESH reading. The plan compares the
-    -- target with what is in the net and nothing else, so running it on a stale
-    -- one would see a shortfall that has already been filled and order it again --
-    -- which is the very thing being fixed.
+    -- Planning only ever happens against a FRESH reading. What the plan compares
+    -- the target with is what is in the net, so running it on a stale one would see
+    -- a shortfall that has already been filled and order it again. The reading
+    -- covers goods that have LANDED; the CPU scan just below covers the ones still
+    -- being made, and it takes both to stop a duplicate order.
     local work, notes = {}, {}
     local donePlan = profile.span("plan and request")
     if stockFresh and itf and #catalog > 0 then
+        -- What the main net is ALREADY making, before deciding to ask it for more.
+        -- Without this the controller sees only the local net, and a main net that
+        -- is slow to deliver looks exactly like one that never got the order --
+        -- so the same shortfall is ordered again every cycle, each order takes
+        -- another crafting CPU, and the main net gets slower still. Read here
+        -- rather than on the fast cadence because it costs a component call per
+        -- BUSY CPU, and because this is the only place the answer is used.
+        --
+        -- The span's CALL COUNT under --profile understates it: the cpu values
+        -- come back inside getCpus' result and never pass through profile.proxy,
+        -- so only the getCpus itself is counted. The duration is honest, which is
+        -- the number that matters when this shows up as the slow phase.
+        local doneCpus = profile.span("read main-net crafting CPUs")
+        local cpuInfo
+        coming, cpuInfo = supply.inFlight(itf, catalog)
+        doneCpus()
+
+        -- Said once, not every cycle. Either way the controller carries on -- a
+        -- crafting bank it cannot read is a reason to plan blind, not a reason to
+        -- stop feeding the fleet -- so this has to be loud enough to explain the
+        -- duplicate orders that follow.
+        if not cpuWarned then
+            if cpuInfo.error then
+                cpuWarned = true
+                log("cannot see the main net's crafting jobs: " .. cpuInfo.error)
+                log("  restocking plans on the local net alone, so a slow main net")
+                log("  may be asked for the same thing more than once")
+            elseif cpuInfo.unreadable > 0 and cpuInfo.matched == 0 then
+                cpuWarned = true
+                log(string.format("%d busy CPU(s) would not say what they are making"
+                    .. " -- finalOutput needs a Crafting Monitor in the CPU",
+                    cpuInfo.unreadable))
+            end
+        end
+
         local planCfg = {
             target = kitTargets, plasma = plasmaTargets,
             lowWater = scfg.lowWater, maxCrafts = scfg.maxCrafts,
         }
-        work, notes = supply.plan(catalog, stock, planCfg, satisfied)
+        work, notes = supply.plan(catalog, stock, planCfg, satisfied, coming)
         if not paused then
             local issued, blocked, errs = control.issue(itf, work, jobs, computer.uptime())
             for _, j in ipairs(issued) do
@@ -839,6 +880,14 @@ local function runCycle()
                 log(string.format("requested %s: %d craft(s) = %d %s (%d short of %d)",
                     j.key, j.crafts, j.expected or 0, unit,
                     (j.target or 0) - (j.before or 0), j.target or 0))
+                -- Why an order is smaller than the shortfall. Without this the two
+                -- numbers on the line above simply do not add up, which reads as an
+                -- arithmetic fault rather than as the guard doing its job.
+                if (j.coming or 0) > 0 then
+                    log(string.format("  %d %s of that is already on a crafting CPU"
+                        .. " -- only the difference was ordered",
+                        math.floor(j.coming + 0.5), unit))
+                end
                 if j.capped then
                     log(string.format("  capped at %d of %d craft(s) by "
                         .. "cfg.supply.maxCrafts", j.crafts, j.capped))
@@ -875,6 +924,18 @@ local function runCycle()
     local crafting = {}
     for _, j in ipairs(jobs:list()) do crafting[j.key] = (crafting[j.key] or 0) + j.crafts end
 
+    -- How much of a shortfall is already being made on the main net, in the units
+    -- the row is measured in. This is the difference between a row that is stuck at
+    -- 12% and one that is at 12% AND being worked on -- which, before the CPUs were
+    -- consulted, looked identical and was the reason to keep ordering.
+    local function comingFor(key)
+        local c = coming[key]
+        if not c then return nil end
+        if c.unknown then return -1 end          -- being made, amount unknown
+        if (c.units or 0) <= 0 then return nil end
+        return math.floor(c.units + 0.5)
+    end
+
     local patternFor = {}
     for _, e in ipairs(catalog) do
         if e.kind == "plasma" then patternFor[e.plasma.name] = true end
@@ -895,7 +956,8 @@ local function runCycle()
                 name = material, have = have, target = target,
                 settling = jobs:isCooling(material, computer.uptime()) or nil,
                 fill = target > 0 and math.min(1, have / target) or 1,
-                crafts = crafting[material], from = from[material],
+                crafts = crafting[material], coming = comingFor(material),
+                from = from[material],
                 -- supply.plan only ever walks the catalog, so a material with no
                 -- pattern is not short -- it is unreachable, and would otherwise
                 -- sit at 0% with nothing visibly wrong.
@@ -913,7 +975,8 @@ local function runCycle()
             have = have, target = target,
             settling = jobs:isCooling(p.name, computer.uptime()) or nil,
             fill = target > 0 and math.min(1, have / target) or (have > 0 and 1 or 0),
-            crafts = crafting[p.name], from = from[p.name],
+            crafts = crafting[p.name], coming = comingFor(p.name),
+            from = from[p.name],
             missing = (not patternFor[p.name]) and itf ~= nil or nil,
             active = activePlasma ~= nil and p.tier == activePlasma.tier,
         }

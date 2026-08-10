@@ -179,6 +179,10 @@ local acfg = cfg.auto or {}
 local interval = math.max(ccfg.interval or 5, 1)
 local uiRefresh = math.max(ccfg.uiRefresh or 1, 0.1)
 local jobLimits = ccfg.jobs or control.JOBS
+-- How long an order that nothing can account for is waited on before it is given up
+-- and the shortfall may be asked for again. Only ever reached when the crafting bank
+-- cannot be read; see control.lua's order book.
+local orderTimeout = ccfg.orderTimeout or control.ORDER_TIMEOUT
 
 -- Automatic mode off for this run, whatever the modes file says. Not the same as
 -- switching every module to MANUAL, which would be written down and would still be
@@ -716,6 +720,12 @@ local function runCycle()
             local now = levels and levels[j.key]
             if now and j.before and j.expected then
                 local got = now - j.before
+                -- The goods are here, so the order is over and the next shortfall may
+                -- be ordered at once. Anything less than the promise leaves the order
+                -- standing: AE2 has finished with the REQUEST, which is not the same
+                -- as the main net having finished making it, and re-ordering on that
+                -- difference is what used to bury the crafting bank.
+                jobs:delivered(j, got)
                 local unit = (j.kind == "plasma") and " L" or " kits"
                 local line = string.format("stocked %s: %d -> %d%s (%+d, expected %+d "
                     .. "from %d craft(s))", j.key, j.before, now, unit, got,
@@ -875,7 +885,8 @@ local function runCycle()
     -- the target with is what is in the net, so running it on a stale one would see
     -- a shortfall that has already been filled and order it again. The reading
     -- covers goods that have LANDED; the CPU scan just below covers the ones still
-    -- being made, and it takes both to stop a duplicate order.
+    -- being made, and the order book covers what neither can see -- it takes all
+    -- three to stop a duplicate order.
     local work, notes = {}, {}
     local donePlan = profile.span("plan and request")
     if stockFresh and itf and #catalog > 0 then
@@ -897,28 +908,54 @@ local function runCycle()
         doneCpus()
 
         -- Said once, not every cycle. Either way the controller carries on -- a
-        -- crafting bank it cannot read is a reason to plan blind, not a reason to
-        -- stop feeding the fleet -- so this has to be loud enough to explain the
-        -- duplicate orders that follow.
-        if not cpuWarned then
+        -- crafting bank it cannot read is a reason to lean on the order book, not a
+        -- reason to stop feeding the fleet -- so this has to be loud enough to
+        -- explain why restocking then goes at the pace of orderTimeout.
+        if not cpuWarned and cpuInfo.blind then
+            cpuWarned = true
             if cpuInfo.error then
-                cpuWarned = true
                 log("cannot see the main net's crafting jobs: " .. cpuInfo.error)
-                log("  restocking plans on the local net alone, so a slow main net")
-                log("  may be asked for the same thing more than once")
-            elseif cpuInfo.unreadable > 0 and cpuInfo.matched == 0 then
-                cpuWarned = true
+            elseif cpuInfo.note then
+                log("nothing on the main net's crafting CPUs can be recognised: "
+                    .. cpuInfo.note)
+            else
                 log(string.format("%d busy CPU(s) would not say what they are making"
                     .. " -- finalOutput needs a Crafting Monitor in the CPU",
                     cpuInfo.unreadable))
             end
+            log("  so restocking waits on its own order book instead: one order per")
+            log(string.format("  material or plasma at a time, held for up to %ds."
+                .. " `stock cpus` shows what can be seen.", orderTimeout))
+        end
+
+        -- Orders the bank has finished with, before planning against what is left.
+        -- Blind or not, an order stays on the book until something says it is over;
+        -- what the bank CAN see is the quickest and cleanest way for it to end.
+        --
+        -- The ones it strikes off need no log line: a readable bank that is not making
+        -- something means the goods either landed (logged above) or were eaten on
+        -- arrival, which is what a mining fleet does to kits. The order simply ends.
+        local _, expired = jobs:reconcile(computer.uptime(), coming, cpuInfo,
+            orderTimeout)
+        for _, j in ipairs(expired) do
+            local unit = (j.kind == "plasma") and "L" or "kits"
+            log(string.format("giving up on the order for %s (%d %s, %ds ago) -- no"
+                .. " crafting CPU would say whether it is still being made",
+                j.key, math.floor((j.expected or 0) + 0.5), unit,
+                math.floor(computer.uptime() - (j.since or 0))))
+            log("  add a Crafting Monitor to the crafting bank, or raise"
+                .. " cfg.control.orderTimeout")
         end
 
         local planCfg = {
             target = kitTargets, plasma = plasmaTargets,
             lowWater = scfg.lowWater, maxCrafts = scfg.maxCrafts,
         }
-        work, notes = supply.plan(catalog, stock, planCfg, satisfied, coming)
+        -- Planned against BOTH readings: what the CPUs are making, and what this
+        -- controller has asked for and not yet seen arrive. Either one alone leaves a
+        -- hole, and plasma fell straight through both of them.
+        work, notes = supply.plan(catalog, stock, planCfg, satisfied,
+            control.inFlight(coming, cpuInfo, jobs))
         if not paused then
             local issued, blocked, errs = control.issue(itf, work, jobs, computer.uptime())
             for _, j in ipairs(issued) do

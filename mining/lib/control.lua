@@ -26,12 +26,15 @@
 --    working:
 --
 --      supply.inFlight   what the main net is ALREADY making, read off its crafting
---                        CPUs. The real guard, and the only one that survives a
---                        restart or notices an order somebody placed by hand.
+--                        CPUs. The best guard when it can see: it survives a restart
+--                        and notices an order somebody placed by hand.
 --                        supply.plan subtracts it before deciding anything.
---      Jobs:has          the gap the CPUs cannot cover: between asking AE2 for
---                        something and AE2 putting it on a CPU, nothing is crafting
---                        it and nothing would say so.
+--      the order book    what THIS controller has asked for and not yet seen
+--                        arrive (Jobs, below). Covers everything the CPU read
+--                        cannot: the window before AE2 puts a request on a CPU, and
+--                        -- the one that mattered -- a crafting bank with no
+--                        Crafting Monitor, which reports every busy CPU as
+--                        unreadable and so looks exactly like an idle one.
 --      Jobs:isCooling    the gap after: goods pushed a tick ago that the local net
 --                        has not listed yet.
 --
@@ -175,13 +178,62 @@ function control.plasmaFor(queued, told, inHatch)
     return inHatch
 end
 
--- ---- restock jobs -----------------------------------------------------------
+-- ---- the order book ----------------------------------------------------------
+--
+-- What has been asked for and not yet seen arrive. One entry per REQUEST:
+--
+--   kind, key     what it was for, keyed as supply.keyOf keys everything
+--   job           the AECraftingJob handle AE2 handed back
+--   crafts        how many crafts were asked for
+--   expected      what those crafts should deliver, in the key's own units
+--   since         uptime when it was placed
+--   state         AE2's verdict, from supply.jobState
+--   awaiting      AE2 has finished with the REQUEST; the goods are still unaccounted
+--                 for. See below -- this is the whole point of the book.
+--   landedAt      uptime when it started awaiting
+--
+-- ---- WHY AN ORDER OUTLIVES ITS JOB HANDLE ------------------------------------
+-- The handle answers "has AE2 finished with my request", which is NOT the same
+-- question as "have the goods arrived", and the difference is where plasma went
+-- wrong. A hatchful of plasma is tens of thousands of litres, so an order is
+-- thousands of crafts of a pattern that pushes a few hundred litres apiece; AE2
+-- settles the request long before the main net has actually made all of it.
+--
+-- The book used to be emptied on that verdict, leaving nothing but the CPU read to
+-- stop a re-order -- and the CPU read goes blind on a bank with no Crafting Monitor
+-- (see supply.inFlight's note on `blind`). Blind guard plus emptied book meant the
+-- same enormous shortfall was ordered every single cycle, each order taking another
+-- crafting CPU: plasma ordered far faster than any main net could make it.
+--
+-- So a settled order stays in the book, AWAITING, and is only struck off when
+-- something demonstrates it is finished. Every one of these is evidence, not a
+-- guess -- the last is a backstop, and it says so in the log:
+--
+--   the goods arrived        the level rose by what was promised (Jobs:delivered)
+--   AE2 gave up             hasFailed / isCanceled -- nothing is coming, and the
+--                           shortfall may be re-ordered at once
+--   the bank says no        a READABLE crafting bank with no CPU making it
+--                           (Jobs:reconcile). This is the normal end of an order
+--                           whose goods were eaten as fast as they landed, which is
+--                           exactly what a mining fleet does to kits.
+--   orderTimeout           nothing above could be established for that long. Bounds
+--                           the wait a blind bank imposes, so a monitor-less bank
+--                           orders slowly rather than never.
+--
+-- While an order is in the book, control.issue will not place another for that key,
+-- and control.inFlight counts what it promised against the shortfall.
+
+-- How long to keep waiting on an order nothing can prove anything about. Only
+-- reached when the crafting bank cannot be read, so it is a backstop rather than an
+-- expected wait -- long, because the thing it is waiting for is a main net that is
+-- slow, and short waits are what caused the runaway in the first place.
+control.ORDER_TIMEOUT = 600
 
 local Jobs = {}
 Jobs.__index = Jobs
 control.Jobs = Jobs
 
--- Tracker for in-flight restock requests, with a cap per kind. `limits` is
+-- Tracker for outstanding restock orders, with a cap per kind. `limits` is
 -- { kit = n, plasma = n }; a kind not listed is unlimited.
 function control.newJobs(limits)
     return setmetatable({
@@ -189,26 +241,89 @@ function control.newJobs(limits)
     }, Jobs)
 end
 
--- Advances every job and drops the ones that have settled. Fake-crafting patterns
--- finish the moment their inputs are pushed, so this is normally one cycle's wait.
--- Returns the finished ones, each carrying .state ("done"/"failed"/"canceled").
+-- Advances every job handle. Returns the orders AE2 has just settled, each carrying
+-- .state ("done"/"failed"/"canceled") -- the caller re-reads the local net for those
+-- and reports what turned up.
 --
--- A settled job starts its key SETTLING (see below). The caller is expected to
--- re-read the local net when this returns anything: that reading, not any
--- bookkeeping here, is what stops the same shortfall being ordered twice.
+-- A settled order does NOT leave the book here. A failed or canceled one does: there
+-- is nothing coming for it, so the shortfall should be re-ordered immediately. A done
+-- one starts AWAITING, and Jobs:delivered / Jobs:reconcile decide when it is finished.
 function Jobs:poll(at, grace)
-    local finished, running = {}, {}
+    local landed, keep = {}, {}
     for _, j in ipairs(self.active) do
-        j.state = supply.jobState(j.job)
-        if j.state == "computing" then
-            running[#running + 1] = j
+        if j.awaiting then
+            -- Already settled with AE2; the handle has nothing more to say.
+            keep[#keep + 1] = j
         else
-            finished[#finished + 1] = j
-            self.cooling[j.key] = (at or 0) + (grace or control.SETTLE_GRACE)
+            j.state = supply.jobState(j.job)
+            if j.state == "computing" then
+                keep[#keep + 1] = j
+            else
+                landed[#landed + 1] = j
+                self.cooling[j.key] = (at or 0) + (grace or control.SETTLE_GRACE)
+                if j.state == "done" then
+                    j.awaiting, j.landedAt = true, at or 0
+                    keep[#keep + 1] = j
+                end
+            end
         end
     end
-    self.active = running
-    return finished
+    self.active = keep
+    return landed
+end
+
+-- Strikes an order off once the goods it promised have turned up: `got` is what the
+-- caller measured the local net rise by, in the key's own units. THE cleanest end to
+-- an order, and the common one -- proof, and it costs no extra reading, since a
+-- settled order is followed by a stock re-read anyway.
+--
+-- Returns true if the order was struck off.
+function Jobs:delivered(j, got)
+    if not j or not j.awaiting then return false end
+    if got == nil or not j.expected then return false end
+    -- Half a unit of slack: plasma litres come back through arithmetic that divides.
+    if got + 0.5 < j.expected then return false end
+    self:forget(j)
+    return true
+end
+
+function Jobs:forget(j)
+    for i, x in ipairs(self.active) do
+        if x == j then table.remove(self.active, i); return end
+    end
+end
+
+-- Decides which AWAITING orders are finished, from what the main net's crafting bank
+-- says. Call right after supply.inFlight, with what it returned.
+--
+--   coming    key -> record, from supply.inFlight
+--   cpuInfo   its info; .blind means this read cannot be trusted to say NO
+--
+-- A readable bank that is not making a key is proof that its order is over, however
+-- little of it arrived -- which is what keeps a fleet that eats kits as fast as they
+-- land from waiting on a timeout every time. A blind bank proves nothing, so those
+-- orders sit until `timeout`.
+--
+-- Returns the orders struck off, and separately the ones given up on -- the caller
+-- logs those, because an order that reached the timeout means the bank cannot be read
+-- and that is worth fixing rather than absorbing.
+function Jobs:reconcile(at, coming, cpuInfo, timeout)
+    timeout = timeout or control.ORDER_TIMEOUT
+    local blind = (cpuInfo == nil) or cpuInfo.blind == true
+    local done, expired, keep = {}, {}, {}
+    for _, j in ipairs(self.active) do
+        if not j.awaiting then
+            keep[#keep + 1] = j
+        elseif not blind and not (coming and coming[j.key]) then
+            done[#done + 1] = j
+        elseif (at or 0) - (j.landedAt or j.since or 0) > timeout then
+            expired[#expired + 1] = j
+        else
+            keep[#keep + 1] = j
+        end
+    end
+    self.active = keep
+    return done, expired
 end
 
 function Jobs:count(kind)
@@ -219,26 +334,32 @@ function Jobs:count(kind)
     return n
 end
 
--- How many more jobs of `kind` may start. math.huge when uncapped.
+-- How many more orders of `kind` may be placed. math.huge when uncapped.
 function Jobs:room(kind)
     local limit = self.limits and self.limits[kind]
     if not limit then return math.huge end
     return limit - self:count(kind)
 end
 
--- True if a request for `key` has been made and AE2 has not settled it yet.
---
--- This covers ONE window, and a narrow one: a request that is still computing has
--- not reached a crafting CPU, so supply.inFlight cannot see it and would report
--- nothing coming. Once AE2 has taken the job the CPUs know about it, and from then
--- on they are what the planner subtracts -- which is what lets a target that has
--- gone UP be topped up while a craft is still running, rather than being refused
--- until it finishes.
+-- True if there is an outstanding order for `key` -- placed and not yet accounted
+-- for. One order per key at a time is the invariant that bounds this whole thing: a
+-- shortfall bigger than any single order (a plasma target is millions of litres) is
+-- ordered in batches, one batch at a time, rather than re-ordered in full every cycle
+-- while the first batch is still being made.
 function Jobs:has(key)
     for _, j in ipairs(self.active) do
         if j.key == key then return true end
     end
     return false
+end
+
+-- What outstanding orders for `key` promised, in the key's own units.
+function Jobs:outstanding(key)
+    local units = 0
+    for _, j in ipairs(self.active) do
+        if j.key == key then units = units + (j.expected or 0) end
+    end
+    return units
 end
 
 -- `extra` carries what the request was FOR -- the level before it, what one craft
@@ -253,6 +374,51 @@ function Jobs:add(kind, key, job, crafts, at, extra)
 end
 
 function Jobs:list() return self.active end
+
+-- ---- what is already on its way ----------------------------------------------
+
+-- The two in-flight readings, folded into the one table supply.plan takes: the main
+-- net's crafting CPUs, plus this controller's own order book over the top.
+--
+-- Per key: { units, unknown, why, quiet, cpus, items, order }
+--
+-- UNITS ARE THE LARGER OF THE TWO, NOT THE SUM. Both measure the same thing from
+-- different ends -- an order that AE2 has put on a CPU is counted by both -- so
+-- adding them would double it. The CPU figure is the better one where it exists: it
+-- falls as the job delivers, and it sees orders this controller never placed. The
+-- book's figure covers the window before AE2 takes the job, and stands in whole when
+-- the bank cannot be read.
+--
+-- `unknown` tells supply.plan to wait rather than order. It is set when a CPU is
+-- making something and will not say how much, and -- the case that matters -- when
+-- the bank is BLIND and an order is outstanding: something is being made, this is
+-- what asked for it, and nothing can say how much of it is left. `quiet` marks the
+-- second one, which is a normal state and not worth a line of log every cycle.
+function control.inFlight(coming, cpuInfo, jobs)
+    local blind = (cpuInfo == nil) or cpuInfo.blind == true
+    local out = {}
+    for key, rec in pairs(coming or {}) do
+        out[key] = {
+            units = rec.units or 0, items = rec.items, cpus = rec.cpus,
+            unknown = rec.unknown == true,
+            why = rec.unknown
+                and "a crafting CPU is already making it and will not say how much"
+                or nil,
+        }
+    end
+    for _, j in ipairs(jobs and jobs:list() or {}) do
+        local e = out[j.key]
+        if not e then e = { units = 0, unknown = false }; out[j.key] = e end
+        e.order = (e.order or 0) + (j.expected or 0)
+        if e.order > e.units then e.units = e.order end
+        if blind then
+            e.unknown, e.quiet = true, true
+            e.why = "an order for it is outstanding and the crafting bank cannot be"
+                .. " read -- see `stock cpus`"
+        end
+    end
+    return out
+end
 
 -- ---- settling ----------------------------------------------------------------
 --
@@ -274,10 +440,16 @@ end
 -- the caps allow. Returns the jobs started, how many were held back, and any
 -- errors -- a refused request is reported rather than retried in a tight loop.
 --
--- What each item asks for is the RESIDUAL: plan has already taken off whatever the
--- main net's CPUs are making, so an item that appears here is genuinely short of
--- everything in flight. Ordering it is safe even mid-craft -- AE2 merges the
--- request into the job already running for that output.
+-- What each item asks for is the RESIDUAL: plan has already taken off whatever is
+-- known to be on its way, so an item that appears here is genuinely short of
+-- everything in flight.
+--
+-- One order per key at a time, though (Jobs:has), and that is not just tidiness. A
+-- second request for the same output does not join the job already running for it:
+-- AE2 computes a fresh job and takes ANOTHER crafting CPU for it. So a shortfall too
+-- big for one order -- a plasma target is millions of litres -- has to be ordered a
+-- batch at a time, waiting for each batch, or the fleet buries the crafting bank in
+-- jobs for the same fluid.
 function control.issue(itf, work, jobs, at)
     local issued, blocked, errs = {}, 0, {}
     for _, w in ipairs(work or {}) do

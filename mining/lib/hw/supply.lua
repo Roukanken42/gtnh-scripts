@@ -255,9 +255,12 @@ end
 --   stock      { items = { [label] = count }, fluids = { [name] = litres } }
 --   cfg        cfg.supply (target / plasma / plasmaPerCraft / lowWater / maxCrafts)
 --   satisfied  caller-owned latch table, carried across cycles for hysteresis
---   coming     what the MAIN net is already making, from supply.inFlight -- keyed
---              the same way, either a plain number of units or the record that
---              function returns. Omitting it plans blind, exactly as before.
+--   coming     what is already on its way for each key -- either a plain number of
+--              units, or a record { units, unknown, why, quiet }. supply.inFlight
+--              reads the first two off the main net's crafting CPUs;
+--              control.inFlight folds the controller's own outstanding orders in
+--              on top, which is what covers a bank this cannot read. Omitting it
+--              plans blind, exactly as before.
 -- Returns a list of { entry, key, have, target, deficit, coming, crafts }, plus a
 -- list of notes for anything that has a target but cannot be acted on.
 --
@@ -307,7 +310,7 @@ function supply.plan(catalog, stock, cfg, satisfied, coming)
     local function onTheWay(key)
         local c = coming and coming[key]
         if type(c) == "number" then return c, false end
-        if type(c) == "table" then return c.units or 0, c.unknown == true end
+        if type(c) == "table" then return c.units or 0, c.unknown == true, c.why, c.quiet end
         return 0, false
     end
 
@@ -327,13 +330,21 @@ function supply.plan(catalog, stock, cfg, satisfied, coming)
         end
 
         local deficit = target - have
-        local onWay, unknown = onTheWay(key)
+        local onWay, unknown, why, quiet = onTheWay(key)
         if unknown then
-            -- A CPU is demonstrably making this and would not say how much. Waiting
-            -- is the only safe answer: ordering the whole deficit on top of an order
-            -- of unknown size is precisely the runaway this guard is here to stop.
-            notes[#notes + 1] = key .. ": short " .. deficit
-                .. ", but a crafting CPU is already making it and will not say how much"
+            -- Something is demonstrably being made for this and how much cannot be
+            -- read. Waiting is the only safe answer: ordering the whole deficit on
+            -- top of an order of unknown size is precisely the runaway this guard is
+            -- here to stop.
+            --
+            -- `quiet` is for the case where the unreadable order is the CONTROLLER'S
+            -- OWN and the dashboard is already showing it -- the normal state of a
+            -- supply line whose crafting bank has no monitor, and a line of log every
+            -- cycle for it would drown everything that matters.
+            if not quiet then
+                notes[#notes + 1] = key .. ": short " .. deficit .. ", but "
+                    .. (why or "a crafting CPU is already making it and will not say how much")
+            end
             return
         end
         -- Covered by what is already on its way. Not a note and not a work item:
@@ -910,12 +921,30 @@ end
 --           units    in the units plan compares against: kits, or litres
 --           items    the OUTPUT ITEMS still to come, which is what AE2 counts
 --           unknown  a matching CPU would not say how much is left
---   info    { cpus, busy, matched, unreadable, error,
+--   info    { cpus, busy, matched, unreadable, blind, error,
 --             jobs = { { cpu, label, size, key }, ... } }
 --           jobs is one entry per BUSY cpu, in the order the bank reported them,
 --           with `key` set only where it matched a catalog entry -- so `stock cpus`
 --           shows exactly what the planner saw, rather than re-deriving it and
 --           being subtly kinder than the code that matters.
+--
+-- ---- WHY `blind` EXISTS ------------------------------------------------------
+-- An absent key in `coming` used to mean two very different things, and the caller
+-- had no way to tell them apart:
+--
+--     nothing is being made for it            -> order away
+--     this read could not find out             -> ordering is a shot in the dark
+--
+-- The second is not a corner case. finalOutput NEEDS A CRAFTING MONITOR in the CPU
+-- multiblock, and a bank without one reports every busy CPU as unreadable -- so the
+-- guard reads "nothing coming" for a bank that is flat out making exactly what was
+-- just ordered, and the shortfall is ordered again, and again. That is the runaway
+-- this whole file exists to prevent, wearing a disguise.
+--
+-- So `blind` is true whenever this read cannot be trusted to say NO: the bank could
+-- not be listed, nothing could be recognised on it, or some busy CPU would not say
+-- what it was making. A caller that is blind falls back on its own order book (see
+-- control.inFlight) rather than on the absence of evidence.
 function supply.inFlight(itf, catalog)
     local coming = {}
     local info = { cpus = 0, busy = 0, matched = 0, unreadable = 0, jobs = {} }
@@ -923,6 +952,7 @@ function supply.inFlight(itf, catalog)
     if not itf or itf.getCpus == nil then
         info.error = "the supply interface cannot list the main net's crafting CPUs"
             .. " -- it has no getCpus"
+        info.blind = true
         return coming, info
     end
 
@@ -940,16 +970,19 @@ function supply.inFlight(itf, catalog)
     if #wanted == 0 then
         info.note = "no catalog entry has a resolved output, so nothing on a CPU"
             .. " could be recognised -- catalog() needs a database"
+        info.blind = true
         return coming, info
     end
 
     local ok, cpus = pcall(itf.getCpus)
     if not ok then
         info.error = "getCpus errored (" .. tostring(cpus) .. ")"
+        info.blind = true
         return coming, info
     end
     if type(cpus) ~= "table" then
         info.error = "getCpus returned " .. type(cpus)
+        info.blind = true
         return coming, info
     end
 
@@ -1011,6 +1044,9 @@ function supply.inFlight(itf, catalog)
         end
     end
 
+    -- A busy CPU nobody could read might be making anything, this catalog's keys
+    -- included -- so an empty `coming` proves nothing while one exists.
+    info.blind = info.unreadable > 0
     return coming, info
 end
 

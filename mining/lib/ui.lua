@@ -693,9 +693,11 @@ local function drawStockRow(x, y, inner, e, gutter, gutterColor)
     -- Why a row that is short is not being acted on. In order of how much it tells
     -- you: "no pattern" when nothing could ever deliver it; "+2.05k" for what the
     -- main net's crafting CPUs are already making, in this row's own units, which is
-    -- the reason a short row is being left alone; "craft xN" for a request AE2 has
-    -- not yet put on a CPU; "settling" for the moment after one lands, while the
-    -- network catches up with what was pushed into it.
+    -- the reason a short row is being left alone; "craft xN" for an order that has
+    -- been placed and not yet accounted for -- one no CPU is reporting is still being
+    -- waited on, which is why the column outlives the figure beside it; "settling"
+    -- for the moment after one lands, while the network catches up with what was
+    -- pushed into it.
     --
     -- The middle one is the line that matters. A row at 12% with nothing in this
     -- column is a supply line in trouble; a row at 12% with "+2.05k" is one that is

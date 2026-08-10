@@ -104,14 +104,22 @@ end
 local function reportCpus(info)
     if info.error then
         print("  (the crafting bank could not be read: " .. info.error .. ")")
-        print("   nothing can be told about what is already being made, so a slow")
-        print("   main net may be asked for the same thing twice")
     elseif info.note then
         print("  (" .. info.note .. ")")
     elseif info.unreadable > 0 then
         print(string.format("  (%d of %d busy CPU(s) would not say what they are "
             .. "making -- finalOutput needs a Crafting Monitor in the CPU)",
             info.unreadable, info.busy))
+    end
+    -- What being blind COSTS, which is the part worth knowing. The controller falls
+    -- back on its own order book and waits cfg.control.orderTimeout on each order,
+    -- since it can no longer tell a bank that is flat out making the plasma just
+    -- ordered from an idle one. `stock` commands have no order book at all, so run
+    -- twice in a row they will order the same shortfall twice.
+    if info.blind then
+        print("   so nothing here can say whether the main net is still making")
+        print("   something -- the controller then waits on each order it placed")
+        print("   (cfg.control.orderTimeout) instead of asking again")
     end
 end
 

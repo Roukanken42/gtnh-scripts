@@ -287,13 +287,33 @@ cfg.control = {
     -- pushed and the network showing them. Short on purpose -- if a craft really
     -- did under-deliver, this is how long before the shortfall is noticed.
     --
-    -- Nothing here has to cover a SLOW craft. What is still being made is read off
-    -- the main net's crafting CPUs every time the controller plans, and subtracted
-    -- from the shortfall before anything is ordered -- so a main net that takes ten
+    -- Nothing here has to cover a SLOW craft. Two things do: what the main net's
+    -- crafting CPUs are making, read every time the controller plans, and the
+    -- controller's own order book -- what it has asked for and not yet seen arrive.
+    -- Both are subtracted from the shortfall before anything is ordered, and only one
+    -- order per material or plasma is out at a time. So a main net that takes ten
     -- minutes over a job is waited on rather than asked again. `stock cpus` shows
-    -- what that guard can see; if it cannot read your crafting bank it says so in
+    -- what the CPU half can see; if it cannot read your crafting bank it says so in
     -- the log, once, at startup.
     settleGrace = 5,
+
+    -- How long to wait on an order NOTHING can account for before giving up on it and
+    -- allowing the shortfall to be asked for again.
+    --
+    -- Only reached when the crafting bank cannot be read. Reading it needs a Crafting
+    -- Monitor in the CPU multiblock -- without one, every busy CPU refuses to say what
+    -- it is making, and a bank that is flat out crafting the plasma just ordered looks
+    -- exactly like an idle one. That is how a fleet ends up ordering plasma far faster
+    -- than any main net can make it, so when the bank is blind the controller waits on
+    -- its own order instead, for this long.
+    --
+    -- Long on purpose: what it is waiting for is a main net making tens of thousands
+    -- of litres, and a short wait is the fault it exists to prevent. Each order is a
+    -- big batch (see kitsPerParallel and hatchRefills), so waiting ten minutes between
+    -- them starves nothing. Lower it only if you have no monitor AND a fast main net;
+    -- with a monitor fitted, an order ends the moment the bank goes quiet for it and
+    -- this is never reached.
+    orderTimeout = 600,
 
     -- How long to keep waiting for a module to finish its operation before
     -- giving up on a queued parameter change. TecTech only accepts a write while
@@ -303,13 +323,17 @@ cfg.control = {
     -- the dashboard shows it waiting.
     stopTimeout = 180,
 
-    -- How many restock requests may be in flight at once, per kind. Each holds a
-    -- crafting CPU on the main net until the fake pattern's inputs are pushed, so
-    -- an uncapped controller could take the whole crafting bank. Plasma is one
-    -- because manual mode runs a single plasma fleet-wide.
+    -- How many restock orders may be outstanding at once, per kind. Each one may be
+    -- holding a crafting CPU on the main net, so an uncapped controller could take the
+    -- whole crafting bank. Plasma is one because manual mode runs a single plasma
+    -- fleet-wide.
     --
-    -- This is about not monopolising the crafting bank, not about avoiding
-    -- duplicate orders -- see settleGrace above for what handles those.
+    -- This is about not monopolising the crafting bank. Duplicate orders are stopped
+    -- elsewhere and regardless of this number: only ONE order per material or plasma
+    -- is ever out at a time, however big the shortfall. With a crafting bank the
+    -- controller cannot read, an order counts against this cap until orderTimeout
+    -- above -- which starves nothing, since one order is hours of runway (see
+    -- kitsPerParallel).
     jobs = { kit = 2, plasma = 1 },
 }
 

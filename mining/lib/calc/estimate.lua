@@ -2,7 +2,7 @@
 --
 -- This is the piece that ties the three data modules together and answers the
 -- practical question: with the module set to <distance, drone, plasma,
--- overdrive, parallels>, what does it PRODUCE and what does it CONSUME, per
+-- parallels>, what does it PRODUCE and what does it CONSUME, per
 -- second of operation?
 --
 --   meteors.lua   which asteroids are findable, how long they take, what they drop
@@ -104,11 +104,6 @@ local function resolve(p)
         return nil, "plasma must be a tier 1..5 or a plasmas.lua entry"
     end
 
-    local overdrive = tonumber(p.overdrive) or 1
-    if overdrive <= 0 or overdrive > 2 then
-        return nil, "overdrive must be in (0, 2]"   -- 0 never runs; >2 the module rejects
-    end
-
     -- Default to the module's ceiling; a requested value is clamped to it.
     local parallels = math.floor(tonumber(p.parallels) or mod.parallels)
     if parallels < 1 then return nil, "parallels must be >= 1" end
@@ -123,7 +118,6 @@ local function resolve(p)
         voltName = mod.voltName,
         voltage = tonumber(p.voltage) or mod.voltage,
         parallels = parallels,
-        overdrive = overdrive,
         plasma = plasma,
         computation = tonumber(p.computation),   -- optional parallels cap
     }
@@ -151,7 +145,6 @@ end
 --     drone       = 1..13,      -- drone tier loaded in the bus
 --     module      = 1..3,       -- module tier (T1/T2/T3); sets parallels + voltage
 --     plasma      = 1..5,       -- plasma tier, or a plasmas.lua entry
---     overdrive   = 0..2,       -- default 1; trades size bonus for speed
 --     parallels   = <n>,        -- default: the module tier's maximum
 --     computation = <n>,        -- optional: computation on tap, caps parallels
 --     voltage     = <n>,        -- optional override of the module's V[tier]
@@ -192,7 +185,7 @@ function estimate.run(params)
     local pool, blocked, poolWeight, blockedWeight = {}, {}, 0, 0
     for _, h in ipairs(raw) do
         local m = h.meteor
-        local est = meteors.estimate(m, p.drone, p.plasma, p.overdrive)
+        local est = meteors.estimate(m, p.drone, p.plasma)
         local par, limit = parallelsFor(p, m, est.eut)
         local e = {
             meteor = m,

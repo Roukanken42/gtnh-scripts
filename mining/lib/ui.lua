@@ -52,7 +52,7 @@
 --   detail      { miner, view, field, fields, pool, yield, summary, rates,
 --                 edit, editHint, error }   -- see drawParams / drawPool
 --   miners      { { tierName, addr, state, stateKind, drone, distance,
---                   parallels, parallelCap, overdrive, material, hatchLevel,
+--                   parallels, parallelCap, material, hatchLevel,
 --                   hatchCapacity, hatchTarget, hatchFluid, staged,
 --                   auto, pending }, ... }   -- pending: a queued change, in words;
 --                   auto: whether the controller may aim this module
@@ -560,7 +560,7 @@ end
 -- and PLASMA, each of which had a couple to spare.
 local MC = {
     tier = 3, mode = 8, addr = 14, state = 24, drone = 35, dist = 44, par = 51,
-    od = 58, material = 64, bar = 84, level = 95, staged = 108, fluid = 117,
+    material = 58, bar = 84, level = 95, staged = 108, fluid = 117,
     pending = 139,
 }
 
@@ -584,8 +584,7 @@ local function drawMiners(state, x, y, w, h)
     cell(ix, hy, MC.drone, 8, "DRONE", C.faint, inner)
     cell(ix, hy, MC.dist, 6, "DIST", C.faint, inner)
     cell(ix, hy, MC.par, 6, "PAR", C.faint, inner)
-    cell(ix, hy, MC.od, 5, "OD", C.faint, inner)
-    cell(ix, hy, MC.material, 19, "KIT MATERIAL", C.faint, inner)
+    cell(ix, hy, MC.material, 25, "KIT MATERIAL", C.faint, inner)
     cell(ix, hy, MC.bar, 11, "HATCH", C.faint, inner)
     cell(ix, hy, MC.level, 12, "LEVEL", C.faint, inner)
     cell(ix, hy, MC.staged, 8, "STAGED", C.faint, inner)
@@ -626,9 +625,7 @@ local function drawMiners(state, x, y, w, h)
             padL(m.distance and string.format("%d", m.distance) or "-", 5), C.text, inner)
         cell(ix, row, MC.par, 6, padL(m.parallels and
             (m.parallels .. "/" .. (m.parallelCap or "?")) or "-", 5), C.dim, inner)
-        cell(ix, row, MC.od, 5,
-            padL(m.overdrive and string.format("%.1f", m.overdrive) or "-", 4), C.dim, inner)
-        cell(ix, row, MC.material, 19, m.material or MIDDOT,
+        cell(ix, row, MC.material, 25, m.material or MIDDOT,
             m.material and C.text or C.faint, inner)
 
         if m.hatchTarget and m.hatchTarget > 0 then
@@ -1113,7 +1110,7 @@ end
 -- every value in it ended in " Plasma", which carries no information when the
 -- header already says so.
 local AC = {
-    cur = 0, score = 2, drone = 14, dist = 23, plasma = 34, od = 49,
+    cur = 0, score = 2, drone = 14, dist = 23, plasma = 34,
     rate = 56, purity = 70, eut = 79, kits = 91, lps = 103, why = 116,
 }
 
@@ -1149,8 +1146,7 @@ local function drawAdviseResults(state, x, y, w, h)
     cell(ix, hy, AC.score, 11, padL("POINTS/ITEM", 11), C.faint, inner)
     cell(ix, hy, AC.drone, 8, "DRONE", C.faint, inner)
     cell(ix, hy, AC.dist, 10, "DISTANCE", C.faint, inner)
-    cell(ix, hy, AC.plasma, 14, "PLASMA", C.faint, inner)
-    cell(ix, hy, AC.od, 6, "OD", C.faint, inner)
+    cell(ix, hy, AC.plasma, 21, "PLASMA", C.faint, inner)
     cell(ix, hy, AC.rate, 13, padL(a.rateLabel or "WANTED/s", 12), C.faint, inner)
     cell(ix, hy, AC.purity, 8, padL("PURE", 7), C.faint, inner)
     cell(ix, hy, AC.eut, 11, padL("EU/t", 10), C.faint, inner)
@@ -1183,8 +1179,7 @@ local function drawAdviseResults(state, x, y, w, h)
             bad and C.crit or (i == 1 and C.good or C.text), inner)
         cell(ix, row, AC.drone, 8, r.drone or "-", bad and C.crit or C.text, inner)
         cell(ix, row, AC.dist, 10, r.distance or "-", C.dim, inner)
-        cell(ix, row, AC.plasma, 14, r.plasma or "-", bad and C.crit or C.mine, inner)
-        cell(ix, row, AC.od, 6, r.overdrive or "-", C.dim, inner)
+        cell(ix, row, AC.plasma, 21, r.plasma or "-", bad and C.crit or C.mine, inner)
         cell(ix, row, AC.rate, 13, padL(r.rate or "-", 12),
             bad and C.crit or C.good, inner)
         cell(ix, row, AC.purity, 8, padL(r.purity or "-", 7), C.dim, inner)

@@ -11,9 +11,9 @@
 -- to be quick. Three properties of the model make it so:
 --
 -- 1. THE POOL COLLAPSES TO A HANDFUL OF SUMS. meteors.mineTime multiplies every
---    meteor's own duration by the SAME factor g(OD) = max((1-tau)/OD, 0.5), which
---    depends only on the plasma and the overdrive. With b(OD) = min(lambda*(2-OD),
---    0.75) for the size bonus, the whole chance-weighted pool reduces to
+--    meteor's own duration by the SAME factor g = max(1-tau, 0.5), which depends
+--    only on the plasma. With b = min(lambda, 0.75) for the size bonus, the whole
+--    chance-weighted pool reduces to
 --
 --      ST  = sum wi*Ti                    SK  = sum wi*pari
 --      SAx = sum wi*pari*mini*fraci(X)    SBx = sum wi*pari*di*fraci(X)
@@ -23,9 +23,9 @@
 --      kits/s       = 20 * SK / (g*ST)
 --
 --    The pool-weight normaliser cancels out. Nothing in these sums depends on the
---    plasma or the overdrive, so one scan of a pool prices all five plasmas.
+--    plasma, so one scan of a pool prices all five plasmas.
 --
--- 2. EU/s IS INDEPENDENT OF PLASMA AND OVERDRIVE. EU/s = 20*SE/ST: the average
+-- 2. EU/s IS INDEPENDENT OF PLASMA. EU/s = 20*SE/ST: the average
 --    EU/t is time-weighted and g stretches every meteor's time alike, so it
 --    cancels. Energy only ever bears on the distance/drone/module choice.
 --
@@ -33,27 +33,6 @@
 --    the pool changes only where some meteor's range starts or ends -- about 88
 --    breakpoints, not 250 distances. Candidates report an interval; any distance
 --    inside it behaves identically.
---
--- ---- overdrive -------------------------------------------------------------
--- GTNH 2.9 REMOVED OVERDRIVE: window() now pins it to target.OVERDRIVE (1), so
--- every mode below resolves to 1. The machinery is kept until it is cleaned out.
---
--- Overdrive is pinned in closed form, not searched. Kits and plasma are billed
--- per METEOR, so cost per item falls monotonically as overdrive drops -- an
--- optimiser told to minimise it would drive OD to zero (and plasmas.lua's minOD
--- is genuinely 0 for tiers 1..4: only Pu-241 has a lambda big enough to reach the
--- 0.75 bonus cap). So the low end has to come from demand instead:
---
---   "throttle" (default)  the lowest OD that still meets the demanded rate. Speed
---                         above demand is kits and plasma spent on ore nobody
---                         consumes. Floored at max(minOD, MIN_OVERDRIVE).
---   "fast"                the throughput vertex OD* = 1 + SA/(2*lambda*SB),
---                         clamped -- always > 1. The controller's escalation when
---                         a material goes critical.
---   <number>              pinned, for "what is my current setup worth?".
---
--- Every candidate reports both its own overdrive and the fast one, so the
--- controller can flip between them on live stock without searching again.
 --
 -- ---- scoring ---------------------------------------------------------------
 -- Availability gates first (a drone tier whose kit material has no cost entry is
@@ -75,12 +54,6 @@ local target = {}
 local TPS = estimate.TPS               -- 20 ticks per second
 local STACK = meteors.STACK            -- 64 items per stack
 local KIT_INGOTS = estimate.KIT.ingots -- 18 ingots per meteor
-
--- GTNH 2.9 removed the overdrive parameter: every module now runs as if it were
--- set to 1, and plasma tier alone sets speed and size bonus. The window below is
--- pinned to it, so "throttle", "fast" and a pinned mode all come out at 1 and
--- the formulas reduce to the wiki's plasma table.
-target.OVERDRIVE = 1
 
 -- How many candidates a search keeps. Everything else is discarded as it is
 -- scored, so memory stays flat however big the space is.
@@ -110,11 +83,6 @@ target.DEFAULT_COST = {
 }
 
 -- ---- small helpers ---------------------------------------------------------
-
-local function clamp(x, lo, hi)
-    if x < lo then return lo elseif x > hi then return hi end
-    return x
-end
 
 -- Keeps `list` sorted by `worse` and no longer than `maxLen`, discarding the
 -- tail. Used instead of collecting every candidate: the search space is thousands
@@ -280,65 +248,17 @@ local function sameSums(a, b)
     return true
 end
 
--- ---- the overdrive curve ---------------------------------------------------
--- All three of these work on one target's (SA, SB) against a pool's ST.
-
--- Size bonus and time factor at an overdrive, straight from plasmas.lua's model.
-local function bonusAt(p, od) return math.min(p.sizeMultiplier * (2 - od), 0.75) end
-local function timeAt(p, od) return math.max((1 - p.timeDiscount) / od, 0.5) end
-
--- items/s of a target.
-local function rateAt(ST, SA, SB, p, od)
-    return TPS * STACK * (SA + bonusAt(p, od) * SB) / (timeAt(p, od) * ST)
-end
-
--- The overdrive window. It used to run from minOD (size bonus capped) to maxOD
--- (time floored); since 2.9 it is the single value target.OVERDRIVE.
-local function window(p)
-    return target.OVERDRIVE, target.OVERDRIVE
-end
-
--- Throughput vertex. Inside the window both caps are inactive, so
---   rate(OD) = C * (-lambda*SB*OD^2 + (SA + 2*lambda*SB)*OD)
--- a downward parabola peaking at 1 + SA/(2*lambda*SB) -- always above 1. With no
--- bonus span the rate is linear in OD and the fastest legal value wins.
-local function vertexOD(SA, SB, p, lo, hi)
-    local a = p.sizeMultiplier * SB
-    if a <= 0 then return hi end
-    return clamp(1 + SA / (2 * a), lo, hi)
-end
-
--- The lowest overdrive in the window whose rate reaches `want` items/s, or nil if
--- nothing in the window does. Solves the same quadratic for rate(OD) = want and
--- takes the smaller (ascending-branch) root.
-local function throttleOD(ST, SA, SB, p, lo, hi, want)
-    if want <= 0 then return lo end
-    if SA <= 0 and SB <= 0 then return nil end
-
-    local peak = vertexOD(SA, SB, p, lo, hi)
-    if rateAt(ST, SA, SB, p, peak) < want then return nil end
-    if rateAt(ST, SA, SB, p, lo) >= want then return lo end
-    -- want now sits strictly between rate(lo) and rate(peak), so the crossing is
-    -- on the ascending branch between them.
-
-    local C = TPS * STACK / ((1 - p.timeDiscount) * ST)
-    local a = p.sizeMultiplier * SB
-    if a <= 0 then return clamp(want / (C * SA), lo, hi) end
-
-    local b = SA + 2 * a
-    local disc = b * b - 4 * a * want / C
-    if disc < 0 then return nil end
-    return clamp((b - math.sqrt(disc)) / (2 * a), lo, peak)
-end
+-- ---- the plasma factors ----------------------------------------------------
+-- Size bonus and time factor of a plasma, straight from plasmas.lua's model.
+local function bonusOf(p) return math.min(p.sizeMultiplier, 0.75) end
+local function timeOf(p) return math.max(1 - p.timeDiscount, 0.5) end
 
 -- ---- scoring one candidate -------------------------------------------------
 
--- Prices a pool at one plasma. `mode` is "throttle", "fast" or a pinned number.
--- Returns the candidate, or nil when it produces nothing demanded.
-local function evaluate(sums, targets, p, mode, ctx)
-    local lo, hi = window(p)
-
-    -- Weighted-value sums: what "fast" maximises, and what the score divides by.
+-- Prices a pool at one plasma. Returns the candidate, or nil when it produces
+-- nothing demanded.
+local function evaluate(sums, targets, p, ctx)
+    -- Weighted-value sums: what the score divides by.
     local SAv, SBv = 0, 0
     for t = 1, #targets do
         SAv = SAv + targets[t].weight * sums.SA[t]
@@ -346,29 +266,7 @@ local function evaluate(sums, targets, p, mode, ctx)
     end
     if SAv <= 0 and SBv <= 0 then return nil end   -- pool yields nothing demanded
 
-    local fast = vertexOD(SAv, SBv, p, lo, hi)
-    local od, odMode, short
-    if type(mode) == "number" then
-        od, odMode = clamp(mode, lo, hi), "pinned"
-    elseif mode == "fast" then
-        od, odMode = fast, "fast"
-    else
-        -- Slowest overdrive that still covers every demanded rate. If any of them
-        -- is out of reach the module is throughput-bound: run flat out and let
-        -- modulesNeeded say how many it would take.
-        od, odMode = lo, "throttle"
-        for t = 1, #targets do
-            local want = targets[t].rate
-            if want > 0 then
-                local need = throttleOD(sums.ST, sums.SA[t], sums.SB[t], p, lo, hi, want)
-                if not need then short = true; break end
-                if need > od then od = need end
-            end
-        end
-        if short then od, odMode = fast, "fast" end
-    end
-
-    local b, g = bonusAt(p, od), timeAt(p, od)
+    local b, g = bonusOf(p), timeOf(p)
     local perSecond = TPS / (g * sums.ST)   -- turns a per-operation sum into a rate
 
     local rates, value, demanded, modulesNeeded = {}, 0, 0, 1
@@ -388,7 +286,7 @@ local function evaluate(sums, targets, p, mode, ctx)
     local kits = perSecond * sums.SK
     local ingots = KIT_INGOTS * kits
     local litres = p.consumed * kits
-    local eu = TPS * sums.SE / sums.ST      -- independent of plasma and overdrive
+    local eu = TPS * sums.SE / sums.ST      -- independent of plasma
     local stacks = perSecond * (sums.SAall + b * sums.SBall)
 
     local costPerSecond = ingots * ctx.ingotPoints + litres * ctx.plasmaPoints[p.tier]
@@ -417,12 +315,6 @@ local function evaluate(sums, targets, p, mode, ctx)
         plasma = p.tier, plasmaName = p.name,
         module = ctx.module, moduleName = ctx.moduleName, parallels = ctx.parallels,
         meteorsInPool = sums.count,
-
-        overdrive = od, overdriveMode = odMode,
-        overdriveWindow = { lo, hi },
-        fastOverdrive = fast,
-        fastValue = (odMode == "fast") and value
-            or (TPS / (timeAt(p, fast) * sums.ST)) * STACK * (SAv + bonusAt(p, fast) * SBv),
 
         rates = rates,
         value = value,
@@ -487,13 +379,12 @@ end
 --                                  -- alike -- but the RATES scale with it, and a
 --                                  -- caller sizing a fleet against a demanded rate
 --                                  -- is asking about exactly those.
---     mode        = "throttle" | "fast" | <overdrive>,
 --     modules     = { <tier>, ... },  -- only these module tiers
 --     drones      = <tier> | { <tier>, ... },   -- only these drone tiers
 --     plasmas     = <tier> | { <tier>, ... },   -- only these plasmas
 --     distance    = <n>,           -- only configurations that include it
 --   -- The four above PIN part of the answer, for "what is best if I keep using
---   -- Radon at overdrive 1.5". A pin narrows the search rather than filtering its
+--   -- Radon at distance 40". A pin narrows the search rather than filtering its
 --   -- output, so the candidates that come back are the best AMONG the allowed.
 --     limit       = 8,             -- candidates to keep
 --     onProgress  = function(scanned) end,   -- every 256 candidates; os.sleep(0)
@@ -514,13 +405,6 @@ function target.search(demand, opts)
     local euPoints = cost.eu or 0
     local budget = opts.budget or {}
     local limit = opts.limit or target.DEFAULT_LIMIT
-    local mode = opts.mode
-    if mode == nil then
-        mode = "fast"
-        for _, t in ipairs(targets) do
-            if t.rate > 0 then mode = "throttle"; break end
-        end
-    end
 
     local skipped = {}
 
@@ -622,7 +506,7 @@ function target.search(demand, opts)
                             ctx.distanceLo, ctx.distanceHi = d, hi
                             prevSums, prevCands = sums, {}
                             for _, p in ipairs(usablePlasmas) do
-                                local c = evaluate(sums, targets, p, mode, ctx)
+                                local c = evaluate(sums, targets, p, ctx)
                                 scanned = scanned + 1
                                 if c then
                                     prevCands[#prevCands + 1] = c
@@ -667,7 +551,7 @@ function target.search(demand, opts)
     for _, c in ipairs(candidates) do
         c.estimate = estimate.run{
             distance = c.distance[1], drone = c.drone, module = c.module,
-            plasma = c.plasma, overdrive = c.overdrive, parallels = c.parallels,
+            plasma = c.plasma, parallels = c.parallels,
             computation = opts.computation,
         }
     end
@@ -704,11 +588,7 @@ function target.materials()
     return materialCache
 end
 
--- Exposed for tests and for callers that want the curve without a whole search.
-target.rateAt = rateAt
-target.vertexOD = vertexOD
-target.throttleOD = throttleOD
-target.window = window
+-- Exposed for tests and for callers that want the pieces without a whole search.
 target.poolSums = poolSums
 target.resolveTargets = resolveTargets
 target.distanceGrid = distanceGrid

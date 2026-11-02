@@ -6,9 +6,9 @@
 --
 --   1. a DEMAND TABLE for target.search -- { [material] = { rate, weight } }, the
 --      exact shape the targeter already takes. A deficit becomes a RATE (close it
---      within cfg.auto.horizon seconds) so the targeter's throttle mode picks the
---      slowest overdrive that covers it, rather than running flat out and burning
---      kits on ore nobody is waiting for.
+--      within cfg.auto.horizon seconds), so the allocator assigns only as many
+--      modules as cover it, rather than running all of them and burning kits on
+--      ore nobody is waiting for.
 --
 --   2. VIEW ROWS -- what to show on the WANTS screen, and what to mark elsewhere.
 --

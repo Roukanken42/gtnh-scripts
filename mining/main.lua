@@ -409,7 +409,7 @@ local slowEvery = math.max(ccfg.slowEvery or 6, 1)
 
 -- What the slow reads last saw, by module address, so a fast cycle can carry it
 -- forward instead of asking again.
--- A queued change in twenty columns: "OD 1.35 stopping". control.describe spells
+-- A queued change in twenty columns: "dist 40 stopping". control.describe spells
 -- it out in full, which is right for the log and too wide for a table cell.
 local function pendingLabel(e)
     local what
@@ -418,8 +418,6 @@ local function pendingLabel(e)
         what = d and ("MK-" .. d.roman) or "drone"
     elseif e.field == "distance" then
         what = "dist " .. tostring(e.value)
-    elseif e.field == "overdrive" then
-        what = string.format("OD %.2f", e.value)
     else
         what = e.plasma and (e.plasma.name:gsub(" Plasma$", "")) or "plasma"
     end
@@ -464,8 +462,6 @@ local function readFleet(full)
 
         local snap = m:snapshot()
         row.distance = snap.distance
-        -- Not a parameter since GTNH 2.9: every module runs as if it were 1.
-        row.overdrive = 1
         -- What the module is SET to, over what its tier can do -- "4/8" means
         -- half the parallels are being left on the table, which is worth seeing.
         row.parallels = snap.maxParallels
@@ -553,7 +549,6 @@ local function currentOf(row)
     return {
         drone = row.droneTier,
         distance = row.distance,
-        overdrive = row.overdrive,
         plasma = row.plasma and row.plasma.tier or nil,
     }
 end
@@ -1170,10 +1165,6 @@ local function buildDetail(rows)
             shown = live and tostring(live) or nil
             note = "1 .. " .. control.MAX_DISTANCE
             pending = nav.edit and tostring(nav.edit.value) or nil
-        elseif f.key == "overdrive" then
-            shown = live and string.format("%.2f", live) or nil
-            note = "faster, but a smaller size bonus"
-            pending = nav.edit and string.format("%.2f", nav.edit.value) or nil
         else
             local pl = row.plasma
             shown = pl and pl.name or nil
@@ -1198,8 +1189,6 @@ local function buildDetail(rows)
             if f.key == "drone" then
                 local qd = drones.get(q.value)
                 queued = qd and ("MK-" .. qd.roman) or tostring(q.value)
-            elseif f.key == "overdrive" then
-                queued = string.format("%.2f", q.value)
             elseif f.key == "plasma" then
                 queued = q.plasma and q.plasma.name or tostring(q.value)
             else
@@ -1221,7 +1210,7 @@ local function buildDetail(rows)
     if nav.edit then
         local f = control.FIELDS[nav.field]
         d.editHint = "ENTER applies " .. f.label:lower() .. " to this module"
-            .. ((f.key == "drone" or f.key == "distance" or f.key == "overdrive")
+            .. ((f.key == "drone" or f.key == "distance")
                 and " (it will be stopped for the write)" or "")
             .. " -- the tables below already show the result."
     end
@@ -1241,7 +1230,7 @@ local function buildDetail(rows)
 
     local est, err = estimate.run({
         distance = cur.distance, drone = cur.drone, module = row.miner.tier,
-        plasma = cur.plasma, overdrive = cur.overdrive or 1,
+        plasma = cur.plasma,
         parallels = row.parallels, computation = cfg.computation,
     })
     if not est then
@@ -1400,7 +1389,7 @@ function fleetAggregate(rows)
         if cur.drone and cur.distance and cur.plasma then
             local est = estimate.run{
                 distance = cur.distance, drone = cur.drone, module = r.miner.tier,
-                plasma = cur.plasma, overdrive = cur.overdrive or 1,
+                plasma = cur.plasma,
                 parallels = r.parallels, computation = cfg.computation,
             }
             if est and est.cycle > 0 then
@@ -1551,9 +1540,6 @@ local function searchOpts(row, pins, showAll)
         drones = onlyDrones,
         plasmas = onlyPlasmas,
         distance = pins.distance,
-        -- A pinned overdrive goes in as the mode. Left open, the targeter throttles
-        -- to the demanded rate, and with no rate demanded that is its fast vertex.
-        mode = pins.overdrive,
         limit = 12,
         -- OpenComputers kills a thread that does not yield for long enough, and a
         -- search is thousands of evaluations. Yielding costs nothing here.
@@ -1622,8 +1608,6 @@ local function buildAdvise(rows)
             elseif f.key == "plasma" then
                 local p = plasmas.byTier[v]
                 return p and p.name or tostring(v)
-            elseif f.key == "overdrive" then
-                return string.format("%.2f", v)
             end
             return tostring(v)
         end
@@ -1680,7 +1664,6 @@ local function buildAdvise(rows)
                 -- The suffix is on every one of them and the header says PLASMA,
                 -- so it is eight columns of nothing.
                 plasma = (c.plasmaName:gsub(" Plasma$", "")),
-                overdrive = string.format("%.2f", c.overdrive),
                 rate = string.format("%.2f", c.rates[adv.want] or 0),
                 purity = string.format("%.0f%%", (c.purity or 0) * 100),
                 eut = si(c.cost.euPerSecond / estimate.TPS),
@@ -1731,7 +1714,6 @@ local function applyCandidate(row, c, byAuto)
         -- The pool is identical across the whole interval the candidate reports,
         -- so the near end is as good as any and the module travels less.
         distance = c.distance[1],
-        overdrive = math.floor(c.overdrive * 100 + 0.5) / 100,
         plasma = c.plasma,
     }
     local cur = currentOf(row)
@@ -1782,14 +1764,14 @@ end
 -- exactly the same commitEdit the keyboard uses, and every guard that applies to a
 -- player's edit applies to its own.
 
--- The four parameters of a candidate, in a few words -- for the log, where one line
+-- The parameters of a candidate, in a few words -- for the log, where one line
 -- per re-aimed module is the whole record of what the controller decided.
 local function candidateLabel(c)
     local d = drones.get(c.drone)
     local p = plasmas.byTier[c.plasma]
-    return string.format("%s  d%d  OD%.2f  %s",
+    return string.format("%s  d%d  %s",
         d and ("MK-" .. d.roman) or ("drone " .. tostring(c.drone)),
-        c.distance[1], c.overdrive,
+        c.distance[1],
         p and (p.name:gsub(" Plasma$", "")) or ("plasma " .. tostring(c.plasma)))
 end
 
@@ -2142,7 +2124,7 @@ function runAuto(rows)
         elseif cur.drone and cur.distance and cur.plasma then
             local est = estimate.run{
                 distance = cur.distance, drone = cur.drone, module = m.tier,
-                plasma = cur.plasma, overdrive = cur.overdrive or 1,
+                plasma = cur.plasma,
                 parallels = m.parallels, computation = cfg.computation,
             }
             if est then
@@ -2358,7 +2340,6 @@ local function clipLabel(c)
         parts[#parts + 1] = d and ("MK-" .. d.roman) or ("drone " .. c.drone)
     end
     if c.distance then parts[#parts + 1] = "d" .. tostring(c.distance) end
-    if c.overdrive then parts[#parts + 1] = string.format("OD%.2f", c.overdrive) end
     if c.plasma then
         local p = plasmas.byTier[c.plasma]
         if p then parts[#parts + 1] = (p.name:gsub(" Plasma$", "")) end

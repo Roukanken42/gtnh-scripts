@@ -16,7 +16,6 @@ local ctx = cli.start({
         { "plan <material> +<mat>[:w]", "add a secondary target that may nudge the pick" },
     },
     flags = {
-        { "--fast", "run flat out, ignoring the demanded rate" },
         { "--all",  "search every module tier, not just the ones on this network" },
     },
     notes = {
@@ -85,7 +84,6 @@ local result, err = targetm.search(demand, {
     cost = { ingot = cfg.kitCost, plasma = cfg.plasmaCost, eu = cfg.euCost },
     budget = cfg.budget,
     computation = cfg.computation,
-    mode = flags.fast and "fast" or nil,
     limit = 8,
     -- OpenComputers kills a script that runs too long without yielding.
     onProgress = function() io.write("."); if os.sleep then os.sleep(0) end end,
@@ -121,12 +119,12 @@ local function printTable(title, list)
     if #list == 0 then return end
     print("")
     print(title)
-    print(string.format("%-3s %-9s %-7s %-14s %-4s %-6s %-9s %-9s %s",
-        "#", "DIST", "DRONE", "PLASMA", "MOD", "OD", "ITEMS/s", "COST/s", "SCORE"))
+    print(string.format("%-3s %-9s %-7s %-14s %-4s %-9s %-9s %s",
+        "#", "DIST", "DRONE", "PLASMA", "MOD", "ITEMS/s", "COST/s", "SCORE"))
     for i, c in ipairs(list) do
-        print(string.format("%-3d %-9s %-7s %-14s %-4s %-6.3f %-9s %-9.4f %.3g",
+        print(string.format("%-3d %-9s %-7s %-14s %-4s %-9s %-9.4f %.3g",
             i, c.distance[1] .. "-" .. c.distance[2], "MK-" .. roman(c.drone),
-            c.plasmaName:gsub(" Plasma", ""), c.moduleName, c.overdrive,
+            (c.plasmaName:gsub(" Plasma", "")), c.moduleName,
             fmt(c.rates[primary] or 0), c.cost.total, c.score))
     end
 end
@@ -136,9 +134,9 @@ printTable("Cheapest configurations:", result.candidates)
 local best = result.candidates[1]
 if best then
     print("")
-    print(string.format("Best: distance %d-%d (any value), %s, %s, %s, overdrive %.3f (%s), %d parallels",
-        best.distance[1], best.distance[2], "Mining Drone MK-" .. roman(best.drone),
-        best.plasmaName, best.moduleName, best.overdrive, best.overdriveMode, best.parallels))
+    print(string.format("Best: distance %d-%d (any value), %s, %s, %s, %d parallels",
+        best.distance[1], best.distance[2], drones.get(best.drone).name,
+        best.plasmaName, best.moduleName, best.parallels))
     local names = {}
     for name, r in pairs(best.rates) do names[#names + 1] = string.format("%s %s/s", name, fmt(r)) end
     table.sort(names)
@@ -151,10 +149,6 @@ if best then
     if best.modulesNeeded > 1 then
         print(string.format("  NEEDS    %d modules to cover the demanded rate",
             best.modulesNeeded))
-    end
-    if best.overdriveMode ~= "fast" then
-        print(string.format("  headroom overdrive %.3f would give %s weighted items/s (now %s)",
-            best.fastOverdrive, fmt(best.fastValue), fmt(best.value)))
     end
 end
 

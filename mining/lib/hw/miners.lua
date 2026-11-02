@@ -45,9 +45,6 @@ local TIERS = {
 -- have no threads (unlike the pumps), just parallels, so these are plain
 -- machine-wide settings. The module also has "cycleDistance", "range" and
 -- "step", which only matter in cycle mode, so we never touch them.
---
--- 2.9 dropped OVERDRIVE: it is no longer a parameter, and the module runs as if
--- it were 1. Plasma tier alone now sets speed and size bonus.
 local PARAM = {
     DISTANCE      = "distance",  -- target distance (integer)
     MAX_PARALLELS = "parallel",  -- max parallels (integer, 0..tier max)

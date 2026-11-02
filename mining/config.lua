@@ -316,10 +316,9 @@ cfg.control = {
     orderTimeout = 600,
 
     -- How long to keep waiting for a module to finish its operation before
-    -- giving up on a queued parameter change. TecTech only accepts a write while
-    -- the machine is STOPPED, and a mining operation runs for tens of seconds --
-    -- minutes, if the overdrive is throttled -- so this is a stuck-machine
-    -- backstop, not an expected wait. The change sits in the queue meanwhile and
+    -- giving up on a queued parameter change. The controller stops the machine
+    -- for a write, and a mining operation runs for tens of seconds -- so this is
+    -- a stuck-machine backstop, not an expected wait. The change sits in the queue meanwhile and
     -- the dashboard shows it waiting.
     stopTimeout = 180,
 
@@ -354,8 +353,7 @@ cfg.auto = {
     -- second, which is several modules' worth, while a day asks for less than one.
     --
     -- It is also THE DIAL FOR HOW MUCH OF THE FLEET GETS USED, and the answer to
-    -- "why are four of my six modules doing nothing". The targeter throttles
-    -- overdrive down to the rate demanded and no further, and the allocator stops
+    -- "why are four of my six modules doing nothing". The allocator stops
     -- assigning modules once the demand is covered -- so a want that is only a
     -- little short becomes a small rate, a small rate needs one or two modules, and
     -- the rest are genuinely not needed. They are now STOPPED rather than left

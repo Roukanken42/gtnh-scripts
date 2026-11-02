@@ -1,7 +1,7 @@
 -- Maintenance for a manually-configured mining fleet.
 --
 -- In MANUAL mode the player owns the interesting decisions -- which drone goes in
--- which module, what distance, what overdrive -- and this keeps the fleet fed
+-- which module, what distance, which plasma -- and this keeps the fleet fed
 -- while they do: plasma into the hatches, kits and plasma into the local net.
 -- Nothing here chooses a configuration; target.lua does that, and the automatic
 -- mode that uses it comes later.
@@ -545,7 +545,7 @@ end
 --            a new table already scrolled halfway is disorienting.
 --   field    1..#FIELDS              -- detail: which parameter is selected
 --   edit     nil | { field, value }  -- detail: the pending, uncommitted value
---   clipboard nil | { addr, drone, distance, overdrive, plasma }
+--   clipboard nil | { addr, drone, distance, plasma }
 --            -- a module's settings, copied with C and pasted with V. Holding
 --            -- them keeps COPY MODE open so one module can be pasted onto
 --            -- several; Q closes it rather than quitting, which is also why a
@@ -577,7 +577,6 @@ control.FIELDS = {
     { key = "drone",     label = "Drone",     kind = "list", min = 1, max = 13 },
     { key = "distance",  label = "Distance",  kind = "number", step = 1, page = 10,
       min = 1 },
-    -- No overdrive: GTNH 2.9 removed it, the module always runs as if it were 1.
     { key = "plasma",    label = "Plasma",    kind = "list", min = 1, max = 5 },
 }
 
@@ -598,11 +597,9 @@ end
 
 -- Clamps and snaps an edited value for its field.
 --
--- Snapped to a whole number of STEPS, not to a fixed number of decimals: the
--- overdrive step is 0.05 and rounding that to one decimal would turn 1.05 into
--- 1.1, so half the reachable values would be unreachable. The trailing round then
--- clears the binary dust -- adding 0.05 twenty times does not land on 2 by
--- itself, and a value shown as 1.35 has to be the 1.35 that gets written.
+-- Snapped to a whole number of STEPS, not to a fixed number of decimals, so a
+-- fractional step reaches every value it should. The trailing round then clears
+-- the binary dust -- a value shown on screen has to be the one that gets written.
 -- Moves a table's scroll offset, clamped against what the caller reports about the
 -- table it is showing: `rows` in total, `page` visible at once. Clamping HERE rather
 -- than when drawing means the offset can never run past the end and then need a
@@ -639,7 +636,7 @@ end
 
 -- Applies a keypress to `st`, mutated in place. `ctx` says what there is to
 -- navigate: { modules = n, plasmas = n, profiling = <bool>, cur = { drone,
--- distance, overdrive, plasma } } -- `cur` being the open module's live values,
+-- distance, plasma } } -- `cur` being the open module's live values,
 -- which is what an edit starts from. Returns the action for the caller and whether anything changed, so
 -- a key that did nothing does not force a repaint.
 --
@@ -829,13 +826,13 @@ end
 -- a player gets by hand and the ones an automatic mode would pick come from one
 -- place.
 --
--- Any of the four parameters can be PINNED, which narrows the search rather than
--- filtering its results: pin Radon and overdrive 1.5 and the recommendations are
+-- Any of the parameters can be PINNED, which narrows the search rather than
+-- filtering its results: pin Radon and distance 40 and the recommendations are
 -- the best available UNDER that, which is the question actually being asked when
 -- somebody says "what if I keep using Radon".
 --
 --   want     the material being asked for
---   pins     { drone, distance, overdrive, plasma } -- nil means "any"
+--   pins     { drone, distance, plasma } -- nil means "any"
 --   cursor   1..ADVISE_SETTINGS are the settings, past that the recommendations
 --   edit     { field, value } while a pin is being dialled
 --   picking  { cursor } while a material is being chosen
@@ -1006,8 +1003,8 @@ end
 --
 -- An entry:
 --   addr    the module it belongs to
---   field   "drone" | "distance" | "overdrive" | "plasma"
---   value   the target: a drone tier, a distance, an overdrive, a plasma tier
+--   field   "drone" | "distance" | "plasma"
+--   value   the target: a drone tier, a distance, a plasma tier
 --   state   "waiting" | "stopping" | "loading" | "draining" | "filling"
 --           | "done" | "failed"
 --   since   uptime when it was queued, which is what the wait is measured from
@@ -1015,8 +1012,8 @@ end
 --   error   why it gave up
 
 -- How long to keep waiting for a module to finish what it is doing. A mining
--- operation is tens of seconds and a throttled one can be minutes, so this is a
--- stuck-machine backstop rather than an expected wait.
+-- operation is tens of seconds, so this is a stuck-machine backstop rather than
+-- an expected wait.
 control.STOP_TIMEOUT = 180
 
 local Queue = {}
@@ -1028,9 +1025,8 @@ function control.newQueue()
 end
 
 -- Queues a change, replacing any pending one for the same module and field:
--- asking for overdrive 1.2 and then 1.3 before either lands should end at 1.3,
--- not visit both. `extra` carries whatever the field needs (a plasma entry and
--- its database slot).
+-- asking for distance 40 and then 50 before either lands should end at 50, not
+-- visit both. `extra` carries whatever the field needs (a plasma entry).
 function Queue:want(addr, field, value, at, extra)
     local list = self.byAddr[addr]
     if not list then list = {}; self.byAddr[addr] = list end
@@ -1122,8 +1118,8 @@ local function restoreEnabled(miner, entries)
 end
 
 -- Advances the parameter changes queued for one module. They share a single stop:
--- if a distance and an overdrive are both waiting, both are written while the
--- module is down rather than stopping it twice.
+-- if several are waiting, all are written while the module is down rather than
+-- stopping it once for each.
 local function stepParams(entries, row, at, timeout)
     local miner = row.miner
 
@@ -1292,8 +1288,6 @@ function control.describe(e, plasmas)
         what = "drone " .. (d and ("MK-" .. d.roman) or tostring(e.value))
     elseif e.field == "plasma" then
         what = (e.plasma and e.plasma.name) or "plasma"
-    elseif e.field == "overdrive" then
-        what = string.format("overdrive %.2f", e.value)
     else
         what = e.field .. " " .. tostring(e.value)
     end

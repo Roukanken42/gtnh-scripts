@@ -7,7 +7,7 @@ allocating pumps to under-stocked gases in priority order.
 ## Install
 
 ```
-wget https://gitlab.com/Roukanken/gtnh-scripts/-/raw/main/install.lua && install pump
+wget https://raw.githubusercontent.com/Roukanken42/gtnh-scripts/main/install.lua && install pump
 cd pump
 ```
 

@@ -4,14 +4,14 @@ A collection of [OpenComputers](https://github.com/GTNewHorizons/OpenComputers)
 Lua scripts for machines in **GregTech: New Horizons 2.8.4** (Minecraft 1.7.10).
 
 OpenComputers has no `git`, so this repo ships a small **installer** that pulls
-files straight from the GitLab repo onto a machine.
+files straight from the GitHub repo onto a machine.
 
 ## Installing on an OpenComputers machine
 
 Run this once in the machine's shell (needs an **Internet Card**):
 
 ```
-wget https://gitlab.com/Roukanken/gtnh-scripts/-/raw/main/install.lua && ./install
+wget https://raw.githubusercontent.com/Roukanken42/gtnh-scripts/main/install.lua && ./install
 ```
 
 `install` reads the [`manifest`](manifest) file and downloads every listed file

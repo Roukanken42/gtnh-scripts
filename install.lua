@@ -4,8 +4,8 @@ local shell = require("shell")
 
 -- =============================== CONFIG ===============================
 -- Base "raw file" URL of the repo, WITHOUT a trailing slash.
--- GitLab raw URL format: https://gitlab.com/<user>/<repo>/-/raw
-local REPO   = "https://gitlab.com/Roukanken/gtnh-scripts/-/raw"
+-- GitHub raw URL format: https://raw.githubusercontent.com/<user>/<repo>
+local REPO   = "https://raw.githubusercontent.com/Roukanken42/gtnh-scripts"
 local BRANCH = "main"
 -- File in the repo that lists every file to install (one path per line).
 local MANIFEST = "manifest"

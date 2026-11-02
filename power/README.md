@@ -10,7 +10,7 @@ expensive ones only kick in when the battery is genuinely low.
 ## Install
 
 ```
-wget https://gitlab.com/Roukanken/gtnh-scripts/-/raw/main/install.lua && install power
+wget https://raw.githubusercontent.com/Roukanken42/gtnh-scripts/main/install.lua && install power
 cd power
 ```
 

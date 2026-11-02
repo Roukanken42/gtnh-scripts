@@ -10,7 +10,7 @@ Use it to discover a machine's API before writing a script for it.
 ## Install
 
 ```
-wget https://gitlab.com/Roukanken/gtnh-scripts/-/raw/main/install.lua && install inspect
+wget https://raw.githubusercontent.com/Roukanken42/gtnh-scripts/main/install.lua && install inspect
 ```
 
 Needs an **Internet Card** to install, plus a **GPU + screen + keyboard** to run

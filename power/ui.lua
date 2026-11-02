@@ -352,7 +352,7 @@ local function drawPower(state, x, y, w, h)
     local mode = lsc.wirelessEnabled and "wireless ON" or "wireless off"
     text(innerX, y + 4, info, C.text, C.panel)
     text(innerX + #info + 3, y + 4, mode, lsc.wirelessEnabled and C.good or C.faint, C.panel)
-    if lsc.maintenance and not lsc.maintenance:find("perfect", 1, true) then
+    if lsc.maintenance and lsc.maintenance ~= "ok" then
         local mtext = "  " .. MIDDOT .. "  " .. lsc.maintenance
         text(innerX + #info + 3 + #mode, y + 4, trunc(mtext, w - 4 - #info - 3 - #mode), C.warn, C.panel)
     end

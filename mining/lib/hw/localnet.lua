@@ -20,7 +20,7 @@ function localnet.proxy()
 end
 
 -- Lists the mining drones currently in stock in the local net as
---   { { tier = <1..13 or nil>, label = <"Mining Drone MK-..">, size = <count> }, ... }
+--   { { tier = <1..13 or nil>, label = <"Mining Drone Mk-.. (..)">, size = <count> }, ... }
 -- sorted by tier ascending. `net` defaults to localnet.proxy().
 function localnet.dronesInStock(net)
     net = net or localnet.proxy()

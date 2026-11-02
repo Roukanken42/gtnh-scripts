@@ -9,6 +9,8 @@
 --   probe fluids [filter] [@addr]  every fluid in an ME network: amount, label, name
 --   probe sides                    what each transposer sees on each side
 --                                  (inventory name, size, tanks)
+--   probe patterns [@addr]         the patterns in every ME interface (or just
+--                                  @addr), with how the supply code reads each
 --
 -- [filter] keeps entries whose label OR name contains it (case-insensitive).
 -- [@addr] reads the network behind that component (an address prefix is
@@ -21,6 +23,7 @@
 local component = require("component")
 local me = require("lib.hw.me")
 local localnet = require("lib.hw.localnet")
+local supply = require("lib.hw.supply")
 
 local args = { ... }
 local mode = args[1]
@@ -166,6 +169,56 @@ local function dumpSides()
     print(n .. " transposer(s).")
 end
 
+local function slotText(list)
+    local parts = {}
+    if type(list) == "table" then
+        local keys = {}
+        for k, s in pairs(list) do
+            if type(k) == "number" and type(s) == "table" then keys[#keys + 1] = k end
+        end
+        table.sort(keys)
+        for _, k in ipairs(keys) do
+            local s = list[k]
+            parts[#parts + 1] = string.format("[%d] %q x%s", k, tostring(s.name), tostring(s.count))
+        end
+    end
+    return #parts > 0 and table.concat(parts, ", ") or "(none)"
+end
+
+local function dumpPatterns()
+    local _, addr = parseArgs()
+    local addrs
+    if addr then
+        local ok, full = pcall(component.get, addr)
+        if not ok or not full then print("no component matches @" .. addr); return end
+        addrs = { full }
+    else
+        addrs = me.interfaces()
+    end
+
+    local total = 0
+    for _, a in ipairs(addrs) do
+        local itf = component.proxy(a)
+        local patterns = supply.readPatterns(itf)
+        if #patterns > 0 or addr then
+            print("== " .. itf.type .. " " .. a .. ": " .. #patterns .. " pattern(s) ==")
+        end
+        for _, p in ipairs(patterns) do
+            total = total + 1
+            local e = supply.classify(p)
+            local what = e.kind
+            if e.kind == "kit" then what = "kit " .. tostring(e.material)
+            elseif e.kind == "plasma" then what = "plasma " .. tostring(e.plasma and e.plasma.name)
+            elseif e.kind == "drone" then what = "drone " .. tostring(e.drone and e.drone.name)
+            else what = "UNKNOWN: " .. tostring(e.reason) end
+            print(string.format("  #%d  -> %s", p.index, what))
+            print("      in:  " .. slotText(p.inputs))
+            print("      out: " .. slotText(p.outputs))
+        end
+    end
+    print(total .. " pattern(s) in " .. #addrs .. " interface(s).")
+end
+
 if mode == nil then
     listComponents()
 elseif mode == "items" then
@@ -174,6 +227,8 @@ elseif mode == "fluids" then
     dumpFluids()
 elseif mode == "sides" then
     dumpSides()
+elseif mode == "patterns" then
+    dumpPatterns()
 else
-    print("Unknown mode '" .. tostring(mode) .. "'. Modes: (none), items, fluids, sides.")
+    print("Unknown mode '" .. tostring(mode) .. "'. Modes: (none), items, fluids, sides, patterns.")
 end

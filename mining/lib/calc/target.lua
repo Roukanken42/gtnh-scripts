@@ -35,6 +35,9 @@
 --    inside it behaves identically.
 --
 -- ---- overdrive -------------------------------------------------------------
+-- GTNH 2.9 REMOVED OVERDRIVE: window() now pins it to target.OVERDRIVE (1), so
+-- every mode below resolves to 1. The machinery is kept until it is cleaned out.
+--
 -- Overdrive is pinned in closed form, not searched. Kits and plasma are billed
 -- per METEOR, so cost per item falls monotonically as overdrive drops -- an
 -- optimiser told to minimise it would drive OD to zero (and plasmas.lua's minOD
@@ -73,10 +76,11 @@ local TPS = estimate.TPS               -- 20 ticks per second
 local STACK = meteors.STACK            -- 64 items per stack
 local KIT_INGOTS = estimate.KIT.ingots -- 18 ingots per meteor
 
--- Overdrive can be throttled below 1 to stretch meteors out, but only so far:
--- past this an operation takes so long that idling the module (or running fewer
--- of them) is the better answer, and the remaining savings are pennies.
-target.MIN_OVERDRIVE = 0.5
+-- GTNH 2.9 removed the overdrive parameter: every module now runs as if it were
+-- set to 1, and plasma tier alone sets speed and size bonus. The window below is
+-- pinned to it, so "throttle", "fast" and a pinned mode all come out at 1 and
+-- the formulas reduce to the wiki's plasma table.
+target.OVERDRIVE = 1
 
 -- How many candidates a search keeps. Everything else is discarded as it is
 -- scored, so memory stays flat however big the space is.
@@ -288,14 +292,10 @@ local function rateAt(ST, SA, SB, p, od)
     return TPS * STACK * (SA + bonusAt(p, od) * SB) / (timeAt(p, od) * ST)
 end
 
--- The useful overdrive window. Below minOD the size bonus is already capped and
--- you are only buying slowness; above maxOD the time is already floored and you
--- are only losing size. MIN_OVERDRIVE keeps the throttle from crawling.
+-- The overdrive window. It used to run from minOD (size bonus capped) to maxOD
+-- (time floored); since 2.9 it is the single value target.OVERDRIVE.
 local function window(p)
-    local lo = math.max(p.minOD, target.MIN_OVERDRIVE)
-    local hi = p.maxOD
-    if lo > hi then lo = hi end
-    return lo, hi
+    return target.OVERDRIVE, target.OVERDRIVE
 end
 
 -- Throughput vertex. Inside the window both caps are inactive, so

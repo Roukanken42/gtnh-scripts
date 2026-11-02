@@ -619,9 +619,9 @@ end
 -- is STOPPED, so this must run after prepare() has switched them off and waited.
 --
 -- Distance mode goes to static as well: left on automatic the module sweeps the
--- distance itself and would wander off whatever we chose. Overdrive and max
--- parallels are forced to sane values for the same reason a distance is chosen --
--- a module at zero parallels, or zero overdrive, never starts.
+-- distance itself and would wander off whatever we chose. Max parallels is forced
+-- to a sane value for the same reason a distance is chosen -- a module at zero
+-- parallels never starts.
 -- Returns the snapshots, keyed by miner address.
 local function aimMiners(minerList, droneTier)
     local snaps, aimed, stuck = {}, 0, 0
@@ -635,7 +635,6 @@ local function aimMiners(minerList, droneTier)
         else
             m:setStatic()
             m:setDistance(d)
-            m:setOverdrive(1)
             m:setMaxParallels(m.parallels or 1)
             aimed = aimed + 1
             detail("  %s.. (%s): distance %d, %d parallel(s)",

@@ -239,7 +239,7 @@ cfg.supply = {
 }
 
 -- ---- The controller (main.lua) ---------------------------------------------
--- MANUAL mode: you set each module's drone, distance and overdrive yourself and
+-- MANUAL mode: you set each module's drone, distance and plasma yourself and
 -- the controller keeps the consumables flowing. It never reconfigures a module.
 --
 -- What to stock is READ OFF THE HARDWARE -- a module's input bus says which drone

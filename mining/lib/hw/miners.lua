@@ -7,7 +7,7 @@
 --
 -- So far: auto-discovery + per-tier stats, the generic machine controls,
 -- setDrone (loads the drone the module mines with, via transport.lua), and the
--- TecTech parameter controls (distance / overdrive / max parallels / mode).
+-- parameter controls (distance / max parallels / cycle mode).
 -- Unlike the pumps, mining modules have no threads -- just parallels.
 
 local component = require("component")
@@ -30,8 +30,6 @@ local drones = require("lib.gtnh.drones")
 
 local MINER_TYPE = "gt_machine"   -- component type the miner's Adapter exposes
 local MINER_NAME = "projectmoduleminert"
-local PARAM_SET = "setParameters"
-local PARAM_GET = "getParameters"
 
 local TIERS = {
     [1] = { name = "T1", parallels = 2, voltName = "UV",  voltage = 524288 },
@@ -39,32 +37,38 @@ local TIERS = {
     [3] = { name = "T3", parallels = 8, voltName = "UEV", voltage = 8388608 },
 }
 
--- TecTech parameters, addressed by (hatch, id). Same access as the pumps:
--- setParameters(hatch, id, value) writes an input parameter, getParameters(hatch,
--- id) reads it back. The OC API only exposes the INPUT parameters (hatch 0..9,
--- id 0..1), so we can only read what we set -- the module's OUTPUT parameters
--- (e.g. the applied distance, which lags) are NOT reachable. Mining modules have
--- no threads (unlike the pumps), just parallels, so these are plain machine-wide
--- settings.
+-- Named parameters (GTNH 2.9+), the same access as the pumps:
+--   setParameter(key:string, val)   writes one parameter
+--   getParameters():table           returns all of them as key -> value
+-- (Computronics DriverParametrized.) A wrong value type or an unknown key makes
+-- setParameter throw, which writeParam turns into false + error. Mining modules
+-- have no threads (unlike the pumps), just parallels, so these are plain
+-- machine-wide settings. The module also has "cycleDistance", "range" and
+-- "step", which only matter in cycle mode, so we never touch them.
+--
+-- 2.9 dropped OVERDRIVE: it is no longer a parameter, and the module runs as if
+-- it were 1. Plasma tier alone now sets speed and size bonus.
 local PARAM = {
-    DISTANCE      = { hatch = 0, id = 0 },  -- target distance            (0:0:I)
-    MAX_PARALLELS = { hatch = 0, id = 1 },  -- max parallels              (0:1:I)
-    OVERDRIVE     = { hatch = 1, id = 0 },  -- overdrive 0..2             (1:0:I)
-    MODE          = { hatch = 2, id = 0 },  -- distance mode; 0 = static  (2:0:I)
+    DISTANCE      = "distance",  -- target distance (integer)
+    MAX_PARALLELS = "parallel",  -- max parallels (integer, 0..tier max)
+    CYCLE         = "cycle",     -- distance cycle mode (boolean); false = static
 }
 
-local function writeParam(proxy, slot, value)
-    local setter = proxy[PARAM_SET]
-    if setter == nil then return false, PARAM_SET .. " not available" end
-    return pcall(setter, slot.hatch, slot.id, value)
+local function writeParam(proxy, key, value)
+    if proxy.setParameter == nil then return false, "setParameter not available" end
+    return pcall(proxy.setParameter, key, value)
 end
 
-local function readParam(proxy, slot)
-    local getter = proxy[PARAM_GET]
-    if getter == nil then return nil end
-    local ok, v = pcall(getter, slot.hatch, slot.id)
-    if not ok then return nil end
-    return v
+-- All parameters as key -> value, or an empty table if they cannot be read.
+local function readParams(proxy)
+    if proxy.getParameters == nil then return {} end
+    local ok, params = pcall(proxy.getParameters)
+    if not ok or type(params) ~= "table" then return {} end
+    return params
+end
+
+local function readParam(proxy, key)
+    return readParams(proxy)[key]
 end
 -- =====================================================================
 
@@ -120,17 +124,15 @@ function Miner:isEnabled()
     return nil
 end
 
--- TecTech parameters -------------------------------------------------------
+-- Parameters ---------------------------------------------------------------
 
--- Sets the target mining distance. The module's applied distance lags this and
--- isn't readable via OC, so we only ever know what we requested. Returns true,
--- or false + error.
+-- Sets the target mining distance. In cycle mode the module wanders around it,
+-- which is why setStatic exists. Returns true, or false + error.
 function Miner:setDistance(distance)
     return writeParam(self.proxy, PARAM.DISTANCE, distance)
 end
 
--- Reads back the target distance we set (its input parameter) -- not necessarily
--- the live applied value, which the OC API doesn't expose. nil if unreadable.
+-- Reads back the target distance. nil if unreadable.
 function Miner:getDistance()
     return readParam(self.proxy, PARAM.DISTANCE)
 end
@@ -141,43 +143,36 @@ function Miner:setMaxParallels(n)
     return writeParam(self.proxy, PARAM.MAX_PARALLELS, n)
 end
 
--- Sets the overdrive parameter (0..2; higher = faster but less size bonus, see
--- meteors.lua). Returns true, or false + error.
-function Miner:setOverdrive(overdrive)
-    return writeParam(self.proxy, PARAM.OVERDRIVE, overdrive)
+-- Turns distance cycle mode on or off. On, the module sweeps the distance by
+-- itself, which we do NOT want. Returns true, or false + error.
+function Miner:setCycle(enabled)
+    return writeParam(self.proxy, PARAM.CYCLE, enabled == true)
 end
 
--- Sets the distance mode. 0 = static (OC drives the distance); non-zero lets the
--- module auto-switch distance, which we do NOT want. Returns true, or false+err.
-function Miner:setMode(mode)
-    return writeParam(self.proxy, PARAM.MODE, mode)
-end
-
--- Convenience: keep the module in static distance mode (0) so OC owns distance.
+-- Convenience: keep the module in static distance mode so OC owns distance.
 function Miner:setStatic()
-    return self:setMode(0)
+    return self:setCycle(false)
 end
 
 -- Reads back every input parameter we drive, so a run that has to change them can
 -- put them back afterwards (setup does). A parameter that cannot be read comes
 -- back nil, and restore() then leaves that one alone rather than guessing.
 function Miner:snapshot()
+    local params = readParams(self.proxy)
     return {
-        distance = readParam(self.proxy, PARAM.DISTANCE),
-        maxParallels = readParam(self.proxy, PARAM.MAX_PARALLELS),
-        overdrive = readParam(self.proxy, PARAM.OVERDRIVE),
-        mode = readParam(self.proxy, PARAM.MODE),
+        distance = params[PARAM.DISTANCE],
+        maxParallels = params[PARAM.MAX_PARALLELS],
+        cycle = params[PARAM.CYCLE],
     }
 end
 
--- Puts back what snapshot() read. Like any parameter write, this only takes while
--- the machine is STOPPED -- call setEnabled(false) and let it settle first.
+-- Puts back what snapshot() read. Callers stop the machine first, so a change
+-- never lands in the middle of an operation.
 function Miner:restore(snap)
     if type(snap) ~= "table" then return end
     if snap.distance then writeParam(self.proxy, PARAM.DISTANCE, snap.distance) end
     if snap.maxParallels then writeParam(self.proxy, PARAM.MAX_PARALLELS, snap.maxParallels) end
-    if snap.overdrive then writeParam(self.proxy, PARAM.OVERDRIVE, snap.overdrive) end
-    if snap.mode then writeParam(self.proxy, PARAM.MODE, snap.mode) end
+    if snap.cycle ~= nil then writeParam(self.proxy, PARAM.CYCLE, snap.cycle) end
 end
 
 -- Drone loading ------------------------------------------------------------
@@ -285,7 +280,6 @@ end
 miners.Miner = Miner
 miners.TYPE = MINER_TYPE
 miners.TIERS = TIERS
-miners.PARAM_SET = PARAM_SET
-miners.PARAM_GET = PARAM_GET
+miners.PARAM = PARAM
 
 return miners

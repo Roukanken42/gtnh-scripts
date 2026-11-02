@@ -91,11 +91,11 @@ local ctx = cli.start({
             .. "fleet mining -- with whatever is already in its hatches.",
         "The arrows move down the module list and ENTER opens one. That screen shows "
             .. "its meteor pool and the ore coming out of it (TAB switches between "
-            .. "the two), and lets you drive its drone, distance, overdrive and "
+            .. "the two), and lets you drive its drone, distance and "
             .. "plasma: arrows pick a field, ENTER starts editing, arrows change the "
             .. "value, ENTER applies. Both tables are recomputed from the value being "
             .. "dialled, so you see what a change would do BEFORE applying it.",
-        "Distance, overdrive and a drone swap need the module STOPPED -- TecTech "
+        "Distance and a drone swap need the module STOPPED -- TecTech "
             .. "accepts a parameter write no other way -- and a mining operation "
             .. "runs for tens of seconds. So applying one QUEUES it: the module is "
             .. "asked to stop, the controller waits in the background, and the write "
@@ -142,7 +142,7 @@ local ctx = cli.start({
             .. "module that has a drone, a distance and plasma. Both scroll, as do "
             .. "the per-module tables: arrows on the fleet screens, PgUp/PgDn "
             .. "anywhere (the arrows pick a parameter on a detail screen).",
-        "C copies the module under the cursor -- its drone, distance, overdrive and "
+        "C copies the module under the cursor -- its drone, distance and "
             .. "plasma -- and V pastes them onto another. The clipboard is held, so "
             .. "one module can be pasted onto several in turn; Q closes copy mode "
             .. "rather than quitting. Only the settings that actually differ are "
@@ -465,7 +465,8 @@ local function readFleet(full)
 
         local snap = m:snapshot()
         row.distance = snap.distance
-        row.overdrive = snap.overdrive
+        -- Not a parameter since GTNH 2.9: every module runs as if it were 1.
+        row.overdrive = 1
         -- What the module is SET to, over what its tier can do -- "4/8" means
         -- half the parallels are being left on the table, which is worth seeing.
         row.parallels = snap.maxParallels

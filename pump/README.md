@@ -33,12 +33,12 @@ Pumps are found automatically: any `gt_machine` whose `getName()` is
 parallels stats are recorded for allocation. `main` logs what it discovered on
 startup.
 
-The TecTech parameter layout is already set in `pumps.lua`: parameters are
-written with `setParameters(hatch, id, value)` — planet `(0,0)`, gas `(0,1)`,
-parallels `(1,0)` — and the pump is toggled with `setWorkAllowed(bool)`. The
-layout generalizes to thread `i` as planet `(2i,0)`, gas `(2i,1)`, parallels
-`(2i+1,0)`, and each thread is set independently (MK-1 has 1 thread, MK-2/3 have
-4), so one pump can serve several gases at once.
+The parameter layout is already set in `pumps.lua` (GTNH 2.9+): parameters are
+written with `setParameter(key, value)` and read back with `getParameters()`,
+and the pump is toggled with `setWorkAllowed(bool)`. Thread `i` uses the keys
+`recipe<i>.planetType`, `recipe<i>.gasType` and `recipe<i>.parallel`, and each
+thread is set independently (MK-1 has 1 thread, MK-2/3 have 4), so one pump can
+serve several gases at once. Run `probe pump` to see a pump's live parameters.
 3. **Dry run** (`cfg.dryRun = true`, the default): run `main` and confirm the
    logged allocation looks right — no pump is touched.
 4. **Go live**: set `cfg.dryRun = false` and run `main`.

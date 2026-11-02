@@ -4,8 +4,8 @@
 --   name       The gas name. Doubles as (a) the key used in config.lua `demand`
 --              and (b) the AE2 fluid label matched against getFluidsInNetwork()
 --              (e.g. "Molten Redstone"), so it must match the in-game label.
---   planet     TecTech parameter (hatch 0, id 0) selecting the planet.
---   gas        TecTech parameter (hatch 0, id 1) selecting the gas type.
+--   planet     Pump parameter "recipe<i>.planetType" selecting the planet.
+--   gas        Pump parameter "recipe<i>.gasType" selecting the gas type.
 --   amount     Fluid produced per parallel per second (mB). The controller uses
 --              it to estimate a thread's output and assign enough threads to
 --              cover each gas's deficit.

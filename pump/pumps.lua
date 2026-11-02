@@ -10,24 +10,24 @@
 local component = require("component")
 
 -- =====================================================================
--- TecTech parameter layout for the Space Elevator pumping module.
+-- Parameter layout for the Space Elevator pumping module (GTNH 2.9+).
 --
--- Parameters are written with:  setParameters(hatch:int, id:int, value:double)
+-- 2.9 replaced the TecTech parameter hatches with named parameters:
+--   setParameter(key:string, val:any)   writes one parameter
+--   getParameters():table               returns all of them as key -> value
 -- and the machine is toggled with:  setWorkAllowed(work:boolean)
 --
--- Each thread i (0-indexed) occupies hatches 2i and 2i+1:
---   planet    -> hatch 2i,   id 0
---   gas       -> hatch 2i,   id 1
---   parallels -> hatch 2i+1, id 0   (pumping speed; hatch 2i+1 id 1 is unused)
+-- Each thread i (0-indexed) is a "recipe<i>" group:
+--   planet    -> "recipe<i>.planetType"
+--   gas       -> "recipe<i>.gasType"
+--   parallels -> "recipe<i>.parallel"   (pumping speed)
+-- (There is also a machine-wide "batch" parameter, which we leave alone.)
 --
--- Verified for thread 0 (planet (0,0), gas (0,1), parallels (1,0)). Higher-tier
--- pumps with multiple threads follow the same pattern; this MVP drives thread 0
--- only, but the layout below already generalizes to any thread index.
+-- Verified in-game on an MK-1 (recipe0 only). Higher tiers are assumed to
+-- expose recipe0..recipe<threads-1> the same way.
 -- =====================================================================
 
 local PUMP_TYPE = "gt_machine"   -- component type the pump's Adapter exposes
-local PARAM_SET = "setParameters"
-local PARAM_GET = "getParameters"
 
 -- Pumps are identified by getName() == "projectmodulepumptN", where N is the
 -- tier. Each tier has fixed stats (stored on the Pump for later multi-thread /
@@ -40,11 +40,11 @@ local TIERS = {
 }
 
 local function layout(thread)
-    thread = thread or 0
+    local prefix = "recipe" .. (thread or 0) .. "."
     return {
-        planet    = { hatch = 2 * thread,     id = 0 },
-        gas       = { hatch = 2 * thread,     id = 1 },
-        parallels = { hatch = 2 * thread + 1, id = 0 },
+        planet    = prefix .. "planetType",
+        gas       = prefix .. "gasType",
+        parallels = prefix .. "parallel",
     }
 end
 -- =====================================================================
@@ -69,20 +69,19 @@ function Pump.new(address, tier, proxy)
     return self
 end
 
-local function writeParam(proxy, slot, value)
-    local setter = proxy[PARAM_SET]
-    if setter == nil then
-        return false, PARAM_SET .. " not available"
+local function writeParam(proxy, key, value)
+    if proxy.setParameter == nil then
+        return false, "setParameter not available"
     end
-    return pcall(setter, slot.hatch, slot.id, value)
+    return pcall(proxy.setParameter, key, value)
 end
 
-local function readParam(proxy, slot)
-    local getter = proxy[PARAM_GET]
-    if getter == nil then return nil end
-    local ok, v = pcall(getter, slot.hatch, slot.id)
-    if not ok then return nil end
-    return v
+-- All parameters as key -> value, or an empty table if they cannot be read.
+local function readParams(proxy)
+    if proxy.getParameters == nil then return {} end
+    local ok, params = pcall(proxy.getParameters)
+    if not ok or type(params) ~= "table" then return {} end
+    return params
 end
 
 -- Configures one thread to pump (planet, gas) at the given parallels count.
@@ -107,11 +106,12 @@ end
 -- hardware via getParameters -- the ground truth of what the pump is pumping,
 -- independent of what we last tried to write. Any field is nil if unreadable.
 function Pump:getThread(thread)
-    local slots = layout(thread)
+    local keys = layout(thread)
+    local params = readParams(self.proxy)
     return {
-        planet    = readParam(self.proxy, slots.planet),
-        gas       = readParam(self.proxy, slots.gas),
-        parallels = readParam(self.proxy, slots.parallels),
+        planet    = params[keys.planet],
+        gas       = params[keys.gas],
+        parallels = params[keys.parallels],
     }
 end
 

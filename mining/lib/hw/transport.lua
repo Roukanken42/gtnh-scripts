@@ -21,11 +21,13 @@
 -- `fluidTank` values -- the fluid counterpart of `interfaceSlot`.
 --
 -- That one 0-based number does three jobs, which is why it is stored raw:
---   setFluidInterfaceConfiguration(fluidTank, db, dbIndex)   0-based
---   transferFluid(src, dst, amount, sourceTank = fluidTank)  0-based
---   getTankLevel / getTankCapacity(side, fluidTank + 1)      1-BASED
--- Only the read methods count from one. Station:tank() is the single place that
--- knows this, so nothing else has to.
+--   setFluidInterfaceConfiguration(fluidTank + 1, {name=..})  1-BASED (GTNH 2.9)
+--   transferFluid(src, dst, amount, sourceTank = fluidTank)   0-based
+--   getTankLevel / getTankCapacity(side, fluidTank + 1)       1-BASED
+-- Before GTNH 2.9 the config call was ae2fc's own, 0-based and fed from a
+-- database; 2.9 exposes OpenComputers' driver instead, which counts from one and
+-- takes the fluid as a table. Station:tank() is the single place that knows the
+-- read side, so nothing else has to.
 --
 -- Moving items back INTO ME is easy -- drop them into the interface and the
 -- network absorbs them. Pulling an item OUT of ME is indirect:
@@ -50,7 +52,7 @@
 --   transposer.getTankLevel / getTankCapacity(side, tank) / getFluidInTank(side, tank)
 --   me_interface.store(filter, dbAddress[, startSlot[, count]]) -> boolean
 --   me_interface.setInterfaceConfiguration(slot[, dbAddress, dbSlot, count])
---   me_interface.setFluidInterfaceConfiguration(tank[, dbAddress, dbIndex])
+--   fluid_interface.setFluidInterfaceConfiguration(tank[, {name = <fluid>}])  1-based
 --   database.get(slot) / database.clear(slot)
 
 -- Pulled in defensively so this module can be LOADED off the machine: the tank
@@ -368,20 +370,20 @@ function Station:hatchFluid()
     return label, level
 end
 
--- Points this station's interface tank at a plasma, by database slot (see
--- supply.storePlasmaDrop -- the entry has to be an ae2fc drop). Unlike the item
--- path this config is LEFT SET: the tank then keeps ~16,000 L staged for a
--- continuously-drained hatch, which is the whole reason a pull feed beats a
+-- Points this station's interface tank at a plasma (a plasmas.lua entry). Unlike
+-- the item path this config is LEFT SET: the tank then keeps ~16,000 L staged for
+-- a continuously-drained hatch, which is the whole reason a pull feed beats a
 -- clear-after-every-use one. Returns true, or false + error.
-function Station:setPlasmaSource(dbSlot)
+function Station:setPlasmaSource(plasma)
     if not self:hasFluid() then return false, "no fluid half configured" end
+    if type(plasma) ~= "table" or not plasma.fluid then return false, "no plasma to stage" end
     if self.dryRun then
-        self.log(string.format("[dry] %s: stage plasma from db slot %d in tank %d",
-            self.label, dbSlot, self.fluidTank))
+        self.log(string.format("[dry] %s: stage %s in tank %d",
+            self.label, plasma.name, self.fluidTank))
         return true
     end
     local ok, err = pcall(self.fluidInterface.setFluidInterfaceConfiguration,
-        self.fluidTank, self.dbAddress, dbSlot)
+        self.fluidTank + 1, { name = plasma.fluid })
     if not ok then return false, "setFluidInterfaceConfiguration failed: " .. tostring(err) end
     return true
 end
@@ -391,7 +393,7 @@ end
 -- hatch contents for being the wrong fluid.
 function Station:clearPlasmaSource()
     if not self:hasFluid() or self.dryRun then return end
-    pcall(self.fluidInterface.setFluidInterfaceConfiguration, self.fluidTank)
+    pcall(self.fluidInterface.setFluidInterfaceConfiguration, self.fluidTank + 1)
 end
 
 -- Moves fluid between two of the fluid transposer's sides. Returns moved, err.

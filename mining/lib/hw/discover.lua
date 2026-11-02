@@ -58,9 +58,8 @@ local SETTLE_TIMEOUT = 60
 -- surface to the transposer, so use 2.
 local PROBE_CFG_SLOT = 2
 
--- Fluid probing. The interface tank we stage plasma through during detection
--- (0-BASED, like every fluid-interface index -- see transport.lua), and the db
--- slot its ae2fc drop goes in.
+-- Fluid probing. The interface tank we stage plasma through during detection,
+-- 0-based like a station's stored fluidTank (see transport.lua).
 local PROBE_FLUID_TANK = 0
 -- Plasma put in a hatch to make a module runnable. One operation costs
 -- (consumed x parallels), at worst 825 x 8 for Helium, so this covers a few.
@@ -381,23 +380,17 @@ local function ensurePlasma(net, entry, itf, litres)
     return true, string.format("%d L of %s in the local net", now, entry.plasma.name)
 end
 
--- Puts a plasma's ae2fc drop in the database, which is the only way to name a
--- fluid to setFluidInterfaceConfiguration -- the local net holds plasma as fluid,
--- never as drops, so it is lifted out of the supply interface's own pattern.
--- Returns plasma, dbSlot, or nil + error.
-local function stagePlasmaDrop(itf, handle)
-    if not itf then return nil, "no supply interface found to take a plasma drop from" end
-
-    -- Any plasma will do for detection; take the cheapest per litre to probe with.
+-- Picks the plasma to probe hatches with: any will do for detection, so the
+-- lowest tier the supply interface has a pattern for (the cheapest per litre).
+-- Returns the pattern entry, or nil + error.
+local function pickProbePlasma(itf, handle)
+    if not itf then return nil, "no supply interface found to take plasma from" end
     local best
     for _, e in ipairs(supply.catalog(itf, handle)) do
         if e.kind == "plasma" and (not best or e.plasma.tier < best.plasma.tier) then best = e end
     end
     if not best then return nil, "the supply interface has no plasma pattern" end
-
-    local slot, err = supply.storePlasmaDrop(itf, best, handle)
-    if not slot then return nil, tostring(err) end
-    return best, slot
+    return best
 end
 
 -- Pairs transposers with the interface that feeds them, for ALL of them at once.
@@ -712,7 +705,8 @@ local function clearStaging(interfaceComps)
             end
             if p.getFluidInterfaceConfiguration ~= nil
                 and p.setFluidInterfaceConfiguration ~= nil then
-                for tank = 0, 5 do
+                -- 1-based since GTNH 2.9 (see transport.lua).
+                for tank = 1, 6 do
                     local okc, cfg = pcall(p.getFluidInterfaceConfiguration, tank)
                     if okc and type(cfg) == "table" then
                         -- supply.plasmaOf unwraps the ae2fc "drop of X" form too.
@@ -774,7 +768,7 @@ discover.interfacesHolding = interfacesHolding
 discover.interfacesHoldingFluid = interfacesHoldingFluid
 discover.ensureKits = ensureKits
 discover.ensurePlasma = ensurePlasma
-discover.stagePlasmaDrop = stagePlasmaDrop
+discover.pickProbePlasma = pickProbePlasma
 discover.minerActive = minerActive
 discover.minerOn = minerOn
 discover.waitIdle = waitIdle

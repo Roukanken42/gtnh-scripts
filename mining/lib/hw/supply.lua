@@ -79,9 +79,10 @@ function supply.materialOf(label, materials)
     return nil
 end
 
--- ae2fc carries a fluid through a pattern as an item labelled "drop of <Fluid>",
--- and one drop is exactly one litre -- so a plasma input's COUNT is already its
--- volume, and nothing has to be measured or configured.
+-- A plasma pattern's input is the fluid itself (GTNH 2.9 patterns, labelled
+-- "Helium Plasma"), or in an older pattern the ae2fc drop item labelled
+-- "drop of <Fluid>". Either way one unit is one litre -- so a plasma input's
+-- COUNT is already its volume, and nothing has to be measured or configured.
 local DROP_PREFIX = "drop of "
 
 -- The plasma an item label refers to, unwrapping the drop form first. A bare
@@ -603,29 +604,6 @@ local function storePatternSlot(itf, method, patternIndex, slotIndex, handle, db
 end
 
 supply.storePatternSlot = storePatternSlot
-
--- Writes a plasma pattern's ae2fc DROP into a database slot, which is the form
--- setFluidInterfaceConfiguration wants -- and the only place to get one, since
--- the local net holds plasma as fluid and never as drops.
--- Returns true, or false + error.
--- The drop is long-lived -- a fluid interface keeps pointing at it -- so it gets
--- a permanent named slot rather than borrowing one. Returns the slot, or nil+err.
-function supply.storePlasmaDrop(itf, entry, handle)
-    if not entry or entry.kind ~= "plasma" then return nil, "not a plasma pattern" end
-    local input = entry.inputs[1]
-    if not input then return nil, "plasma pattern has no input to store" end
-
-    local dbSlot, fresh = handle:slot("plasma:" .. entry.plasma.name)
-    if not dbSlot then return nil, tostring(fresh) end
-    if not fresh and handle:label(dbSlot) then return dbSlot end
-
-    local stack, err = storePatternSlot(itf, "storeInterfacePatternInput",
-        entry.index, input.index, handle, dbSlot)
-    if not stack then
-        return nil, "could not store the drop for " .. entry.plasma.name .. ": " .. tostring(err)
-    end
-    return dbSlot
-end
 
 -- Resolves a pattern's true OUTPUT item -- the thing a craft request has to be
 -- made against. Needed because a fake pattern's output is usually a renamed item,

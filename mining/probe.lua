@@ -210,7 +210,8 @@ local function dumpPatterns()
             total = total + 1
             local e = supply.classify(p)
             local what = e.kind
-            if e.kind == "kit" then what = "kit " .. tostring(e.material)
+            if e.kind == "kit" then
+                what = "kit " .. tostring(e.material) .. ", " .. tostring(e.perCraft) .. " per craft"
             elseif e.kind == "plasma" then what = "plasma " .. tostring(e.plasma and e.plasma.name)
             elseif e.kind == "drone" then what = "drone " .. tostring(e.drone and e.drone.name)
             else what = "UNKNOWN: " .. tostring(e.reason) end

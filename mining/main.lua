@@ -294,7 +294,6 @@ local cpuWarned = false         -- the "cannot see the crafting bank" warning, o
 local activePlasma = nil
 local desiredPlasma = {}        -- address -> plasma a module was switched to
 local pendingPlasma = nil       -- chosen in the UI, applied by the next cycle
-local plasmaSlots = {}          -- plasma name -> database slot of its drop
 
 local paused = false
 local showLog = false
@@ -579,18 +578,6 @@ local function detectPlasma(rows)
     return best
 end
 
--- The database slot holding a plasma's ae2fc drop, cached: the fluid interfaces
--- keep pointing at it, so it is stored once and reused for as long as the
--- controller runs.
-local function slotFor(p)
-    if plasmaSlots[p.name] then return plasmaSlots[p.name] end
-    if not itf or not dbHandle then return nil, supplyErr or "no supply interface" end
-    local slot, err = control.plasmaSlot(catalog, itf, dbHandle, p)
-    if not slot then return nil, err end
-    plasmaSlots[p.name] = slot
-    return slot
-end
-
 -- Remembers that a module is the player's now. Called from every path a HUMAN can
 -- change a module by -- an edit, a paste, the advisor -- and from none that the
 -- allocator uses, which is the whole distinction between the two modes.
@@ -634,8 +621,7 @@ local function commitEdit(row, field, value, byAuto)
             log(row.addr .. ": no plasma feed configured")
             return
         end
-        local slot, err = slotFor(p)
-        extra = { plasma = p, slot = slot, slotError = err }
+        extra = { plasma = p }
         -- Recorded as this module's intent right away, so the staging logic stops
         -- treating it as a module that has lost its plasma.
         desiredPlasma[row.addr] = p
@@ -766,22 +752,16 @@ local function runCycle()
     if pendingPlasma then
         local p = pendingPlasma
         pendingPlasma = nil
-        local slot, err = slotFor(p)
-        if not slot then
-            log("cannot stage " .. p.name .. ": " .. tostring(err))
-        else
-            local n = 0
-            for _, r in ipairs(rows) do
-                if r.station and r.hasFluid then
-                    desiredPlasma[r.addr] = p
-                    queue:want(r.addr, "plasma", p.tier, computer.uptime(),
-                        { plasma = p, slot = slot })
-                    n = n + 1
-                end
+        local n = 0
+        for _, r in ipairs(rows) do
+            if r.station and r.hasFluid then
+                desiredPlasma[r.addr] = p
+                queue:want(r.addr, "plasma", p.tier, computer.uptime(), { plasma = p })
+                n = n + 1
             end
-            activePlasma = p
-            log(string.format("switching %d module(s) to %s", n, p.name))
         end
+        activePlasma = p
+        log(string.format("switching %d module(s) to %s", n, p.name))
     else
         activePlasma = detectPlasma(rows) or activePlasma
     end
@@ -832,8 +812,7 @@ local function runCycle()
             if r.station and r.hasFluid and not queue:find(r.addr, "plasma")
                 and (r.staged or 0) <= 0 and (r.hatchLevel or 0) <= 0 then
                 local want = wantedPlasma(r)
-                local slot = want and (plasmaSlots[want.name] or select(1, slotFor(want)))
-                if slot then r.station:setPlasmaSource(slot) end
+                if want then r.station:setPlasmaSource(want) end
             end
         end
 

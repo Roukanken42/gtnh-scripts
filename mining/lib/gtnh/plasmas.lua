@@ -49,6 +49,9 @@ for _, r in ipairs(RAW) do
         tier = t,
         name = r.name,
         material = r.material,
+        -- The fluid's registry name, which is how a fluid interface is told what
+        -- to stock: "plasma." .. the lower-cased material (GT names them so).
+        fluid = "plasma." .. r.material:lower(),
         consumed = r.consumed,
         timeDiscount = 0.1 * (t - 1),
         sizeMultiplier = lambda,

@@ -4,9 +4,7 @@
 
 local miners = require("lib.hw.miners")
 local transport = require("lib.hw.transport")
-local dbslots = require("lib.hw.db")
 local supply = require("lib.hw.supply")
-local control = require("lib.control")
 local plasmas = require("lib.gtnh.plasmas")
 local localnet = require("lib.hw.localnet")
 local computer = require("computer")
@@ -100,25 +98,6 @@ local function targetFor(p)
     return supply.hatchLitres(p, scfg)
 end
 
--- Puts the ae2fc drop for `p` into the shared database and returns its slot. The
--- drop only exists on the supply network -- the local net holds plasma as fluid
--- -- so it is lifted out of the supply interface's own pattern.
-local function plasmaDbSlot(p)
-    local itf, err = supply.find(scfg.interface)
-    if not itf then return nil, "supply interface: " .. tostring(err) end
-
-    -- Resolved against the database: a fake pattern's output is a renamed item and
-    -- the pattern slot only reports its base type, so requesting by that would
-    -- craft the wrong thing (see supply.resolveOutput).
-    local handle, dbErr = dbslots.open(cfg.database)
-    if not handle then return nil, "database: " .. tostring(dbErr) end
-
-    -- The drop keeps a permanent slot: the fluid interface points at it for as
-    -- long as this plasma is the one being staged. Same lookup the controller
-    -- does, so it lives in control.lua rather than in both.
-    return control.plasmaSlot(supply.catalog(itf, handle), itf, handle, p)
-end
-
 -- Fills a station's hatch to `target`. The looping lives on the station itself
 -- (see Station:fillHatchTo), because setup needs exactly the same thing.
 local function fillUp(m, target, timeout)
@@ -161,9 +140,6 @@ local function cmdSet(name)
         return
     end
 
-    local slot, err = plasmaDbSlot(p)
-    if not slot then print("Cannot stage " .. p.name .. ": " .. tostring(err)); return end
-
     local target = targetFor(p)
     print(string.format("Switching %d module(s) to %s (%d L per hatch)%s",
         #fluid, p.name, target, cfg.dryRun and "  [DRY RUN]" or ""))
@@ -179,7 +155,7 @@ local function cmdSet(name)
             print(string.format("  %s  drained %d L of %s", tag, drained, label))
         end
 
-        local ok, serr = m.station:setPlasmaSource(slot)
+        local ok, serr = m.station:setPlasmaSource(p)
         if not ok then
             print(string.format("  %s  FAIL %s", tag, tostring(serr)))
         else
@@ -238,9 +214,6 @@ local function cmdKeep(name)
         end
     end
 
-    local slot, err = plasmaDbSlot(p)
-    if not slot then print("Cannot stage " .. p.name .. ": " .. tostring(err)); return end
-
     -- Point every station at it, clearing out anything different first: a GT hatch
     -- holds one fluid and will refuse the new one until the old is gone.
     for _, m in ipairs(fluid) do
@@ -250,7 +223,7 @@ local function cmdKeep(name)
             local drained = m.station:drainHatch()
             print(string.format("  %s  drained %d L of %s", m.address:sub(1, 8), drained, label))
         end
-        local ok, serr = m.station:setPlasmaSource(slot)
+        local ok, serr = m.station:setPlasmaSource(p)
         if not ok then print(string.format("  %s  FAIL %s", m.address:sub(1, 8), tostring(serr))) end
     end
 

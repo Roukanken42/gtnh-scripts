@@ -1230,10 +1230,6 @@ local function stepPlasma(e, row, at, timeout)
         e.state, e.error = "failed", "no plasma feed configured"
         return
     end
-    if not e.slot then
-        e.state, e.error = "failed", e.slotError or "no database slot for the drop"
-        return
-    end
 
     if e.state == "waiting" then
         -- Clear the staging config FIRST, so the interface tank is free to take
@@ -1252,7 +1248,7 @@ local function stepPlasma(e, row, at, timeout)
             end
             return
         end
-        local ok, err = st:setPlasmaSource(e.slot)
+        local ok, err = st:setPlasmaSource(e.plasma)
         if not ok then e.state, e.error = "failed", tostring(err); return end
         e.state = "filling"
         e.note = "waiting for the hatch to take it"
@@ -1302,22 +1298,6 @@ function control.describe(e, plasmas)
         what = e.field .. " " .. tostring(e.value)
     end
     return what, e.state
-end
-
--- ---- component edge ---------------------------------------------------------
-
--- The database slot holding the ae2fc drop for `plasma`, which is the only form
--- setFluidInterfaceConfiguration accepts -- and it exists only on the supply
--- network, so it has to be lifted out of that plasma's own pattern.
--- Returns the slot, or nil + error.
-function control.plasmaSlot(catalog, itf, handle, plasma)
-    for _, e in ipairs(catalog or {}) do
-        if e.kind == "plasma" and e.plasma.tier == plasma.tier then
-            return supply.storePlasmaDrop(itf, e, handle)
-        end
-    end
-    return nil, "the supply interface has no pattern for " .. plasma.name
-        .. " -- its drop is the only way to name a fluid to a fluid interface"
 end
 
 return control

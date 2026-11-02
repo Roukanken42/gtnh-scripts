@@ -103,7 +103,7 @@ local interfacesHoldingFluid = discover.interfacesHoldingFluid
 local stageProbe = discover.stageProbe
 local ensureKits = discover.ensureKits
 local ensurePlasma = discover.ensurePlasma
-local stagePlasmaDrop = discover.stagePlasmaDrop
+local pickProbePlasma = discover.pickProbePlasma
 local purgeFeeds = discover.purgeFeeds
 local aimMiners = discover.aimMiners
 local prepare = discover.prepare
@@ -194,12 +194,11 @@ else
     say("WARNING: unknown material for the probe drone; cannot check kits.")
 end
 
-local plasmaEntry, dropSlot = stagePlasmaDrop(supplyItf, handle)
+local plasmaEntry, plasmaErr = pickProbePlasma(supplyItf, handle)
 local probePlasma = plasmaEntry and plasmaEntry.plasma
 if not plasmaEntry then
-    say("WARNING: no plasma to probe with (" .. tostring(dropSlot) .. ").")
+    say("WARNING: no plasma to probe with (" .. tostring(plasmaErr) .. ").")
     say("         Input hatches cannot be matched to miners without it; buses still can.")
-    dropSlot = nil
 else
     say("Plasma: %s, %d L per hatch", probePlasma.name, PROBE_PLASMA_L)
 end
@@ -307,10 +306,10 @@ local itemPairs = sweepInterfaces(scans, itemCandidates, {
 stepEnd()
 
 local fluidPairs = {}
-if dropSlot and probePlasma then
+if probePlasma then
     fluidPairs = sweepInterfaces(scans, fluidCandidates, {
         sidesOf = function(sc) return sc.fluidIfSides end,
-        -- The reads are 1-based, the config is 0-based (see transport.lua).
+        -- The reads are 1-based, and so is the config since 2.9 (see transport.lua).
         sees = function(tp, side)
             local okf, f = pcall(tp.getFluidInTank, side, PROBE_FLUID_TANK + 1)
             if not okf or type(f) ~= "table" then return false end
@@ -319,10 +318,11 @@ if dropSlot and probePlasma then
         end,
         supports = function(p) return p.setFluidInterfaceConfiguration ~= nil end,
         stage = function(p)
-            local ok = pcall(p.setFluidInterfaceConfiguration, PROBE_FLUID_TANK, dbAddr, dropSlot)
+            local ok = pcall(p.setFluidInterfaceConfiguration, PROBE_FLUID_TANK + 1,
+                { name = probePlasma.fluid })
             return PROBE_FLUID_TANK, ok, ok and "staged" or "setFluidInterfaceConfiguration failed"
         end,
-        clear = function(p) pcall(p.setFluidInterfaceConfiguration, PROBE_FLUID_TANK) end,
+        clear = function(p) pcall(p.setFluidInterfaceConfiguration, PROBE_FLUID_TANK + 1) end,
     }, "fluid interfaces")
     stepEnd()
 end
@@ -351,7 +351,7 @@ for _, sc in ipairs(scans) do
 
     if #sc.hatchSides > 0 then
         local m = fluidPairs[sc.addr]
-        if not dropSlot then
+        if not probePlasma then
             say("  %s..: %d input hatch(es), but there is no plasma to probe with.",
                 tag, #sc.hatchSides)
         elseif #sc.fluidIfSides == 0 then
@@ -437,7 +437,7 @@ if #fluidStations > 0 then
     local primed = 0
     for i, st in ipairs(fluidStations) do
         if st then
-            st:setPlasmaSource(dropSlot)
+            st:setPlasmaSource(probePlasma)
             local okFill = fillHatchTo(st, PROBE_PLASMA_L)
             local level = st:hatchTank()
             if okFill then primed = primed + 1 end
@@ -521,7 +521,7 @@ if #fluidStations > 0 then
     for i, st in ipairs(fluidStations) do
         local feed = fluidFeeds[i]
         if st then
-            st:setPlasmaSource(dropSlot)
+            st:setPlasmaSource(probePlasma)
             if not fillHatchTo(st, PROBE_PLASMA_L) then
                 say("  hatch %s../side%d: would not fill -- skipped.",
                     feed.transposer:sub(1, 8), feed.inputHatchSide)

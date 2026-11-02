@@ -184,8 +184,8 @@ cfg.supply = {
     },
 
     -- Litres of plasma to keep in the local net, by fluid name. nil = do not stock.
-    -- ae2fc carries a fluid through a pattern as "drop of <Fluid>" at one drop per
-    -- litre, so a pattern's input count is already its volume -- nothing to measure.
+    -- A plasma pattern's input count is in litres, so it is already its volume --
+    -- nothing to measure.
     plasma = {
         ["Helium Plasma"]        = nil,
         ["Bismuth Plasma"]       = nil,

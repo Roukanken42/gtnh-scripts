@@ -104,9 +104,14 @@ end
 local function slots(list)
     local out = {}
     if type(list) ~= "table" then return out end
+    -- Since GTNH 2.9 each slot is a full OC item table: `name` is the registry id
+    -- ("gregtech:gt.metaitem.02"), `label` the display name and `size` the
+    -- amount. 2.8 gave only `name` (the display name) and `count`. Everything
+    -- downstream works in display names, so the label wins whenever it is there.
+    local function labelOf(s) return s.label or s.name end
     local keys = {}
     for k, s in pairs(list) do
-        if type(k) == "number" and type(s) == "table" and s.name then keys[#keys + 1] = k end
+        if type(k) == "number" and type(s) == "table" and labelOf(s) then keys[#keys + 1] = k end
     end
     -- Order by slot index rather than by name: for outputs the first slot is the
     -- primary one, which is the label a craft request has to be made against.
@@ -114,7 +119,8 @@ local function slots(list)
     for _, k in ipairs(keys) do
         -- The original slot key is kept: storeInterfacePatternInput addresses
         -- inputs by it, and whether it counts from 0 or 1 is not documented.
-        out[#out + 1] = { name = list[k].name, count = list[k].count or 0, index = k }
+        local s = list[k]
+        out[#out + 1] = { name = labelOf(s), count = s.size or s.count or 0, index = k }
     end
     return out
 end

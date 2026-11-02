@@ -179,7 +179,10 @@ local function slotText(list)
         table.sort(keys)
         for _, k in ipairs(keys) do
             local s = list[k]
-            parts[#parts + 1] = string.format("[%d] %q x%s", k, tostring(s.name), tostring(s.count))
+            -- 2.9 slots are item tables (label/size/name/damage); 2.8 had name/count.
+            parts[#parts + 1] = string.format("[%d] %q x%s (%s:%s)", k,
+                tostring(s.label or s.name), tostring(s.size or s.count),
+                tostring(s.name), tostring(s.damage))
         end
     end
     return #parts > 0 and table.concat(parts, ", ") or "(none)"

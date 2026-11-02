@@ -558,7 +558,9 @@ function supply.request(itf, entry, crafts)
     -- The filter's matching is not reliably exact, hence the re-check.
     local found
     for _, c in ipairs(list) do
-        local okStack, stack = pcall(c.getItemStack)
+        -- getStack since GTNH 2.9 (OpenComputers made craftables generic over
+        -- items and fluids); getItemStack before it.
+        local okStack, stack = pcall(c.getStack or c.getItemStack)
         if okStack and isOutput(want, stack) then
             if found then
                 return nil, "'" .. tostring(want.label) .. "' matches more than one craftable"

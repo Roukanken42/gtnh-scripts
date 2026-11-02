@@ -5,6 +5,9 @@
 -- Usage (from the folder this file lives in):
 --   probe                  list every connected component + a total count
 --   probe <type>           list all methods (with docs) of the first <type> found
+--   probe pump             list the methods of the first pumping module found and
+--                          dump what its getParameters() returns (redirect to a
+--                          file to keep it: `probe pump > /home/pump.txt`)
 --   probe fluids [substr]  list AE2 fluids whose label contains <substr>
 --   probe items  [substr]  list AE2 items whose label contains <substr>
 --
@@ -32,18 +35,8 @@ local function listComponents()
     print("Total: " .. #list .. " components (this counts against the computer's budget)")
 end
 
-local function listMethods(ctype)
-    local addr = component.list(ctype, true)()
-    if not addr then
-        -- fall back to a partial match
-        addr = component.list(ctype)()
-    end
-    if not addr then
-        print("No component of type '" .. ctype .. "' found. Run `probe` to see types.")
-        return
-    end
-
-    print("== Methods of '" .. ctype .. "' (" .. addr .. ") ==")
+local function printMethods(addr, title)
+    print("== Methods of " .. title .. " (" .. addr .. ") ==")
     local methods = component.methods(addr)
     local names = {}
     for name in pairs(methods) do names[#names + 1] = name end
@@ -59,14 +52,52 @@ local function listMethods(ctype)
     end
 end
 
-local function getMe()
-    if component.isAvailable("me_interface") then
-        return component.me_interface
-    elseif component.isAvailable("me_controller") then
-        return component.me_controller
+local function listMethods(ctype)
+    local addr = component.list(ctype, true)()
+    if not addr then
+        -- fall back to a partial match
+        addr = component.list(ctype)()
     end
-    print("No me_interface or me_controller component found.")
-    return nil
+    if not addr then
+        print("No component of type '" .. ctype .. "' found. Run `probe` to see types.")
+        return
+    end
+    printMethods(addr, "'" .. ctype .. "'")
+end
+
+-- Finds the first gt_machine whose getName() is a pumping module, lists its
+-- methods and dumps the raw result of getParameters(), so the parameter API
+-- (which changed in GTNH 2.9) can be read off directly.
+local function dumpPump()
+    for addr in component.list("gt_machine", true) do
+        local proxy = component.proxy(addr)
+        local ok, name = pcall(proxy.getName)
+        if ok and type(name) == "string" and name:find("projectmodulepump", 1, true) then
+            printMethods(addr, "pump '" .. name .. "'")
+            print("")
+            if proxy.getParameters == nil then
+                print("This pump has no getParameters method.")
+                return
+            end
+            local okP, params = pcall(proxy.getParameters)
+            print("== getParameters() ==")
+            if not okP then
+                print("error: " .. tostring(params))
+            else
+                print(require("serialization").serialize(params, true))
+            end
+            return
+        end
+    end
+    print("No gt_machine named projectmodulepump* found. Run `probe gt_machine` to see one.")
+end
+
+local function getMe()
+    local me, err = require("ae2").getMe()
+    if not me then
+        print(err)
+    end
+    return me
 end
 
 local function dumpFluids(substr)
@@ -115,6 +146,8 @@ elseif mode == "fluids" then
     dumpFluids(args[2])
 elseif mode == "items" then
     dumpItems(args[2])
+elseif mode == "pump" then
+    dumpPump()
 else
     listMethods(mode)
 end

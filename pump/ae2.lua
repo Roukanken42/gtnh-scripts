@@ -9,14 +9,21 @@ local component = require("component")
 
 local ae2 = {}
 
--- Returns a me_interface / me_controller proxy, or nil + error message.
+-- Component types that expose the AE2 network API (getFluidsInNetwork, ...).
+-- Since GTNH 2.9 an adapter on an ME Fluid Interface shows up as
+-- "fluid_interface" instead of "me_interface"; both carry the full network API,
+-- as does the ME Controller. Tried in this order.
+ae2.ME_TYPES = { "me_controller", "fluid_interface", "me_interface" }
+
+-- Returns a proxy for the first AE2 network component found, or nil + error.
 function ae2.getMe()
-    if component.isAvailable("me_interface") then
-        return component.me_interface
-    elseif component.isAvailable("me_controller") then
-        return component.me_controller
+    for _, ctype in ipairs(ae2.ME_TYPES) do
+        if component.isAvailable(ctype) then
+            return component.getPrimary(ctype)
+        end
     end
-    return nil, "no me_interface or me_controller component found"
+    return nil, "no AE2 network component found (looked for "
+        .. table.concat(ae2.ME_TYPES, ", ") .. ")"
 end
 
 -- Given the gas definitions (see gases.lua), returns a map of

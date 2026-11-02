@@ -124,8 +124,11 @@ the LSC's own 5-minute averages (in − out − passive loss). With wireless on 
 averages are useless: every 5 minutes the LSC is rebalanced to the wireless
 threshold, and that transfer counts as LSC input or output, so they swing around
 zero. Instead the controller diffs the **LSC + wireless total** over the last
-`cfg.netWindow` seconds (default 60) — a rebalance only moves EU within that
-total, so the diff is the true net flow. The EU IN / EU OUT cards are still the
+`cfg.netWindow` seconds — a rebalance only moves EU within that total, so the diff
+is the true net flow. The window is rounded up to a whole number of 5-minute
+periods (default 300 s), because other LSCs on the network push into and drain
+the pool every 5 minutes on their own timers; NET FLOW shows "measuring" until a
+full window has been collected. The EU IN / EU OUT cards are still the
 LSC's own figures, marked "incl. rebalance" when wireless is on.
 
 Press **G** to swap the generators table for a **history** view: the **net flow**

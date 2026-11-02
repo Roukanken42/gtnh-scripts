@@ -53,7 +53,15 @@ local MAX_HISTORY = 300
 
 -- Net flow measured by diffing the stored total over a rolling window -- see
 -- measureFlow below. Samples are { t = uptime seconds, total = digit string }.
-local flowWindow = math.max(cfg.netWindow or 60, 5)
+-- The window is a whole number of 5-minute periods (cfg.netWindow rounded UP to
+-- one): every OTHER LSC on the wireless network also rebalances every 5 minutes,
+-- pushing into or draining the pool on its own timer. A window of exactly N
+-- periods holds exactly N of each one's rebalances wherever their timers fall;
+-- any other length holds one more or one fewer depending on phase, and the
+-- reading would jump with it.
+local REBALANCE_PERIOD = 300
+local flowWindow = REBALANCE_PERIOD
+    * math.max(1, math.ceil((cfg.netWindow or REBALANCE_PERIOD) / REBALANCE_PERIOD))
 local flowSamples = {}
 local flowSource = nil   -- the energy composition the samples were taken of
 local lastFlow = {}
@@ -120,11 +128,15 @@ local function measureFlow(s, source, stored, maxS)
     if wirelessActive(s) then
         local first = flowSamples[1]
         local dt = now - first.t
-        -- Too short a span makes a single burst look like a trend.
-        if dt >= math.min(flowWindow, 10) then
+        -- Nothing until a full window is in: a shorter span would see some other
+        -- LSCs' rebalances and not others.
+        if dt >= flowWindow then
             flow.net = bignum.diff(stored, first.total) / (dt * 20)
+            flow.label = "measured " .. math.floor(flowWindow / 60) .. "m"
+        else
+            flow.label = string.format("measuring %d/%dm",
+                math.floor(dt / 60), math.floor(flowWindow / 60))
         end
-        flow.label = "measured " .. math.floor(math.min(dt, flowWindow) + 0.5) .. "s"
     else
         flow.net = s.net
         flow.label = "LSC 5m avg"

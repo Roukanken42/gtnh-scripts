@@ -303,7 +303,7 @@ local function drawKPIs(state, y)
             (net >= 0 and "+" or "-") .. human(math.abs(net)) .. "/t", net >= 0 and C.good or C.crit,
             flow.label); x = x + w + gap
     else
-        kpiCard(x, y, w, "NET FLOW", "--", C.faint, "measuring..."); x = x + w + gap
+        kpiCard(x, y, w, "NET FLOW", "--", C.faint, flow.label or "measuring..."); x = x + w + gap
     end
 
     local timeVal, timeSub

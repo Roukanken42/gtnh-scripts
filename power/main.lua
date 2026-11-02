@@ -47,9 +47,16 @@ local showLog = false
 local showGraph = false     -- swap the generators table for the history graph (G)
 local exceedLogged = false  -- whether the "output exceeds wireless cap" warning is active
 
--- Rolling history for the graph view, one sample per control cycle.
+-- Rolling history for the graph view, one net-flow sample per control cycle.
 local history = {}
 local MAX_HISTORY = 300
+
+-- Net flow measured by diffing the stored total over a rolling window -- see
+-- measureFlow below. Samples are { t = uptime seconds, total = digit string }.
+local flowWindow = math.max(cfg.netWindow or 60, 5)
+local flowSamples = {}
+local flowSource = nil   -- the energy composition the samples were taken of
+local lastFlow = {}
 
 -- Latest snapshot + derived control values (repainted between control cycles).
 local lastState = { present = false }
@@ -89,6 +96,50 @@ local function computeEnergy(s)
     return clamp01(s.fill or 0), "LSC", s.storedEU or "0", s.capacityEU or "0"
 end
 
+-- Net flow in EU/t, and the time to full / empty.
+--
+-- With wireless on, the LSC's own 5-minute in/out averages are useless: every 5
+-- minutes the LSC is rebalanced to the wireless threshold, and that transfer
+-- counts as LSC input or output, so the averages swing around zero. The pool the
+-- controller acts on is LSC + wireless, and a rebalance only moves EU WITHIN it --
+-- so its total, diffed over time, is the true net flow. Without wireless the LSC's
+-- own 5-minute averages are right, and are used as before.
+--
+-- `stored` / `maxS` are the pool computeEnergy measured. Uptime counts world ticks
+-- (20 a second), so server lag does not distort the rate.
+local function measureFlow(s, source, stored, maxS)
+    local now = computer.uptime()
+    if source ~= flowSource then flowSamples, flowSource = {}, source end
+    flowSamples[#flowSamples + 1] = { t = now, total = stored }
+    -- Keep one sample at or before the window start, so the diff spans it fully.
+    while #flowSamples > 2 and now - flowSamples[2].t >= flowWindow do
+        table.remove(flowSamples, 1)
+    end
+
+    local flow = {}
+    if wirelessActive(s) then
+        local first = flowSamples[1]
+        local dt = now - first.t
+        -- Too short a span makes a single burst look like a trend.
+        if dt >= math.min(flowWindow, 10) then
+            flow.net = bignum.diff(stored, first.total) / (dt * 20)
+        end
+        flow.label = "measured " .. math.floor(math.min(dt, flowWindow) + 0.5) .. "s"
+    else
+        flow.net = s.net
+        flow.label = "LSC 5m avg"
+    end
+
+    -- ETA in seconds, from approximate magnitudes (display only).
+    local net = flow.net
+    if net and net > 0 then
+        flow.timeToFull = math.max(0, bignum.approx(maxS) - bignum.approx(stored)) / (net * 20)
+    elseif net and net < 0 then
+        flow.timeToEmpty = bignum.approx(stored) / (-net * 20)
+    end
+    return flow
+end
+
 -- Staged-threshold hysteresis for one generator. on when level <= onBelow, off
 -- when level >= offAbove, hold otherwise. minOn keeps a just-started generator on.
 local function desiredFor(g, level, now)
@@ -126,6 +177,7 @@ local function runCycle()
     end
     local level, source, stored, maxTot = computeEnergy(s)
     lastLevel, lastSource, lastStored, lastMax = level, source, stored, maxTot
+    lastFlow = measureFlow(s, source, stored, maxTot)
 
     -- Wireless output cap: sustained output can't exceed threshold / 5min. Warn
     -- (once per crossing) when the 5-min average output is over it.
@@ -142,8 +194,7 @@ local function runCycle()
     -- Record a history sample (kept even while paused, for the graph).
     local online = 0
     for _, g in ipairs(gens) do if g.on then online = online + 1 end end
-    history[#history + 1] = { level = level, net = s.net or 0,
-        euIn = s.euIn or 0, euOut = s.euOut or 0, online = online }
+    history[#history + 1] = { net = lastFlow.net, online = online }
     if #history > MAX_HISTORY then table.remove(history, 1) end
 
     if paused then
@@ -192,6 +243,7 @@ local function buildState()
         source = lastSource, level = lastLevel,
         energyStored = lastStored, energyMax = lastMax,
         lsc = s,
+        flow = lastFlow,
         generators = gview,
         totals = { online = online, total = #gens, onlineEU = onlineEU },
         history = history, historyStep = interval,
@@ -230,6 +282,7 @@ local function refresh()
         lastState = lscDev:read()
         if lastState.present then
             lastLevel, lastSource, lastStored, lastMax = computeEnergy(lastState)
+            lastFlow = measureFlow(lastState, lastSource, lastStored, lastMax)
         end
     end
     tick = tick + 1

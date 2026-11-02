@@ -147,8 +147,10 @@ function LSC:read()
 
     -- Flow rates (EU/t numbers). Big lasers transport power in huge bursts, so
     -- the instantaneous / 5-second figures are far too spiky to control on -- use
-    -- the 5-MINUTE averages for net flow and the fill/drain ETA. The per-tick
-    -- line and the getter are only fallbacks if the 5-minute line is missing.
+    -- the 5-MINUTE averages. The per-tick line and the getter are only fallbacks
+    -- if the 5-minute line is missing. In WIRELESS mode these are useless for net
+    -- flow: the 5-minute rebalance against the wireless network counts as LSC
+    -- input/output too, so main.lua measures net flow by diffing totals instead.
     s.euIn = util.parseDecimal(sensorArg(lines, "avg_eu_in.min5") or "")
         or util.parseDecimal(sensorArg(lines, "eu_in") or "")
         or call(proxy, "getEUInputAverage") or 0
@@ -185,16 +187,6 @@ function LSC:read()
     s.capacitors = caps
     s.wirelessThreshold = threshold
     s.outputCap = threshold ~= "0" and (bignum.approx(threshold) / BALANCE_TICKS) or nil
-
-    -- ETA in seconds (20 ticks/s), from approximate magnitudes (display only).
-    local perSec = s.net * 20
-    local capA = bignum.approx(s.capacityEU)
-    local storedA = bignum.approx(s.storedEU)
-    if perSec > 0 then
-        s.timeToFull = math.max(0, capA - storedA) / perSec
-    elseif perSec < 0 then
-        s.timeToEmpty = storedA / (-perSec)
-    end
 
     return s
 end

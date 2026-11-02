@@ -10,7 +10,7 @@
 --   dryRun, paused, showLog, showGraph  booleans
 --   cycle, tick              integers   (tick drives the spinner)
 --   updated                  string     "HH:MM:SS"
---   history = { { level (0..1), net (EU/t) }, ... }  -- oldest first
+--   history = { { net (EU/t|nil) }, ... }  -- oldest first; nil = not measured yet
 --   historyStep              seconds between history samples
 --   source                   "LSC" | "LSC + WIRELESS"   -- energy composition
 --   level                    0..1       -- effective control level (the bar)
@@ -19,7 +19,9 @@
 --           euIn, euOut, passiveLoss, net (EU/t numbers, 5-min averaged),
 --           wirelessEnabled, wirelessEU (digit string),
 --           outputCap (EU/t number|nil), capacitors, wirelessThreshold,
---           timeToFull, timeToEmpty (seconds|nil), maintenance, active }
+--           maintenance, active }
+--   flow = { net (EU/t|nil), label (how it was measured),
+--            timeToFull, timeToEmpty (seconds|nil) }  -- what NET and TIME show
 --   generators = { { name, output (num), prio, onBelow, offAbove,
 --                    on (bool|nil), status "ON"|"OFF"|"HOLD", sinceSec }, ... }
 --   totals = { online, total, onlineEU }
@@ -91,7 +93,6 @@ local function trunc(s, w)
 end
 local function padR(s, w) s = trunc(s, w); return s .. string.rep(" ", w - #s) end
 local function padL(s, w) s = trunc(s, w); return string.rep(" ", w - #s) .. s end
-local function clamp01(v) return v < 0 and 0 or v > 1 and 1 or v end
 
 local HUMAN_PREFIX = { "k", "M", "G", "T", "P", "E", "Z", "Y", "R", "Q" }
 
@@ -288,19 +289,28 @@ local function drawKPIs(state, y)
     local level = state.level or 0
     kpiCard(x, y, w, "ENERGY", string.format("%.1f%%", level * 100), fillColor(level),
         humanBig(state.energyStored) .. " EU"); x = x + w + gap
-    kpiCard(x, y, w, "EU IN 5m", human(lsc.euIn or 0) .. "/t", C.good); x = x + w + gap
-    kpiCard(x, y, w, "EU OUT 5m", human(lsc.euOut or 0) .. "/t", C.pump); x = x + w + gap
+    -- Under wireless the LSC's own in/out include the 5-minute rebalance, so they
+    -- are shown for what they are, and NET comes from the measured flow instead.
+    local wirelessOn = (state.source or ""):find("WIRELESS", 1, true) ~= nil
+    local ioSub = wirelessOn and "incl. rebalance" or nil
+    kpiCard(x, y, w, "EU IN 5m", human(lsc.euIn or 0) .. "/t", C.good, ioSub); x = x + w + gap
+    kpiCard(x, y, w, "EU OUT 5m", human(lsc.euOut or 0) .. "/t", C.pump, ioSub); x = x + w + gap
 
-    local net = lsc.net or 0
-    kpiCard(x, y, w, "NET FLOW",
-        (net >= 0 and "+" or "-") .. human(math.abs(net)) .. "/t", net >= 0 and C.good or C.crit,
-        net > 0 and "charging" or net < 0 and "draining" or "steady"); x = x + w + gap
+    local flow = state.flow or {}
+    local net = flow.net
+    if net then
+        kpiCard(x, y, w, "NET FLOW",
+            (net >= 0 and "+" or "-") .. human(math.abs(net)) .. "/t", net >= 0 and C.good or C.crit,
+            flow.label); x = x + w + gap
+    else
+        kpiCard(x, y, w, "NET FLOW", "--", C.faint, "measuring..."); x = x + w + gap
+    end
 
     local timeVal, timeSub
-    if (lsc.timeToFull or 0) > 0 then
-        timeVal, timeSub = dur(lsc.timeToFull), "to full"
-    elseif (lsc.timeToEmpty or 0) > 0 then
-        timeVal, timeSub = dur(lsc.timeToEmpty), "to EMPTY"
+    if (flow.timeToFull or 0) > 0 then
+        timeVal, timeSub = dur(flow.timeToFull), "to full"
+    elseif (flow.timeToEmpty or 0) > 0 then
+        timeVal, timeSub = dur(flow.timeToEmpty), "to EMPTY"
     else
         timeVal, timeSub = "--", nil
     end
@@ -431,14 +441,15 @@ local function canvasBlit(cvs, x0, y0)
     end
 end
 
--- Historical view (toggle: G). Two stacked bands sharing the time axis -- energy
--- level % as a filled area, and net flow as points around a zero baseline
--- (position = charge/drain sign). Two scales, so two charts, not a dual axis;
--- position is the primary channel in both, so colour is secondary. Both are drawn
--- on braille canvases for sub-cell precision.
+-- Historical view (toggle: G): net flow as points around a zero baseline, on a
+-- braille canvas for sub-cell precision. Position is the charge/drain sign, colour
+-- only repeats it. (The stored total is not graphed: it moves far too slowly to
+-- read anything from.)
 local function drawGraph(state, x, y, w, h)
     local hist = state.history or {}
-    panel(x, y, w, h, "HISTORY  " .. EMDASH .. "  ENERGY %  " .. MIDDOT .. "  NET EU/t", C.accent)
+    local flow = state.flow or {}
+    panel(x, y, w, h, "HISTORY  " .. EMDASH .. "  NET EU/t"
+        .. (flow.label and ("  " .. MIDDOT .. "  " .. flow.label) or ""), C.accent)
     local innerX = x + 2
     local top = y + 1
     local axisRow = y + h - 2
@@ -451,7 +462,8 @@ local function drawGraph(state, x, y, w, h)
     local labW = 7
     local plotX = innerX + labW
     local plotW = (w - 4) - labW
-    if plotW < 4 or (axisRow - top) < 4 then
+    local nH = axisRow - top
+    if plotW < 4 or nH < 3 then
         text(innerX, top + 1, "Window too small for the graph.", C.faint, C.panel)
         return
     end
@@ -462,55 +474,33 @@ local function drawGraph(state, x, y, w, h)
     local first = #hist - shown + 1
     local function subX(i) return subCols - shown + (i - first) end -- newest at right
 
-    -- Split the height: energy band (top), a gap row, net band, x-axis row.
-    local avail = axisRow - top
-    local eH = math.max(3, math.floor(avail * 0.55))
-    local nH = avail - eH - 1
-    if nH < 3 then eH = avail; nH = 0 end
-    local eBase = top + eH - 1
-    local eMid = math.floor((top + eBase) / 2)
-
-    -- ENERGY: filled area (fill from the bottom up to level * height).
-    text(innerX, top, padL("100%", labW - 1), C.faint, C.panel)
-    text(innerX, eMid, padL("50%", labW - 1), C.faint, C.panel)
-    text(innerX, eBase, padL("0%", labW - 1), C.faint, C.panel)
-    local eRows = eH * 4
-    local eCanvas = canvasNew(plotW, eH)
+    -- Points around a zero baseline, peak-scaled, green up / red down. A sample
+    -- with no measurement yet (nil) leaves a gap rather than a fake zero.
+    local nTop = top
+    local nBase = nTop + nH - 1
+    local nRows = nH * 4
+    local nMidPx = math.floor(nRows / 2)
+    local midCell = nTop + math.floor(nMidPx / 4)
+    local peak = 1
     for i = first, #hist do
-        local lvl = clamp01(hist[i].level or 0)
-        local fillPx = math.floor(lvl * eRows + 0.5)
-        local col = fillColor(lvl)
-        local px = subX(i)
-        for p = 0, fillPx - 1 do canvasSet(eCanvas, px, eRows - 1 - p, col) end
+        local a = math.abs(hist[i].net or 0)
+        if a > peak then peak = a end
     end
-    canvasBlit(eCanvas, plotX, top)
-
-    -- NET: points around a zero baseline, peak-scaled, green up / red down.
-    if nH > 0 then
-        local nTop = eBase + 2
-        local nBase = nTop + nH - 1
-        local nRows = nH * 4
-        local nMidPx = math.floor(nRows / 2)
-        local midCell = nTop + math.floor(nMidPx / 4)
-        local peak = 1
-        for i = first, #hist do
-            local a = math.abs(hist[i].net or 0)
-            if a > peak then peak = a end
-        end
-        for cx = plotX, plotX + plotW - 1 do text(cx, midCell, BOX.h, C.faint, C.panel) end
-        text(innerX, nTop, padL("+" .. human(peak), labW - 1), C.good, C.panel)
-        text(innerX, midCell, padL("0", labW - 1), C.faint, C.panel)
-        text(innerX, nBase, padL("-" .. human(peak), labW - 1), C.crit, C.panel)
-        local nCanvas = canvasNew(plotW, nH)
-        for i = first, #hist do
-            local v = hist[i].net or 0
+    for cx = plotX, plotX + plotW - 1 do text(cx, midCell, BOX.h, C.faint, C.panel) end
+    text(innerX, nTop, padL("+" .. human(peak), labW - 1), C.good, C.panel)
+    text(innerX, midCell, padL("0", labW - 1), C.faint, C.panel)
+    text(innerX, nBase, padL("-" .. human(peak), labW - 1), C.crit, C.panel)
+    local nCanvas = canvasNew(plotW, nH)
+    for i = first, #hist do
+        local v = hist[i].net
+        if v then
             local frac = math.max(-1, math.min(1, v / peak))
             local py = nMidPx - math.floor(frac * nMidPx + 0.5)
             if py < 0 then py = 0 elseif py > nRows - 1 then py = nRows - 1 end
             canvasSet(nCanvas, subX(i), py, v >= 0 and C.good or C.crit)
         end
-        canvasBlit(nCanvas, plotX, nTop)
     end
+    canvasBlit(nCanvas, plotX, nTop)
 
     -- X-axis: time span from oldest shown sample to now.
     local span = (shown - 1) * (state.historyStep or 0)

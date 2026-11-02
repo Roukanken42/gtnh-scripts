@@ -62,6 +62,28 @@ function bignum.approx(a)
     return bignum.ratio(a, "1")
 end
 
+-- a - b as a Lua number, computed exactly on the digit strings, so it stays
+-- precise however big the operands are -- bignum.approx keeps only ~15 digits,
+-- which on a 10^18 EU total is an error of thousands of EU. The RESULT must fit a
+-- double exactly (|a - b| < 2^53), which an energy delta over a minute does.
+function bignum.diff(a, b)
+    a = bignum.norm(a)
+    b = bignum.norm(b)
+    local sign = 1
+    if bignum.cmp(a, b) < 0 then a, b, sign = b, a, -1 end
+    local i, j, borrow = #a, #b, 0
+    local out = {}
+    while i > 0 do
+        local d = tonumber(a:sub(i, i)) - (j > 0 and tonumber(b:sub(j, j)) or 0) - borrow
+        if d < 0 then d, borrow = d + 10, 1 else borrow = 0 end
+        out[#out + 1] = d
+        i, j = i - 1, j - 1
+    end
+    local s = {}
+    for k = #out, 1, -1 do s[#s + 1] = out[k] end
+    return sign * (tonumber((table.concat(s):gsub("^0+", ""))) or 0)
+end
+
 -- Exact addition of two big integers (schoolbook, on digit strings). Used to
 -- combine LSC stored/capacity with the wireless pool for the energy level/bar.
 function bignum.add(a, b)

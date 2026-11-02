@@ -119,14 +119,21 @@ screen or `cfg.ui = false`. The dashboard repaints (and re-reads the LSC via a
 single `getSensorInformation()` call) every `cfg.uiRefresh`, decoupled from the
 control cycle; frames are double-buffered so they don't flicker.
 
-Press **G** to swap the generators table for a **history** view: two stacked
-charts sharing the time axis — the **energy level %** as an area (its height is
-the reading; the fill-gradient colour is secondary) and the **net flow** as
-points around a zero baseline (green above = charging, red below = draining,
-peak-scaled). Both are drawn with **braille** characters (a 2×4 dot matrix per
-cell), for 2× horizontal / 4× vertical sub-cell precision. One sample is recorded
-per control cycle, so the window spans roughly `2 × graph width × cfg.sleep`. Two
-different scales, so two charts rather than a dual axis.
+**Net flow** is measured differently depending on wireless. Without it, it is
+the LSC's own 5-minute averages (in − out − passive loss). With wireless on those
+averages are useless: every 5 minutes the LSC is rebalanced to the wireless
+threshold, and that transfer counts as LSC input or output, so they swing around
+zero. Instead the controller diffs the **LSC + wireless total** over the last
+`cfg.netWindow` seconds (default 60) — a rebalance only moves EU within that
+total, so the diff is the true net flow. The EU IN / EU OUT cards are still the
+LSC's own figures, marked "incl. rebalance" when wireless is on.
+
+Press **G** to swap the generators table for a **history** view: the **net flow**
+as points around a zero baseline (green above = charging, red below = draining,
+peak-scaled), drawn with **braille** characters (a 2×4 dot matrix per cell) for
+2× horizontal / 4× vertical sub-cell precision. One sample is recorded per control
+cycle, so the window spans roughly `2 × graph width × cfg.sleep`. The stored
+total is not graphed: it moves far too slowly to read anything from.
 
 ## Files
 

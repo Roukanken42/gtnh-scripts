@@ -69,6 +69,12 @@ cfg.max = nil
 -- hardware driven).
 cfg.sleep = 5
 
+-- Seconds of history the net flow is measured over when WIRELESS is on: the
+-- change in LSC + wireless total across this window. The LSC's own averages
+-- cannot be used then (the 5-minute wireless rebalance counts as its in/out).
+-- Longer is steadier, shorter reacts faster. nil = 60.
+cfg.netWindow = 60
+
 -- Dashboard repaint rate in seconds, decoupled from the control cycle: the screen
 -- re-reads the LSC and repaints this often (each read is a single
 -- getSensorInformation() call) while switching decisions are only made every

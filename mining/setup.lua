@@ -205,7 +205,8 @@ else
 end
 
 local transposers = listByType("transposer")
-local interfaceComps = listByType("me_interface")
+-- Item AND fluid interfaces: since 2.9 a fluid interface is its own type.
+local interfaceComps = require("lib.hw.me").interfaces()
 local minerList = miners.discover()
 -- Clean slate: clear leftover drone configs, stop miners, wait for them to idle.
 step("Preparing miners (clearing drone configs, waiting for idle)...")

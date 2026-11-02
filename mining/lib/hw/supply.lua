@@ -34,6 +34,7 @@
 local drones = require("lib.gtnh.drones")
 local plasmas = require("lib.gtnh.plasmas")
 local estimate = require("lib.calc.estimate")
+local me = require("lib.hw.me")
 
 local supply = {}
 
@@ -425,7 +426,7 @@ function supply.readPatterns(itf, maxSlots)
 end
 
 -- Finds the supply interface: the configured address, or else autodetected as the
--- one me_interface that HAS patterns (the per-module station interfaces in
+-- one ME interface (item or fluid, see me.lua) that HAS patterns (the per-module station interfaces in
 -- transport.lua carry none). Ambiguity is an error naming the candidates rather
 -- than a coin flip. Returns proxy, or nil + error.
 -- Returns proxy, how -- where `how` is "configured" or "found", so a caller can
@@ -451,14 +452,14 @@ function supply.find(address)
     end
 
     local found = {}
-    for addr in component.list("me_interface") do
+    for _, addr in ipairs(me.interfaces(component)) do
         local p = component.proxy(addr)
         if #supply.readPatterns(p, 4) > 0 then found[#found + 1] = p end
     end
     if #found == 1 then return found[1], stale and "found (" .. stale .. ")" or "found" end
     if #found == 0 then
         return nil, (stale and (stale .. ", and ") or "")
-            .. "no me_interface with patterns found -- add an adapter to the "
+            .. "no ME interface with patterns found -- add an adapter to the "
             .. "main-net supply interface, or set cfg.supply.interface"
     end
     local addrs = {}

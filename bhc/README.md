@@ -94,8 +94,14 @@ errs low. With no saved state, it treats the hole as unstable. If you know the
 stability (WAILA shows it), start with `main --stability=37`.
 
 Keys: **SPACE/P** pauses. While paused the spacetime hatch is off, no items are
-inserted, and the machine is left as it is. **Q** quits. Ctrl+C turns the
-spacetime hatch off and leaves the machine as it is.
+inserted, and the machine is left as it is. **Q** quits.
+
+On exit (Q, Ctrl+C or an error) the script turns the spacetime hatch off and
+**blocks new recipes**. With nobody watching, an open hole would go unstable and
+void whatever arrives next. A running recipe still finishes. At startup it
+blocks new recipes first and lets them through again once it knows the hole is
+safe. It cannot do this if the computer loses power or crashes hard: the machine
+keeps whatever state it had at that moment.
 
 ## Tuning (`config.lua`)
 

@@ -301,7 +301,14 @@ local function waitPulse(seconds)
 end
 
 local function startup()
-    if not dry then hw:setSpacetime(false) end
+    -- Block new recipes before anything else: a hole left open by an earlier
+    -- run may be unstable by now, and items arriving while we look would be
+    -- voided. The first decision re-allows them as soon as that is safe.
+    if not dry then
+        hw:setWork(false)
+        hw:setSpacetime(false)
+    end
+    workSet = false
     spacetimeOn = false
     reqLevel = hw:level("request") or 0
     if reqLevel > 0 then lastReqHigh = now() end
@@ -419,8 +426,19 @@ log("SPACE/P pause, Q quit.")
 if uiActive then ui.render(buildView()) end
 
 local ok, err = pcall(loop)
-if not dry then pcall(hw.setSpacetime, hw, false) end
+-- Leave the machine safe while nobody watches it: no spacetime, and no new
+-- recipes -- an open hole would go unstable and void whatever arrives, and a
+-- seed left in the bus would open one. A running recipe still finishes.
+if not dry then
+    pcall(hw.setSpacetime, hw, false)
+    pcall(hw.setWork, hw, false)
+end
 save(st)
 ui.shutdown()
-print("BHC controller stopped. Spacetime feed is off; the machine was left as it was.")
+if dry then
+    print("BHC controller stopped (dry run: nothing was touched).")
+else
+    print("BHC controller stopped. Spacetime hatch off, new recipes blocked;")
+    print("run `main` again to resume (it re-allows recipes when safe).")
+end
 if not ok then error(err, 0) end

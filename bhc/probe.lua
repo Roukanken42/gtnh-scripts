@@ -14,7 +14,12 @@ local computer = require("computer")
 local args = { ... }
 local mode = args[1]
 
-local function sideName(s) return sides[s] or tostring(s) end
+-- Side numbers are what config.lua needs. A transposer or Redstone I/O block
+-- uses absolute sides (down/up/north/south/west/east); a redstone card inside
+-- a computer uses sides relative to the case (bottom/top/back/front/right/left).
+local ABS = { [0] = "down", "up", "north", "south", "west", "east" }
+local REL = { [0] = "bottom", "top", "back", "front", "right", "left" }
+local function sideName(s) return string.format("%d=%s/%s", s, ABS[s] or "?", REL[s] or "?") end
 
 local function listComponents()
     local list = {}
@@ -27,15 +32,24 @@ local function listComponents()
 end
 
 local function probeSides()
+    local hw = require("hw")
+    local fluid = (require("config").spacetimeFluid or "spacetime"):lower()
     for addr in component.list("transposer", true) do
         local tp = component.proxy(addr)
         print("== transposer " .. addr)
+        local found, err = hw.resolveSides(hw.surveySides(tp, fluid), {})
+        if found then
+            print(string.format("  found: tank %d, interface %d, bus %d",
+                found.tankSide, found.interfaceSide, found.busSide))
+        else
+            print("  not recognised: " .. err)
+        end
         for side = 0, 5 do
             local _, name = pcall(tp.getInventoryName, side)
             local _, size = pcall(tp.getInventorySize, side)
             if type(size) ~= "number" then name, size = nil, nil end
             local okT, tanks = pcall(tp.getFluidInTank, side)
-            local line = string.format("  %-6s (%d) ", sideName(side), side)
+            local line = string.format("  %-16s ", sideName(side))
             if name or size then
                 line = line .. string.format("inventory %s, %s slots", tostring(name), tostring(size))
             end
@@ -78,7 +92,7 @@ local function probeRedstone(seconds)
     while computer.uptime() < deadline do
         local _, addr, side, old, new, color = event.pull(deadline - computer.uptime(), "redstone_changed")
         if addr then
-            print(string.format("%7.2f  %s %-6s %d -> %d%s", computer.uptime(), addr:sub(1, 8), sideName(side),
+            print(string.format("%7.2f  %s %-16s %d -> %d%s", computer.uptime(), addr:sub(1, 8), sideName(side),
                 old, new, color and (" color " .. color) or ""))
             if old == 0 and new > 0 then
                 local k = addr:sub(1, 8) .. " " .. sideName(side)
@@ -92,7 +106,11 @@ end
 local function probeMachine()
     for addr in component.list("gt_machine", true) do
         local m = component.proxy(addr)
-        local function call(f) local ok, v = pcall(m[f]); return ok and v or nil end
+        local function call(f)
+            local ok, v = pcall(m[f])
+            if ok then return v end
+            return "error"
+        end
         print(string.format("%s  %s  active=%s  progress=%s/%s  workAllowed=%s", addr, tostring(call("getName")),
             tostring(call("isMachineActive")), tostring(call("getWorkProgress")),
             tostring(call("getWorkMaxProgress")), tostring(call("isWorkAllowed"))))

@@ -32,6 +32,114 @@ local function findMachine(address)
     return nil, "several gt_machines and none named *blackhole*: set cfg.machine.address"
 end
 
+-- ---- transposer discovery -------------------------------------------------
+
+hw.SIDE_NAMES = { [0] = "down", "up", "north", "south", "west", "east" }
+
+-- Fluid tanks seen through a transposer side, as a plain list.
+local function tankList(tp, side)
+    local ok, res = pcall(tp.getFluidInTank, side)
+    if not ok or type(res) ~= "table" then return {} end
+    local list = (res.amount or res.capacity) and { res } or res
+    local out = {}
+    for i = 1, (list.n or #list) do
+        if type(list[i]) == "table" then out[#out + 1] = list[i] end
+    end
+    return out
+end
+
+local function isFluid(f, match)
+    local id = ((f.name or "") .. " " .. (f.label or "")):lower()
+    return id:find(match, 1, true) ~= nil
+end
+
+-- What is on each side of a transposer.
+function hw.surveySides(tp, fluidMatch)
+    local survey = {}
+    for side = 0, 5 do
+        local okN, name = pcall(tp.getInventoryName, side)
+        local okS, size = pcall(tp.getInventorySize, side)
+        local info = { side = side, tanks = 0, spacetime = 0 }
+        if okS and type(size) == "number" then
+            info.size = size
+            info.name = okN and type(name) == "string" and name or "?"
+        end
+        for _, f in ipairs(tankList(tp, side)) do
+            info.tanks = info.tanks + 1
+            if f.amount and isFluid(f, fluidMatch) then info.spacetime = info.spacetime + f.amount end
+        end
+        survey[side] = info
+    end
+    return survey
+end
+
+-- Works out which side is which from a survey. Sides already set in `fixed`
+-- (from config) are kept. Returns { tankSide, interfaceSide, busSide } or
+-- nil + why.
+--   interface  an inventory whose name mentions "interface"
+--   tank       the side holding spacetime; failing that, the one other side
+--              with fluid tanks (the replenisher may be empty right now)
+--   bus        a GregTech block (gt.blockmachines) inventory, not the tank
+function hw.resolveSides(survey, fixed)
+    local found = {
+        interfaceSide = fixed.interfaceSide,
+        tankSide = fixed.tankSide,
+        busSide = fixed.busSide,
+    }
+    local function pick(key, label, test)
+        if found[key] ~= nil then return true end
+        local hits = {}
+        for side = 0, 5 do
+            if test(survey[side]) then hits[#hits + 1] = side end
+        end
+        if #hits == 1 then found[key] = hits[1]; return true end
+        return false, #hits == 0 and ("no " .. label .. " found")
+            or ("more than one " .. label .. " (sides " .. table.concat(hits, ", ") .. ")")
+    end
+    local function taken(side)
+        return side == found.interfaceSide or side == found.tankSide or side == found.busSide
+    end
+
+    local ok, err = pick("interfaceSide", "ME interface", function(s)
+        return s.name and s.name:lower():find("interface", 1, true) ~= nil
+    end)
+    if not ok then return nil, err end
+    if not pick("tankSide", "spacetime tank", function(s)
+        return s.spacetime > 0 and not taken(s.side)
+    end) then
+        ok, err = pick("tankSide", "spacetime tank", function(s)
+            return s.tanks > 0 and not taken(s.side)
+        end)
+        if not ok then return nil, err end
+    end
+    ok, err = pick("busSide", "GT input bus", function(s)
+        return s.name == "gt.blockmachines" and not taken(s.side)
+    end)
+    if not ok then return nil, err end
+    return found
+end
+
+-- The transposer (configured, or the first one around) and its sides.
+local function findTransposer(cfg)
+    local t = cfg.transposer or {}
+    local candidates = {}
+    if t.address then
+        local p, err = proxyOf("transposer", t.address)
+        if not p then return nil, err end
+        candidates[1] = p
+    else
+        for addr in component.list("transposer", true) do candidates[#candidates + 1] = component.proxy(addr) end
+        if #candidates == 0 then return nil, "no transposer found" end
+    end
+    local firstErr
+    for _, tp in ipairs(candidates) do
+        local sides, err = hw.resolveSides(hw.surveySides(tp, cfg.spacetimeFluid:lower()), t)
+        if sides then return tp, sides end
+        firstErr = firstErr or ("transposer " .. tp.address:sub(1, 8) .. ": " .. err)
+    end
+    return nil, firstErr .. " -- run `probe sides`, or set the side in cfg.transposer"
+end
+
 -- Builds the hardware handle, or returns nil + a list of problems.
 function hw.init(cfg)
     local self = setmetatable({ cfg = cfg }, hw)
@@ -42,11 +150,14 @@ function hw.init(cfg)
     end
 
     self.machine = need(findMachine(cfg.machine.address))
-    self.tp = need(proxyOf("transposer", cfg.transposer.address))
+    local tp, sides = findTransposer(cfg)
+    self.tp = need(tp, sides)
+    if tp then self.sides = sides end
     self.rs = {}
     for name, sig in pairs(cfg.signals) do
         local p, err = proxyOf("redstone", sig.address)
         self.rs[name] = need(p, name .. " signal: " .. tostring(err))
+        need(type(sig.side) == "number", "cfg.signals." .. name .. ".side is not set")
     end
     if cfg.meAddress then
         local full = component.get(cfg.meAddress)
@@ -54,6 +165,13 @@ function hw.init(cfg)
     end
     if #problems > 0 then return nil, problems end
     return self
+end
+
+-- "tank up(1), interface west(4), bus east(5)"
+function hw:describeSides()
+    local function n(s) return string.format("%s(%d)", hw.SIDE_NAMES[s] or "?", s) end
+    return string.format("tank %s, interface %s, bus %s",
+        n(self.sides.tankSide), n(self.sides.interfaceSide), n(self.sides.busSide))
 end
 
 -- ---- redstone ---------------------------------------------------------------
@@ -99,7 +217,7 @@ function hw:fluid(side)
     return total
 end
 
-function hw:tank() return self:fluid(self.cfg.transposer.tankSide) end
+function hw:tank() return self:fluid(self.sides.tankSide) end
 
 -- ---- items ------------------------------------------------------------------
 
@@ -140,14 +258,14 @@ function hw:stock()
         end
         return net(items.seed), net(items.collapser)
     end
-    local found, err = self:scan(self.cfg.transposer.interfaceSide)
+    local found, err = self:scan(self.sides.interfaceSide)
     if not found then return 0, 0, err end
     return countIn(found, items.seed), countIn(found, items.collapser)
 end
 
 -- Seeds and collapsers sitting in the input bus.
 function hw:inBus()
-    local found, err = self:scan(self.cfg.transposer.busSide)
+    local found, err = self:scan(self.sides.busSide)
     if not found then return nil, nil, err end
     return countIn(found, self.cfg.items.seed), countIn(found, self.cfg.items.collapser)
 end
@@ -155,7 +273,7 @@ end
 -- Moves one seed/collapser from the interface into the bus. Returns ok, err.
 function hw:insert(kind)
     local label = self.cfg.items[kind]
-    local t = self.cfg.transposer
+    local t = self.sides
     local found, err = self:scan(t.interfaceSide)
     if not found then return false, "cannot read the interface: " .. tostring(err) end
     local e = found[label]

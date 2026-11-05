@@ -413,6 +413,7 @@ end
 
 local uiActive = cfg.ui ~= false and ui.init()
 log("BHC controller starting" .. (dry and " [DRY RUN: nothing is touched]" or "") .. ".")
+log("Transposer: " .. hw:describeSides() .. ".")
 startup()
 log("SPACE/P pause, Q quit.")
 if uiActive then ui.render(buildView()) end

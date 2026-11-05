@@ -37,7 +37,7 @@ for that drain.
 | What | Where | Config |
 |---|---|---|
 | Adapter | touching the BHC controller | `cfg.machine` (auto) |
-| Transposer | touching the spacetime tank, the ME interface with seeds and collapsers, and a BHC input bus | `cfg.transposer` |
+| Transposer | touching the spacetime tank, the ME interface with seeds and collapsers, and a BHC input bus. Found automatically: the interface by its name, the tank by holding spacetime, the bus as the GregTech block | `cfg.transposer` (overrides only) |
 | Black Hole Utility Hatch, **Pulse mode** | on the BHC, wired to a redstone input | `cfg.signals.pulse` |
 | Work signal | redstone input, on while the crafting net has items for the BHC (for example a level emitter) | `cfg.signals.request` |
 | Spacetime hatch | an ME stocking input hatch for spacetime, with a redstone cover that disables it unless the output is on | `cfg.signals.spacetime` |
@@ -77,12 +77,13 @@ the tank can pay for its whole hold plan: 450 L with the default limits.
 install bhc
 cd bhc
 probe                 -- list components
-probe sides           -- which transposer side is the tank / interface / bus
+probe sides           -- what each transposer side is, and what was recognised
 probe redstone 10     -- which input pulses once a second (open a hole to see it)
 probe machine         -- the BHC's gt_machine and its state
 ```
 
-1. Put the sides and redstone inputs in `config.lua`.
+1. Put the three redstone sides (pulse, request, spacetime) in `config.lua`. The
+   transposer and the BHC controller are found automatically.
 2. Run `main` with `cfg.dryRun = true` (the default). The script follows the
    hole and logs what it would do, but touches nothing.
 3. Set `cfg.dryRun = false` and run `main`.

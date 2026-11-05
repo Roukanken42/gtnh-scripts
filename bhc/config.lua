@@ -2,7 +2,8 @@
 -- overwritten when you re-run `install` (it is marked `?` in the manifest).
 -- Run `probe` to find the sides and addresses to put here.
 
-local sides = require("sides")
+local sides = require("sides")    -- sides.left, sides.up, ... (see below)
+local colors = require("colors")  -- colors.red, ... for bundled cables
 
 local cfg = {}
 
@@ -20,32 +21,38 @@ cfg.ui = true
 -- network, or the first one whose getName() contains "blackhole".
 cfg.machine = { address = nil }
 
--- The transposer. It touches:
---   tankSide       the tank holding spacetime -- the one the stocking hatch
---                  pulls from through ME. Read only: how much is left, and
---                  whether a hold second was paid for.
---   interfaceSide  the ME interface stocking Black Hole Seeds and Collapsers
---   busSide        the BHC input bus the seed/collapser are moved into
--- address = nil uses the only transposer on the network.
+-- The transposer touches the spacetime tank (the one the stocking hatch pulls
+-- from through ME; only read, for how much there is), the ME interface
+-- stocking Black Hole Seeds and Collapsers, and the BHC input bus they are
+-- moved into. All of it is found automatically: the interface by its name,
+-- the tank by holding spacetime, the bus as the GregTech block. Set a value
+-- here only to override what `probe sides` reports as found.
 cfg.transposer = {
-    address = nil,
-    tankSide = sides.down,
-    interfaceSide = sides.north,
-    busSide = sides.south,
+    address = nil,        -- nil = the transposer whose sides fit
+    tankSide = nil,
+    interfaceSide = nil,
+    busSide = nil,
 }
 
 -- Redstone. Each signal is { address = <redstone component or nil for the
 -- primary one>, side = sides.x, color = nil|colors.x for bundled cables }.
+-- Side names, each pair is the same number:
+--   0 sides.bottom = sides.down    1 sides.top   = sides.up
+--   2 sides.back   = sides.north   3 sides.front = sides.south
+--   4 sides.right  = sides.west    5 sides.left  = sides.east
+-- A redstone card in the computer counts sides from the case (left, front,
+-- ...); a Redstone I/O block uses compass sides (east, north, ...).
+-- `probe redstone` prints both names for every side.
 cfg.signals = {
     -- IN: on while the crafting net has items waiting for the BHC.
-    request = { address = nil, side = sides.west },
+    request = { address = nil, side = nil },        -- TODO: e.g. sides.right
     -- IN: a Black Hole Utility Hatch set to PULSE mode. One pulse per machine
     -- second while a hole is open -- this is the script's clock.
-    pulse = { address = nil, side = sides.east },
+    pulse = { address = nil, side = sides.left },
     -- OUT: on = the spacetime hatch (an ME stocking input hatch) is enabled.
     -- Wire it to a redstone cover on the hatch that disables it without a
     -- signal. invert = true if your cover enables it on LOW.
-    spacetime = { address = nil, side = sides.up, invert = false },
+    spacetime = { address = nil, side = nil, invert = false },  -- TODO: e.g. sides.top
 }
 
 -- Substring of the spacetime fluid's name or label (case-insensitive).

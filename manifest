@@ -7,6 +7,13 @@ bhc/main.lua
 bhc/model.lua
 bhc/probe.lua
 bhc/ui.lua
+? dtpf/config.lua
+dtpf/hw.lua
+dtpf/main.lua
+dtpf/plan.lua
+dtpf/probe.lua
+dtpf/recipes.lua
+dtpf/ui.lua
 inspect/main.lua
 install.lua
 ? mining/config.lua

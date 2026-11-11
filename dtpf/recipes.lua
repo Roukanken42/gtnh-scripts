@@ -75,6 +75,8 @@ local function it(mat, amount, damage) return { mat = mat, amount = amount, dama
 local function circ(n) return it("circuit", 0, n) end
 
 -- id         unique name, for cfg.disabledVariants and the log
+-- extra      an optional bonus variant (combs): used when its extra input is
+--            there, but never blamed when explaining why a product cannot run
 -- catalyst   catalyst key, or nil (consumed amount in `catalystAmount`)
 -- heat       coil heat needed
 -- eut        base EU/t (before overclocks)
@@ -85,7 +87,7 @@ R.variants = {
     infinity = {
         -- DTPFCalculator: parallel 64, catalyst tiers 3..5, EU/t divided by 2,
         -- calculateNonEBFRecipe(32M, 10000). Combs: 15% less catalyst, half time.
-        { id = "inf_t5_comb", catalyst = "stellar", catalystAmount = 9667, heat = H.eternal,
+        { id = "inf_t5_comb", extra = true, catalyst = "stellar", catalystAmount = 9667, heat = H.eternal,
           eut = 409600000, ticks = 625,
           inputs = { it("infinityCatalyst", 4), it("infinityComb", 1), circ(3) },
           outputs = { infinity = 36864, residue = 19334 } },
@@ -93,7 +95,7 @@ R.variants = {
           eut = 409600000, ticks = 1250,
           inputs = { it("infinityCatalyst", 4), circ(4) },
           outputs = { infinity = 36864, residue = 22746 } },
-        { id = "inf_t4_comb", catalyst = "exotic", catalystAmount = 22307, heat = H.eternal,
+        { id = "inf_t4_comb", extra = true, catalyst = "exotic", catalystAmount = 22307, heat = H.eternal,
           eut = 204800000, ticks = 1250,
           inputs = { it("infinityCatalyst", 2), it("infinityComb", 1), circ(3) },
           outputs = { infinity = 18432, residue = 22307 } },
@@ -101,7 +103,7 @@ R.variants = {
           eut = 204800000, ticks = 2500,
           inputs = { it("infinityCatalyst", 2), circ(4) },
           outputs = { infinity = 18432, residue = 26243 } },
-        { id = "inf_t35_comb", catalyst = "resplendent", catalystAmount = 50092, heat = H.hypogen,
+        { id = "inf_t35_comb", extra = true, catalyst = "resplendent", catalystAmount = 50092, heat = H.hypogen,
           eut = 102400000, ticks = 2500,
           inputs = { it("infinityCatalyst", 1), it("infinityComb", 1), circ(2) },
           outputs = { infinity = 9216, residue = 25046 } },
@@ -110,7 +112,7 @@ R.variants = {
           inputs = { it("infinityCatalyst", 1), circ(5) },
           outputs = { infinity = 9216, residue = 29466 } },
         -- The Awakened-coil recipe: 144 L per Infinity Catalyst instead of 9216.
-        { id = "inf_t3_comb", catalyst = "resplendent", catalystAmount = 782, heat = H.awakened,
+        { id = "inf_t3_comb", extra = true, catalyst = "resplendent", catalystAmount = 782, heat = H.awakened,
           eut = 1600000, ticks = 19,
           inputs = { it("infinityCatalyst", 1), it("infinityComb", 1), circ(3) },
           outputs = { infinity = 144, residue = 391 } },

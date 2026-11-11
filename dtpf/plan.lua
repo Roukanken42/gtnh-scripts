@@ -111,15 +111,17 @@ function plan.check(v, ctx)
     r.why = plan.gate(v, ctx)
     if r.why then r.static = true; return r end
 
-    local batches, missing = math.huge, nil
+    -- Every problem is collected, not just the first, so the explanation of
+    -- a product that cannot run is complete.
+    local batches, missing = math.huge, {}
     local seen = {}
     for _, inp in ipairs(v.inputs) do
         local have, stack = plan.find(ctx.stock, ctx.mats, inp)
-        if inp.amount == 0 then
-            if have < 1 then missing = missing or inp.mat end
-        else
-            batches = math.min(batches, math.floor(have / inp.amount))
-            if have < inp.amount then missing = missing or inp.mat end
+        local need = inp.amount == 0 and 1 or inp.amount
+        if inp.amount > 0 then batches = math.min(batches, math.floor(have / inp.amount)) end
+        if have < need then
+            missing[#missing + 1] = inp.mat .. (inp.damage and (" " .. inp.damage) or "")
+                .. (inp.amount > 1 and have > 0 and string.format(" (%d of %d)", have, inp.amount) or "")
         end
         if stack then
             local id = (stack.name or "?") .. ":" .. tostring(stack.damage or "")
@@ -131,33 +133,56 @@ function plan.check(v, ctx)
         end
     end
 
+    local problems, catShort = {}, false
+    if #missing > 0 then problems[1] = "stocker has no " .. table.concat(missing, ", ") end
     if v.catalyst then
         local need = plan.catalystNeed(v, ctx)
         local have = ctx.catalysts[v.catalyst] or 0
         r.catalyst, r.catalystNeed = v.catalyst, need
         if need > 0 then batches = math.min(batches, math.floor(have / need)) end
-        if have < need then r.why = "low " .. v.catalyst .. " catalyst on the main net" end
+        if have < need then
+            catShort = true
+            problems[#problems + 1] = string.format("main net has %d of %d L %s catalyst (after reserve)",
+                math.floor(have), need, v.catalyst)
+        end
     end
-    if missing then r.why = "stocker has no " .. missing end
     r.batches = batches == math.huge and 0 or batches
-    if not r.why and r.batches < (ctx.minBatches or 1) then
-        r.why = string.format("stocker holds %d batch(es), cfg.minBatches is %d", r.batches, ctx.minBatches)
+    if #problems == 0 and r.batches < (ctx.minBatches or 1) then
+        problems[1] = string.format("stocker holds %d batch(es), cfg.minBatches is %d", r.batches, ctx.minBatches)
     end
+    -- How far from runnable: one per missing input, one for the catalyst.
+    r.distance = #missing + (catShort and 1 or 0)
+    r.why = #problems > 0 and table.concat(problems, "; ") or nil
     r.ok = r.why == nil
     return r
 end
 
--- All variants of a product, checked. Returns the first runnable one (or nil),
--- the variant demand should be planned with (the best that passes the static
--- gates, runnable or not), and the check of that variant (for its why).
+-- All variants of a product, checked. Returns
+--   runnable  the first runnable check, or nil
+--   planned   the variant demand is planned with: the best one that passes
+--             the static gates, runnable or not (extras only if nothing else)
+--   explain   when nothing runs, the check that best says why: the variant
+--             closest to runnable, never an optional extra (combs) unless
+--             there is nothing else. nil when no variant passes the gates.
+--   checks    every variant's check, in order
 function plan.product(variants, ctx)
-    local runnable, planned, plannedCheck
+    local runnable, planned, plannedExtra, explain, explainExtra
+    local checks = {}
     for _, v in ipairs(variants or {}) do
         local r = plan.check(v, ctx)
-        if not r.static and not planned then planned, plannedCheck = v, r end
+        checks[#checks + 1] = r
         if r.ok and not runnable then runnable = r end
+        if not r.static then
+            if v.extra then
+                plannedExtra = plannedExtra or v
+                if not explainExtra or r.distance < explainExtra.distance then explainExtra = r end
+            else
+                planned = planned or v
+                if not explain or r.distance < explain.distance then explain = r end
+            end
+        end
     end
-    return runnable, planned, plannedCheck
+    return runnable, planned or plannedExtra, explain or explainExtra, checks
 end
 
 -- How much of `p` one batch of `v` makes, net of what it eats of itself.

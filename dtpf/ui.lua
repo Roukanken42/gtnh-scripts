@@ -15,12 +15,16 @@ local C = {
     titleBg = 0x1E1840,
 }
 
+local oldW, oldH
+
+-- The dashboard uses the full resolution the GPU and screen allow (160x50 at
+-- tier 3); the one the shell had is put back on exit.
 function ui.init()
     if not component.isAvailable("gpu") or not component.isAvailable("screen") then return false end
     gpu = component.gpu
     local ok = pcall(function()
-        local mw, mh = gpu.maxResolution()
-        gpu.setResolution(math.min(mw, 120), math.min(mh, 40))
+        oldW, oldH = gpu.getResolution()
+        gpu.setResolution(gpu.maxResolution())
     end)
     if not ok then return false end
     W, H = gpu.getResolution()
@@ -34,7 +38,9 @@ function ui.shutdown()
     if not ui.active then return end
     gpu.setBackground(0x000000)
     gpu.setForeground(0xFFFFFF)
-    gpu.fill(1, 1, W, H, " ")
+    if oldW then pcall(gpu.setResolution, oldW, oldH) end
+    local w, h = gpu.getResolution()
+    gpu.fill(1, 1, w, h, " ")
     ui.active = false
     require("term").setCursor(1, 1)
 end
@@ -118,8 +124,11 @@ function ui.render(v)
     put(2, y, string.format("%-3s %-10s %2s %9s %9s %9s ", "", "product", "P", "stock", "target", "effective"),
         C.dim, C.bg, 48)
     put(50, y, "fill   unmet", C.dim, C.bg, 22)
-    put(72, y, "runnable as", C.dim, C.bg, 30)
-    put(102, y, "selected", C.dim, C.bg, W - 102)
+    -- "selected" sits at the right edge; "runnable as" (or why not) gets
+    -- everything between.
+    local selX = math.max(102, W - 9)
+    put(72, y, "runnable as", C.dim, C.bg, selX - 73)
+    put(selX, y, "selected", C.dim, C.bg, W - selX + 1)
     y = y + 1
     for _, p in ipairs(v.products) do
         local fill = p.fill == math.huge and 0 or p.fill
@@ -134,8 +143,8 @@ function ui.render(v)
         put(59, y, unmet, p.level and C.warn or C.dim, C.bg, 12)
         local status = p.variant and (p.variant .. (p.catalyst and (" + " .. p.catalyst) or ""))
             or ("no: " .. tostring(p.why))
-        put(72, y, status, p.variant and C.text or C.warn, C.bg, 29)
-        put(102, y, fmtTime(p.share), C.dim, C.bg, W - 102)
+        put(72, y, status, p.variant and C.text or C.warn, C.bg, selX - 73)
+        put(selX, y, fmtTime(p.share), C.dim, C.bg, W - selX + 1)
         y = y + 1
     end
     y = y + 1

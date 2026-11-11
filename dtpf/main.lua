@@ -192,16 +192,18 @@ local function decide()
     local stockOf = {}
     for _, p in ipairs(names) do stockOf[p] = plan.find(mainnet, mats, { mat = p }) end
 
-    local runs, planned, why = {}, {}, {}
+    local runs, planned, why, checks = {}, {}, {}, {}
     for _, p in ipairs(names) do
         local ctx = {
             mats = mats, stock = stocker, heat = arr.heat, maxEUt = cfg.maxEUt,
             catalysts = catalysts, catFactor = arr.catFactor, catExtra = arr.catExtra,
             allowedCat = allowedFor[p], disabled = disabled, minBatches = sel.minBatches,
         }
-        local run, v, check = plan.product(R.variants[p], ctx)
-        runs[p], planned[p] = run, v
-        if not run then why[p] = check and check.why or "no variant passes heat/config" end
+        local run, v, explain, all = plan.product(R.variants[p], ctx)
+        runs[p], planned[p], checks[p] = run, v, all
+        if not run then
+            why[p] = explain and (explain.variant.id .. ": " .. explain.why) or "no variant passes heat/config"
+        end
     end
 
     local demand = plan.demand(names, targets, stockOf, planned)
@@ -214,7 +216,7 @@ local function decide()
     local pick, pickWhy = plan.choose(selection, cands, names, sel, now())
     return {
         arr = arr, catalysts = catalysts, catTotal = catTotal, demand = demand,
-        runs = runs, why = why, pick = pick, pickWhy = pickWhy,
+        runs = runs, why = why, checks = checks, pick = pick, pickWhy = pickWhy,
     }
 end
 
@@ -307,10 +309,37 @@ local function apply(res)
     end
 end
 
+-- When a product cannot run, logs why for every one of its variants, once
+-- per change, so a missing input or catalyst is easy to spot.
+local diagnosed = {}
+local function diagnose(res)
+    for _, p in ipairs(names) do
+        local text
+        if not res.runs[p] then
+            local lines = { p .. " cannot run:" }
+            for _, r in ipairs(res.checks[p] or {}) do
+                lines[#lines + 1] = string.format("    %-13s %s", r.variant.id, r.why or "ok")
+            end
+            text = table.concat(lines, "\n")
+        end
+        -- Compared without digits: amounts that drift do not re-log it.
+        local key = text and text:gsub("%d", "")
+        if key ~= diagnosed[p] then
+            diagnosed[p] = key
+            if text then
+                for line in text:gmatch("[^\n]+") do log(line) end
+            elseif res.checks[p] then
+                log(p .. " is runnable again.")
+            end
+        end
+    end
+end
+
 local function step()
     local res = decide()
     if not res then return end
     result = res
+    diagnose(res)
     if paused then return end
     local prev = selection and selection.product
     if res.pick ~= prev then

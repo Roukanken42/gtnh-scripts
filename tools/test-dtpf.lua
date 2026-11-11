@@ -79,7 +79,7 @@ end
 -- infinity: no combs, so the comb variant is skipped and t5 runs
 local run, planned = plan.product(R.variants.infinity, ctx())
 eq(run and run.variant.id, "inf_t5", "infinity picks t5 without combs")
-eq(planned.id, "inf_t5_comb", "infinity plans with the best statically allowed variant")
+eq(planned.id, "inf_t5", "infinity plans with the best allowed variant that is not an extra")
 eq(run.batches, 4, "40 catalysts / 4 per batch, stellar 50000 / 11373")
 eq(#run.items, 2, "infinity filter: catalyst item + circuit")
 eq(run.catalyst, "stellar", "infinity catalyst")
@@ -149,6 +149,18 @@ run = plan.product(R.variants.spacetime, realCtx)
 check(run == nil, "real: spacetime not runnable")
 eq(stCheck.why, "stocker has no hypervisor", "real: spacetime blocked on the Hypervisor Matrix")
 check(plan.product(R.variants.shirabon, realCtx) == nil, "real: shirabon not runnable")
+
+-- The same stocker with the circuit unrecognised (what a 2.8 key did to the
+-- 2.9 label): the explanation must name the circuit, not the optional comb.
+local noCircuit = plan.prepare({ items = { real.items[2], real.items[3] }, fluids = real.fluids })
+local r2, _, explain, all = plan.product(R.variants.infinity, ctx({ stock = noCircuit, heat = 13501,
+    catFactor = 0.5, catalysts = realCtx.catalysts }))
+check(r2 == nil, "no circuit: infinity cannot run")
+eq(explain.variant.id, "inf_t4", "explained by the closest non-comb variant")
+eq(explain.why, "stocker has no circuit 4", "names the circuit and its number")
+eq(#all, #R.variants.infinity, "every variant checked")
+check(all[1].why:find("infinityComb", 1, true) and all[1].why:find("stellar", 1, true),
+    "a check lists all its problems: " .. tostring(all[1].why))
 
 -- ---- demand -------------------------------------------------------------------------
 local names = { "shirabon", "spacetime", "hypogen", "infinity" }

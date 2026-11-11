@@ -147,6 +147,9 @@ function ui.render(v)
     end
     put(2, y, "Catalysts", C.dim, C.bg, 12)
     put(14, y, table.concat(parts, "   ") .. (#parts > 0 and "   (main net / reserve)" or ""), C.text, C.bg, W - 14)
+    y = y + 1
+    put(2, y, "On the bus", C.dim, C.bg, 12)
+    put(14, y, v.busCatalyst or "?", v.busCatalyst and C.accent or C.crit, C.bg, W - 14)
     y = y + 2
 
     -- machines

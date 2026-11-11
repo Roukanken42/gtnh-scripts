@@ -25,18 +25,23 @@ cfg.stocker = { transposer = nil, side = nil }
 -- The storage buses, each { address = <cable component>, side = <0..5> }. The
 -- component is the CABLE the bus sits on (through an Adapter touching it), and
 -- `side` is the side of that cable the bus is on. `probe buses` lists them all.
---   items     item storage bus on the stocker      (nil = the only one there is)
---   fluids    fluid storage bus on the stocker     (nil = the only fluid bus
---                                                   that is not `catalyst`)
---   catalyst  fluid storage bus on the main-net interface with the catalysts.
---             REQUIRED: two fluid buses look the same to the script.
+-- nil = found automatically:
+--   items     item storage bus on the stocker       (the only one there is)
+--   fluids    fluid storage bus on the stocker      (the only fluid bus that
+--                                                    is not `catalyst`)
+--   catalyst  fluid storage bus on the main-net interface with the catalysts
+--             (the one fluid bus whose filter holds a catalyst)
+-- The catalyst bus must ALWAYS have a catalyst in its filter: it is on the
+-- main net, and an empty filter would expose all of it. The script never
+-- empties it, only swaps one catalyst for another, and refuses to start when
+-- it holds none. So set one by hand before the first run.
 -- Give the item bus its own cable block: on a cable that also carries a fluid
 -- storage bus, OpenComputers routes every call to the fluid driver and the
 -- item bus cannot be reached (README.md, Hardware).
 cfg.buses = {
     items = nil,
     fluids = nil,
-    catalyst = nil,   -- TODO: e.g. { address = "1a2b3c4d", side = 4 }
+    catalyst = nil,
 }
 
 -- Any ME component on the main net (me_interface, me_controller or
@@ -117,9 +122,10 @@ cfg.selection = {
     keepBusy = true,
 }
 
--- What goes into a filter when nothing may come through: an empty storage
--- bus filter lets everything through. Anything no DTPF recipe can be made
--- from alone works.
+-- What goes into a STOCKER bus filter when nothing may come through: an empty
+-- storage bus filter lets everything through. Anything no DTPF recipe can be
+-- made from alone works; it only ever exposes what the stocker holds. (The
+-- catalyst bus is never blocked: it keeps its catalyst.)
 cfg.blocker = {
     item = { name = "minecraft:bedrock", damage = 0 },
     fluid = { name = "lava" },

@@ -251,11 +251,29 @@ end
 
 local function sameBus(a, b) return a.address == b.address and a.side == b.side end
 
--- Resolves the three buses from config, filling in what can be guessed:
--- `items` is the only item storage bus; `fluids` the only fluid bus that is
--- not the catalyst bus. The catalyst bus must be configured once there are two
--- fluid buses.
-local function findBuses(cfg)
+-- The stacks in a bus's filter slots: { [slot] = stack }. Read only.
+function hw.readSlots(bus)
+    local slots = {}
+    for slot = 1, bus.slots do slots[slot] = hw.readFilter(bus, slot) end
+    return slots
+end
+
+-- Does any filter slot of this bus hold a catalyst?
+local function holdsCatalyst(bus, isCatalyst)
+    for _, v in pairs(hw.readSlots(bus)) do
+        if isCatalyst(v) then return true end
+    end
+    return false
+end
+
+-- Resolves the three buses from config, filling in what can be found:
+--   catalyst  the one fluid bus whose filter holds a catalyst. The catalyst
+--             bus must always hold one (it is on the main net), and nothing
+--             else ever puts a catalyst into a filter.
+--   items     the only item storage bus
+--   fluids    the only fluid bus that is not the catalyst bus
+-- `isCatalyst(stack)` says whether a filter stack is a catalyst.
+local function findBuses(cfg, isCatalyst)
     local all = hw.surveyBuses()
     local function byRef(ref, ctype, label)
         local full = component.get(ref.address, ctype)
@@ -280,7 +298,21 @@ local function findBuses(cfg)
     if c.catalyst and c.catalyst.address then
         buses.catalyst, err = byRef(c.catalyst, "fluid_storagebus", "catalyst bus")
     else
-        err = "catalyst bus: set cfg.buses.catalyst (see `probe buses`)"
+        local hits = {}
+        for _, b in ipairs(all) do
+            if b.type == "fluid_storagebus" and isCatalyst and holdsCatalyst(b, isCatalyst) then
+                hits[#hits + 1] = b
+            end
+        end
+        if #hits == 1 then
+            buses.catalyst = hits[1]
+        elseif #hits == 0 then
+            err = "catalyst bus: no fluid storage bus has a catalyst in its filter. Put one in by hand"
+                .. " (an empty filter exposes the whole main net), or set cfg.buses.catalyst"
+        else
+            err = string.format("catalyst bus: %d fluid buses hold a catalyst, set cfg.buses.catalyst"
+                .. " (see `probe buses`)", #hits)
+        end
     end
     if not buses.catalyst then return nil, err end
     if c.items and c.items.address then
@@ -348,6 +380,39 @@ function hw.readFilter(bus, slot)
     return nil
 end
 
+-- Reads every filter slot of a bus and records it as what was last written,
+-- so later writes only touch what differs. Returns { [slot] = stack }.
+function hw.readBus(bus)
+    local slots = hw.readSlots(bus)
+    for slot = 1, bus.slots do
+        local v = slots[slot]
+        bus.written[slot] = v and sig({ name = v.name, damage = bus.kind == "item" and (v.damage or 0) or nil }) or ""
+    end
+    return slots
+end
+
+-- The catalyst bus sits on the MAIN net: an empty filter there, or anything
+-- but a catalyst, exposes the main net to the DTPFs. So it only ever gets a
+-- catalyst, written into slot 1 (which replaces the old one in a single call),
+-- and the other slots are cleared after that. There is no way to write
+-- nothing. Reads slot 1 back to make sure it took. Returns true or nil + error.
+function hw.writeCatalyst(bus, detail)
+    if type(detail) ~= "table" or type(detail.name) ~= "string" then
+        return nil, "refusing to write a catalyst bus filter without a catalyst"
+    end
+    local n, err = hw.writeFilter(bus, { detail }, detail)
+    if not n then return nil, err end
+    if n > 0 then
+        local got = hw.readFilter(bus, 1)
+        if not got or got.name ~= detail.name then
+            bus.written[1] = nil
+            return nil, string.format("wrote %s into slot 1 but it reads back %s", detail.name,
+                got and tostring(got.name) or "empty")
+        end
+    end
+    return true
+end
+
 -- Writes `detail` into slot 1 of a fluid bus and reads it back. A fluid bus
 -- whose calls end up in OpenComputers' ITEM storage bus driver would not keep
 -- a fluid; this finds that out before the controller relies on it.
@@ -396,7 +461,9 @@ end
 -- ---- init -------------------------------------------------------------------------------
 
 -- Builds the hardware handle, or returns nil + a list of problems.
-function hw.init(cfg)
+-- `isCatalyst(stack)` recognises a catalyst in a bus filter (for finding the
+-- catalyst bus).
+function hw.init(cfg, isCatalyst)
     local self = setmetatable({ cfg = cfg }, hw)
     local problems = {}
     local function need(value, err)
@@ -408,7 +475,7 @@ function hw.init(cfg)
     local tp, side = findStocker(cfg)
     self.tp = need(tp, side)
     if tp then self.stockerSide = side end
-    local buses, berr = findBuses(cfg)
+    local buses, berr = findBuses(cfg, isCatalyst)
     self.buses = need(buses, berr)
     local me, merr = findMainnet(cfg)
     self.me = need(me, merr)

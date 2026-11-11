@@ -28,7 +28,7 @@ script is built around them:
 | Decay | Every tick the machine is idle, running time drops by **100 ticks**. One idle minute costs 100 minutes of discount. |
 | Catalyst check | The discount is applied when the recipe is searched, so 50 % of the listed catalyst is enough to start. The script checks against the **least** discounted DTPF, because the input is shared. |
 | Coils | A variant needs its coil heat: Awakened 10800 K, Infinity 11700 K, Hypogen 12600 K, Eternal 13500 K. The script checks against the coldest formed DTPF. |
-| Variant choice | The variants of a product differ in catalyst (and some in a non-consumed item). Only one catalyst is exposed at a time, so only the intended variant can match. |
+| Variant choice | The variants of a product differ in catalyst (and some in a non-consumed item). One catalyst is exposed at a time, so only the intended variant can match. |
 | Convergence | With Convergence at the full 50 %, a recipe takes extra catalyst for perfect overclocks. A recipe **without** catalyst (spacetime, shirabon) takes the type chosen in the GUI; set it in `cfg.convergence`. |
 
 Sensor values are read from `getSensorInformation()`, which in 2.9 returns
@@ -122,7 +122,7 @@ Keys **1–4** pin a product (in `cfg.products` order) while it is runnable,
 | Stocker | the inventory AE keeps stocked with the passive ingredients (items and fluids), with a **transposer** touching it | `cfg.stocker` (auto: the one side with both slots and tanks) |
 | Item storage bus | on the stocker, on the DTPFs' input subnet | `cfg.buses.items` |
 | Fluid storage bus | on the stocker, on the DTPFs' input subnet | `cfg.buses.fluids` |
-| Catalyst storage bus | a fluid storage bus on a main-net interface, on the DTPFs' input subnet | `cfg.buses.catalyst` (**required**) |
+| Catalyst storage bus | a fluid storage bus on a main-net interface, on the DTPFs' input subnet. Its filter must already hold a catalyst (see below) | `cfg.buses.catalyst` (auto: the one fluid bus whose filter holds a catalyst) |
 | Main net | an Adapter on any ME interface/controller of the main net, for counting products and catalysts | `cfg.mainnet` |
 
 The DTPFs take their passive inputs from that subnet, for example through ME
@@ -136,12 +136,37 @@ cable it is on. `probe buses` lists every one with its address and side.
 driver also matches fluid storage buses (the fluid part is a subclass), and on
 a cable that carries both, the fluid driver wins every call. The item bus on
 that cable is then unreachable. At startup the script writes a fluid into
-both fluid buses and reads it back, and stops with a fault if that does not
-work.
+the stocker's fluid bus and reads it back, and stops with a fault if that
+does not work.
 
 **An empty storage bus filter lets everything through.** The script therefore
-never leaves one empty. When nothing may pass, it writes `cfg.blocker`
-(bedrock, lava). Neither can complete a DTPF recipe alone.
+never leaves one empty:
+
+- **The stocker buses** get `cfg.blocker` (bedrock, lava) when nothing may
+  pass. That only exposes what the stocker holds, and neither can complete a
+  DTPF recipe alone.
+- **The catalyst bus** sits on the main net, so an empty filter there, or
+  anything but a catalyst, would expose the whole main net. It always holds a
+  catalyst:
+  - Put one into its filter by hand before the first run. That is also how
+    the script finds it. At startup it only *reads* this bus, and refuses to
+    start if no slot holds a catalyst.
+  - It is never blocked or cleared. A change writes the new catalyst into
+    slot 1, replacing the old one in one call, and only then clears any other
+    slots. A failed write leaves the old catalyst in place.
+  - When a recipe needs no catalyst (spacetime, shirabon), or nothing is
+    runnable, the bus keeps the catalyst it has. With **Convergence**, a DTPF
+    whose GUI type matches that catalyst may then use it for perfect
+    overclocks. Set `cfg.convergence.catalystForNoCatalystRecipes` to control
+    which catalyst sits there for those recipes.
+
+**Switching recipes safely.** Because the catalyst cannot be withdrawn, a
+change of ingredients first blocks both stocker buses, then sets the
+catalyst, then writes the new ingredients. While they appear one by one,
+nothing but the intended variant can match: no two passive variants with the
+same catalyst have inputs that are a subset of one another. When only the
+catalyst changes (hypogen v3 and v4 share their inputs), the single catalyst
+write switches the variant.
 
 ## Install and first run
 
@@ -156,8 +181,9 @@ probe mainnet      -- the main net's products and catalysts
 probe forges       -- each DTPF's raw sensor lines and what was parsed
 ```
 
-1. Put the catalyst bus (and the others, if `probe buses` shows more than
-   one candidate) into `config.lua`, plus your targets.
+1. Make sure the catalyst bus filter holds a catalyst. `probe buses` marks
+   that bus. Put any bus it cannot tell apart into `cfg.buses`, and set your
+   targets.
 2. Run `probe stock` with the stocker filled. Every ingredient should map to a
    material. A `-` means a label the script does not know: add its key under
    `cfg.materials`.
@@ -192,7 +218,8 @@ GT5-Unofficial 5.09.54.265, NewHorizonsCoreMod 2.9.99), not tested:
 
 - Storage bus filters: `setStorageConfiguration(side, slot, {name, damage})`
   for items and `{name}` for fluids, slots counted from 1, and a missing third
-  argument clears the slot. The startup read-back check covers the fluid buses.
+  argument clears the slot. The stocker fluid bus is checked by a read-back at
+  startup, and every catalyst write is read back too.
 - Item labels the stocker is matched by: "Infinity Catalyst", "Infinity Comb",
   "Energised Tesseract", "Hypervisor Matrix (Fusion)", "Hi-Computation Station
   Mk-V Finaltype", "Programmed Circuit". `probe stock` shows whether they match.

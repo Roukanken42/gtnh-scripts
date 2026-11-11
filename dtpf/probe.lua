@@ -68,18 +68,33 @@ local function probeSides()
 end
 
 local function probeBuses()
+    local mats = materials()
+    local function isCatalyst(v)
+        local n, l = plan.norm(v.name), plan.norm(v.label)
+        for _, c in ipairs(R.catalysts) do
+            if mats[c.mat].keys[n] or mats[c.mat].keys[l] then return true end
+        end
+        return false
+    end
     local all = hw.surveyBuses()
     if #all == 0 then print("No storage bus found. Is an Adapter touching the cable each bus sits on?") end
+    local catalystBuses = 0
     for _, b in ipairs(all) do
-        local f = {}
-        for slot = 1, math.min(b.slots, 6) do
-            local v = hw.readFilter(b, slot)
-            if v then f[#f + 1] = slot .. ":" .. tostring(v.label or v.name) end
+        local f, cat = {}, false
+        for slot, v in pairs(hw.readSlots(b)) do
+            if #f < 6 then f[#f + 1] = slot .. ":" .. tostring(v.label or v.name) end
+            cat = cat or (b.type == "fluid_storagebus" and isCatalyst(v))
         end
-        print(string.format("%-17s address=%q side=%d (%s)  %d slots  filter: %s", b.type, b.address, b.side,
-            ABS[b.side], b.slots, #f > 0 and table.concat(f, "  ") or "(empty = lets everything through)"))
+        if cat then catalystBuses = catalystBuses + 1 end
+        print(string.format("%-17s address=%q side=%d (%s)  %d slots%s", b.type, b.address, b.side,
+            ABS[b.side], b.slots, cat and "  <- CATALYST BUS (holds a catalyst)" or ""))
+        print("    filter: " .. (#f > 0 and table.concat(f, "  ") or "(empty = lets everything through)"))
     end
-    print("Put these into cfg.buses as { address = \"...\", side = N }.")
+    if catalystBuses ~= 1 then
+        print(string.format("%d fluid buses hold a catalyst: the catalyst bus is found automatically only when"
+            .. " exactly one does. Otherwise set cfg.buses.catalyst.", catalystBuses))
+    end
+    print("Put any bus that is not found automatically into cfg.buses as { address = \"...\", side = N }.")
 end
 
 local function probeStock()

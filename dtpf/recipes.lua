@@ -31,7 +31,8 @@ for _, c in ipairs(R.catalysts) do R.catalystByKey[c.key] = c end
 
 -- How a stack is recognised. `keys` are compared with a stack's name AND its
 -- label after plan.norm(): lower case, only letters and digits, a leading
--- "molten" dropped. So "Molten Infinity" and "molten.infinity" both become
+-- "molten" dropped. A key can therefore be a registry name too
+-- ("gregtech:gt.integrated_circuit" -> gregtechgtintegratedcircuit). So "Molten Infinity" and "molten.infinity" both become
 -- "infinity", while "Molten Cosmic Neutronium" (cosmicneutronium) does not
 -- match "neutronium". `damage` must also match when given (circuits).
 -- `probe stock` prints the normalised keys of everything in the stocker; add
@@ -60,7 +61,9 @@ R.materials = {
     tesseract        = { kind = "item", keys = { "energisedtesseract" } },
     hypervisor       = { kind = "item", keys = { "hypervisormatrixfusion" } },  -- GT++ Compressed_Fusion_Reactor
     hic5             = { kind = "item", keys = { "hicomputationstationmkvfinaltype" } }, -- GoodGenerator HiC_T5
-    circuit          = { kind = "item", keys = { "programmedcircuit" } },      -- damage = circuit number
+    -- damage = circuit number. Matched by registry name: since 2.9 the label
+    -- carries the number ("Programmed Circuit 4").
+    circuit          = { kind = "item", keys = { "gregtech:gt.integrated_circuit", "programmedcircuit" } },
 }
 
 -- The four products, in the order config.lua lists them by default.

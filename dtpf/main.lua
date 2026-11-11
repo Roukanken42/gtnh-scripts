@@ -157,11 +157,14 @@ end
 local function arrayState()
     local minHeat, factor, extra, conv, formed = math.huge, nil, 0, false, 0
     for _, f in ipairs(forges) do
-        if f.heat and f.heat > 0 then
+        -- A DTPF reporting 0 K is not formed: it can run nothing, so it
+        -- neither limits the coils nor the catalyst discount.
+        local isFormed = f.heat and f.heat > 0
+        if isFormed then
             formed = formed + 1
             minHeat = math.min(minHeat, f.heat)
         end
-        if f.discount then
+        if isFormed and f.discount then
             factor = math.max(factor or 0, 1 - f.discount / 100)
         end
         if f.convergence then

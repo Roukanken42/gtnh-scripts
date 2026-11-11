@@ -118,6 +118,38 @@ check(run == nil and planned == nil, "shirabon needs eternal coils")
 run = plan.product(R.variants.hypogen, ctx({ allowedCat = { resplendent = true } }))
 eq(run and run.variant.id, "hyp_v2", "hypogen limited to resplendent")
 
+-- ---- a real stocker (probe output, GTNH 2.9) ----------------------------------------
+-- 2.9 labels circuits "Programmed Circuit 4": they must match by registry name.
+local real = plan.prepare({
+    items = {
+        { name = "gregtech:gt.integrated_circuit", damage = 4, label = "Programmed Circuit 4", size = 1 },
+        { name = "Avaritia:Resource", damage = 5, label = "Infinity Catalyst", size = 2048 },
+        { name = "gregtech:gt.metaitem.01", damage = 32417, label = "Energised Tesseract", size = 1024 },
+    },
+    fluids = {
+        { name = "molten.infinity", label = "Molten Infinity", amount = 737488 },
+        { name = "molten.quantum", label = "Molten Quantum", amount = 1658880 },
+        { name = "molten.neutronium", label = "Molten Neutronium", amount = 3319004 },
+        { name = "dimensionallytranscendentresidue", label = "Dimensionally Transcendent Residue", amount = 5120000 },
+    },
+})
+eq((plan.find(real, mats, { mat = "circuit", damage = 4 })), 1, "2.9 circuit label matches by name")
+eq((plan.find(real, mats, { mat = "circuit", damage = 5 })), 0, "circuit number still checked")
+-- main net: no stellar; exotic, resplendent, prosaic, crude plentiful; 50 % discount
+local realCtx = ctx({ stock = real, heat = 13501, catFactor = 0.5,
+    catalysts = { exotic = 201054802, resplendent = 200046520, prosaic = 54362609, crude = 81503000 } })
+run = plan.product(R.variants.infinity, realCtx)
+eq(run and run.variant.id, "inf_t4", "real: infinity on exotic")
+eq(#run.items, 2, "real: infinity filter is catalyst item + circuit 4")
+eq(run.catalystNeed, 13122, "real: 26243 L exotic at 50 % discount")
+run = plan.product(R.variants.hypogen, realCtx)
+eq(run and run.variant.id, "hyp_v2", "real: no Hypervisor Matrix, hypogen falls to v2")
+local _, _, stCheck = plan.product(R.variants.spacetime, realCtx)
+run = plan.product(R.variants.spacetime, realCtx)
+check(run == nil, "real: spacetime not runnable")
+eq(stCheck.why, "stocker has no hypervisor", "real: spacetime blocked on the Hypervisor Matrix")
+check(plan.product(R.variants.shirabon, realCtx) == nil, "real: shirabon not runnable")
+
 -- ---- demand -------------------------------------------------------------------------
 local names = { "shirabon", "spacetime", "hypogen", "infinity" }
 local plannedMap = {

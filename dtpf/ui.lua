@@ -170,7 +170,8 @@ function ui.render(v)
             break
         end
         local state = f.active and string.format("RUN %3d%%", f.maxProgress > 0 and
-            math.floor(100 * f.progress / f.maxProgress) or 0) or "IDLE    "
+            math.floor(100 * f.progress / f.maxProgress) or 0)
+            or ((f.heat or 0) <= 0 and "UNFORMED" or "IDLE    ")
         local line = string.format("%s  %s  %6sK  disc %4s%%  run %s%s", f.address:sub(1, 8), state,
             f.heat and tostring(math.floor(f.heat)) or "?", f.discount and tostring(math.floor(f.discount)) or "?",
             f.ticks and fmtTime(f.ticks / 20) or "?", f.convergence and "  conv" or "")

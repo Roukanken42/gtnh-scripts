@@ -123,11 +123,11 @@ function ui.render(v)
     -- products
     put(2, y, string.format("%-3s %-10s %2s %9s %9s %9s ", "", "product", "P", "stock", "target", "effective"),
         C.dim, C.bg, 48)
-    put(50, y, "fill   unmet", C.dim, C.bg, 22)
+    put(50, y, "fill            unmet", C.dim, C.bg, 29)
     -- "selected" sits at the right edge; "runnable as" (or why not) gets
     -- everything between.
-    local selX = math.max(102, W - 9)
-    put(72, y, "runnable as", C.dim, C.bg, selX - 73)
+    local selX = math.max(109, W - 9)
+    put(79, y, "runnable as", C.dim, C.bg, selX - 80)
     put(selX, y, "selected", C.dim, C.bg, W - selX + 1)
     y = y + 1
     for _, p in ipairs(v.products) do
@@ -135,15 +135,22 @@ function ui.render(v)
         local color = p.selected and C.accent or (p.variant and C.text or C.faint)
         put(2, y, string.format("%-3s %-10s %2d %9s %9s %9s ", (p.selected and ">" or " ") .. p.key, p.name,
             p.priority or 1, si(p.stock), si(p.target), si(p.effective)), color, C.bg, 48)
-        bar(50, y, 8, fill, p.capped and C.warn or (fill >= 1 and C.good or C.info))
+        local barColor = p.capped and C.warn or (fill >= 1 and C.good or C.info)
+        bar(50, y, 8, fill, barColor)
+        -- The overall fill (stock / effective target) as a number, not capped
+        -- at 100%: once every target is met, the lowest one is what gets made.
+        local pct = p.fill == math.huge and "-"
+            or (fill < 100 and string.format("%d%%", math.floor(fill * 100 + 0.5))
+            or (fill < 1000 and string.format("%dx", math.floor(fill + 0.5)) or ">999x"))
+        put(59, y, string.format("%6s", pct), barColor, C.bg, 7)
         -- The most urgent uncovered layer: its priority and how much of it the
         -- stock covers. "ok" once every layer is covered.
         local unmet = p.level and string.format("P%d %3d%%", p.level, math.floor(p.levelFill * 100))
             or (p.fill == math.huge and "-" or "ok")
-        put(59, y, unmet, p.level and C.warn or C.dim, C.bg, 12)
+        put(66, y, unmet, p.level and C.warn or C.dim, C.bg, 12)
         local status = p.variant and (p.variant .. (p.catalyst and (" + " .. p.catalyst) or ""))
             or ("no: " .. tostring(p.why))
-        put(72, y, status, p.variant and C.text or C.warn, C.bg, selX - 73)
+        put(79, y, status, p.variant and C.text or C.warn, C.bg, selX - 80)
         put(selX, y, fmtTime(p.share), C.dim, C.bg, W - selX + 1)
         y = y + 1
     end

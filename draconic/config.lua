@@ -55,6 +55,15 @@ cfg.autoStart = {
     -- and saturation capacity are fixed from the fuel inside when charging
     -- starts, so more is better.
     minBlocks = 1620,
+    -- Also require this much fuel AVAILABLE in total: unconverted fuel in the
+    -- reactor plus draconium in the replenisher, in block equivalents. It can
+    -- be more than the reactor holds; the rest is fed in while it runs. Use
+    -- it for a minimum running time: time = (total x 162) / burn rate. At the
+    -- dashboard's "Burn" of 100 fuel/s, 10000 blocks is about 4.5 hours.
+    -- The replenisher must be able to stock the part beyond 3240 blocks, or
+    -- this is never reached. Only counts while feeding (F) and
+    -- cfg.feed.whileRunning are on. 0 = off.
+    minTotalBlocks = 0,
     -- Also wait until the replenisher is empty or the reactor is full, so a
     -- charge does not start halfway through a delivery.
     waitForDelivery = true,

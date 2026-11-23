@@ -142,6 +142,13 @@ local function autoMinFuel(d)
     return math.max(0, math.min(cfg.autoStart.minBlocks * C.block, cap))
 end
 
+-- Fuel the replenisher adds to a run: only what feeding will actually move in
+-- while the reactor runs.
+local function supplyFuel()
+    if feedOn and cfg.feed.whileRunning and stock.known then return math.max(0, stock.fuel) end
+    return 0
+end
+
 -- ---- commands -------------------------------------------------------------------
 
 local function stop(reason, level)
@@ -177,6 +184,14 @@ local function startCheck(d, auto)
             fmtPct(d.convLvl), fmtPct(cfg.autoStart.maxConversion, 0))
     end
     if not auto then return true end
+    local minTotal = (cfg.autoStart.minTotalBlocks or 0) * C.block
+    if minTotal > 0 then
+        local supply = supplyFuel()
+        if d.fuel + supply < minTotal then
+            return false, string.format("fuel available %s / %s blocks (reactor %s + supply %s)",
+                blocks(d.fuel + supply), blocks(minTotal), blocks(d.fuel), blocks(supply))
+        end
+    end
     local need = autoMinFuel(d)
     if d.fuel < need then
         return false, string.format("fuel %s / %s blocks", blocks(d.fuel), blocks(need))
@@ -529,6 +544,9 @@ local function buildView()
         v.supply, v.supplyColor = "cannot read the replenisher", "crit"
     else
         v.supply = blocks(stock.fuel) .. " blk in replenisher"
+        if (cfg.autoStart.minTotalBlocks or 0) > 0 then
+            v.supply = blocks(stock.fuel) .. " blk, total " .. blocks(d.fuel + supplyFuel())
+        end
         if stock.fuel <= 0 then v.supplyColor = "dim" end
     end
     v.fed = blocks(session.fed) .. " blk now, " .. blocks(totals.fed) .. " total"

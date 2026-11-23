@@ -7,7 +7,10 @@ chaos shards**:
   nuggets from a **Super Stock Replenisher** (stocked from the main net) into a
   stabilizer. It fills the reactor before a run and tops it up while it runs.
 - **Auto-starts**: once the reactor holds enough fuel (`cfg.autoStart.minBlocks`)
-  it charges it, then activates it as soon as it reports *charged*.
+  it charges it, then activates it as soon as it reports *charged*. Optionally
+  it also waits until the reactor plus the replenisher hold enough in total
+  (`cfg.autoStart.minTotalBlocks`), which can be more than the reactor fits.
+  That sets a minimum running time between shutdowns.
 - **Stops safely**: it stops while enough fuel is left for the shutdown
   itself (see below), and keeps the wiki script's two rules as backstops: 20%
   chaos share and 20% containment field.

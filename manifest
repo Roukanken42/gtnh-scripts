@@ -7,6 +7,12 @@ bhc/main.lua
 bhc/model.lua
 bhc/probe.lua
 bhc/ui.lua
+? draconic/config.lua
+draconic/hw.lua
+draconic/main.lua
+draconic/physics.lua
+draconic/probe.lua
+draconic/ui.lua
 ? dtpf/config.lua
 dtpf/hw.lua
 dtpf/main.lua

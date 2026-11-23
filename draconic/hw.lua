@@ -1,6 +1,7 @@
 -- Everything that talks to a component: the reactor (through an Adapter on a
 -- stabilizer or the injector) and the transposer that moves fuel from the
--- Super Stock Replenisher into a stabilizer. main.lua decides, this executes.
+-- Super Stock Replenisher into a buffer chest that feeds a stabilizer.
+-- main.lua decides, this executes.
 
 local component = require("component")
 
@@ -65,6 +66,9 @@ function hw:activate() return call(self.reactor, "activateReactor") end
 function hw:stop() return call(self.reactor, "stopReactor") end
 
 -- ---- transposer --------------------------------------------------------------
+-- The transposer touches the Super Stock Replenisher and a buffer chest (a
+-- compressed chest) that something else empties into a stabilizer. It never
+-- touches the reactor itself.
 
 -- What is on each side of a transposer.
 function hw.surveySides(tp)
@@ -81,32 +85,40 @@ function hw.surveySides(tp)
     return survey
 end
 
-local function sideMatching(survey, fixed, test)
-    if fixed ~= nil then return fixed end
+local function sideMatching(survey, test, except)
     local hits = {}
     for side = 0, 5 do
         local s = survey[side]
-        if s.size and test((s.name or ""):lower(), s) then hits[#hits + 1] = side end
+        if s.size and side ~= except and test((s.name or ""):lower()) then hits[#hits + 1] = side end
     end
     if #hits == 1 then return hits[1] end
     return nil, #hits
 end
 
--- The replenisher: by name (stock / replenisher). The stabilizer: by name
--- (stabili / reactor). Config values win.
+-- The replenisher: by name (stock / replenisher). The buffer chest: by name
+-- (chest / compress), else the one other inventory. Config values win.
 function hw.pickSides(survey, c)
-    local stock, ns = sideMatching(survey, c.stockSide, function(n)
-        return n:find("stock", 1, true) or n:find("replenisher", 1, true)
-    end)
-    local reactor, nr = sideMatching(survey, c.reactorSide, function(n)
-        return n:find("stabili", 1, true) or n:find("reactor", 1, true)
-    end)
+    local stock, ns = c.stockSide, nil
+    if stock == nil then
+        stock, ns = sideMatching(survey, function(n)
+            return n:find("stock", 1, true) or n:find("replenisher", 1, true)
+        end)
+    end
+    local target, nt = c.targetSide, nil
+    if target == nil then
+        target, nt = sideMatching(survey, function(n)
+            return n:find("chest", 1, true) or n:find("compress", 1, true)
+        end, stock)
+        if not target and nt == 0 then
+            target, nt = sideMatching(survey, function() return true end, stock)
+        end
+    end
     local err
     if not stock then err = (ns == 0 and "no" or "several") .. " stock replenisher side(s)" end
-    if not reactor then
-        err = (err and err .. ", " or "") .. (nr == 0 and "no" or "several") .. " stabilizer side(s)"
+    if not target then
+        err = (err and err .. ", " or "") .. (nt == 0 and "no" or "several") .. " buffer chest side(s)"
     end
-    return stock, reactor, err
+    return stock, target, err
 end
 
 local function findTransposer(cfg)
@@ -122,17 +134,16 @@ local function findTransposer(cfg)
     end
     local firstErr
     for _, tp in ipairs(candidates) do
-        local stock, reactor, err = hw.pickSides(hw.surveySides(tp), c)
-        if stock and reactor then return tp, stock, reactor end
+        local stock, target, err = hw.pickSides(hw.surveySides(tp), c)
+        if stock and target then return tp, stock, target end
         firstErr = firstErr or ("transposer " .. tp.address:sub(1, 8) .. ": " .. err)
     end
     return nil, firstErr .. " -- run `probe sides`, or set cfg.transposer sides"
 end
 
--- Every stack in the replenisher: { slot, size, label, name }.
-function hw:stock()
-    local it, err = call(self.tp, "getAllStacks", self.stockSide)
-    if not it then return nil, "cannot read the replenisher: " .. tostring(err) end
+local function stacksOn(tp, side, what)
+    local it, err = call(tp, "getAllStacks", side)
+    if not it then return nil, "cannot read the " .. what .. ": " .. tostring(err) end
     local out = {}
     local n = it.count()
     for slot = 1, n do
@@ -144,24 +155,13 @@ function hw:stock()
     return out
 end
 
--- Chaos shards sitting in the reactor's one slot (the core shows its full
--- shards there). While any are there the slot is taken and fuel cannot be
--- inserted through it.
-function hw:shardsWaiting()
-    local s = call(self.tp, "getStackInSlot", self.reactorSide, 1)
-    return type(s) == "table" and (s.size or 0) or 0
-end
+-- Every stack in the replenisher / the buffer chest: { slot, size, label, name }.
+function hw:stock() return stacksOn(self.tp, self.stockSide, "replenisher") end
+function hw:buffer() return stacksOn(self.tp, self.targetSide, "buffer chest") end
 
--- Moves up to `count` items from the replenisher slot into the stabilizer.
+-- Moves up to `count` items from a replenisher slot into the buffer chest.
 function hw:feed(slot, count)
-    local n, err = call(self.tp, "transferItem", self.stockSide, self.reactorSide, count, slot)
-    return tonumber(n) or 0, err
-end
-
--- Moves waiting chaos shards to cfg.transposer.shardSide.
-function hw:pullShards(count)
-    if not self.shardSide then return 0 end
-    local n, err = call(self.tp, "transferItem", self.reactorSide, self.shardSide, count, 1)
+    local n, err = call(self.tp, "transferItem", self.stockSide, self.targetSide, count, slot)
     return tonumber(n) or 0, err
 end
 
@@ -176,10 +176,9 @@ function hw.init(cfg)
     if not reactor then problems[#problems + 1] = err else self.reactor = reactor end
 
     if cfg.feed and cfg.feed.enabled then
-        local tp, stock, side = findTransposer(cfg)
+        local tp, stock, target = findTransposer(cfg)
         if tp then
-            self.tp, self.stockSide, self.reactorSide = tp, stock, side
-            self.shardSide = cfg.transposer and cfg.transposer.shardSide
+            self.tp, self.stockSide, self.targetSide = tp, stock, target
         else
             self.tpProblem = stock  -- the error text
         end
@@ -192,8 +191,8 @@ end
 function hw:describe()
     if not self.tp then return "no transposer (" .. tostring(self.tpProblem or "feeding off") .. ")" end
     local N = hw.SIDE_NAMES
-    return string.format("transposer %s: replenisher %s, stabilizer %s%s", self.tp.address:sub(1, 8),
-        N[self.stockSide], N[self.reactorSide], self.shardSide and (", shards -> " .. N[self.shardSide]) or "")
+    return string.format("transposer %s: replenisher %s -> buffer chest %s", self.tp.address:sub(1, 8),
+        N[self.stockSide], N[self.targetSide])
 end
 
 return hw

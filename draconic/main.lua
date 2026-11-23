@@ -3,7 +3,8 @@
 -- Starts from the GTNH wiki's safe-shutdown script (credits UltraProdigy, Fox:
 -- stop at 20% chaos share or 20% containment field) and adds:
 --   * feeding: moves awakened draconium (nuggets, ingots, blocks) from a Super
---     Stock Replenisher into a stabilizer, before a run and while it runs;
+--     Stock Replenisher into a buffer chest that empties into a stabilizer,
+--     before a run and while it runs;
 --   * auto-start: charges once the reactor holds enough fuel, and activates it
 --     when charged;
 --   * a fuel reserve: stops while there is still enough fuel for the shutdown
@@ -120,9 +121,12 @@ local offlineSince = now()
 local runStart
 local lastCmd = { stop = -math.huge, charge = -math.huge, activate = -math.huge }
 local sim, simAt, nextSim = nil, -math.huge, 0
-local stock = { fuel = 0, usable = 0, known = false }
-local shardsWaiting = 0
-local rejected = {}     -- labels the stabilizer refused
+-- fuel: in the replenisher. buffer: in the buffer chest, on its way in.
+-- usable: what feeding could still move from the replenisher.
+local stock = { fuel = 0, buffer = 0, usable = 0, known = false }
+local shardsWaiting = 0 -- full shards in the core's slot; they block fuel going in
+local shardsSince       -- since when shards have been waiting
+local prevTotal, stallSince, stalled = nil, nil, false
 local fill = 0          -- fuel fed since the reactor was last seen not filling
 local autoWhy = ""      -- why auto-start is (not) starting
 local quitArmedUntil = 0
@@ -186,7 +190,7 @@ local function startCheck(d, auto)
     if not auto then return true end
     local minTotal = (cfg.autoStart.minTotalBlocks or 0) * C.block
     if minTotal > 0 then
-        local supply = supplyFuel()
+        local supply = stock.buffer + supplyFuel()
         if d.fuel + supply < minTotal then
             return false, string.format("fuel available %s / %s blocks (reactor %s + supply %s)",
                 blocks(d.fuel + supply), blocks(minTotal), blocks(d.fuel), blocks(supply))
@@ -194,10 +198,14 @@ local function startCheck(d, auto)
     end
     local need = autoMinFuel(d)
     if d.fuel < need then
-        return false, string.format("fuel %s / %s blocks", blocks(d.fuel), blocks(need))
+        return false, string.format("fuel %s / %s blocks (%s in the chest)", blocks(d.fuel), blocks(need),
+            blocks(stock.buffer))
     end
-    if cfg.autoStart.waitForDelivery and feedOn and shardsWaiting == 0 and stock.usable > 0 then
-        return false, "still filling from the replenisher"
+    if cfg.autoStart.waitForDelivery then
+        local flowing = stock.buffer > 0 and C.maxFuel - d.total >= C.nugget and shardsWaiting == 0 and not stalled
+        if stock.usable > 0 or flowing then
+            return false, "still filling (" .. blocks(stock.buffer) .. " blocks in the chest)"
+        end
     end
     local cd = cfg.autoStart.cooldown - (now() - offlineSince)
     if cd > 0 then return false, string.format("cooldown, %ds", math.ceil(cd)) end
@@ -289,6 +297,13 @@ local function track(d)
             setAuto(false, "Stopped from outside the script: auto-start OFF (A turns it back on).")
         end
     end
+    -- The core shows its full shards in its one slot (convertedFuel > one
+    -- shard). Until they are pulled out of a stabilizer, nothing can go in.
+    shardsWaiting = d.converted > C.shard and math.floor(d.converted / C.shard) or 0
+    if shardsWaiting > 0 then shardsSince = shardsSince or now() else shardsSince = nil end
+    logOnce("shards", (shardsSince and now() - shardsSince > 30) and ("WARN: " .. shardsWaiting
+        .. " chaos shard(s) are not being pulled out of the reactor; no fuel can get in meanwhile.") or nil,
+        "warn", true)
     if prev then
         local drop = prev.converted - d.converted
         if drop >= C.shard * 0.5 then
@@ -344,21 +359,10 @@ end
 
 local FEED_STATES = { offline = true, charging = true, charged = true, stopping = true }
 
-local function feed()
-    local d = last
-    if not hw.tp or not d then return end
-
-    local items, err = hw:stock()
-    if not items then
-        stock.known = false
-        logOnce("stock", "ERROR: " .. tostring(err), "crit")
-        return
-    end
-    logOnce("stock", nil)
-    stock.known = true
-
+-- The awakened draconium among `list`, blocks first, and its total fuel.
+local function fuelStacks(list)
     local stacks, total = {}, 0
-    for _, it in ipairs(items) do
+    for _, it in ipairs(list) do
         local value = P.fuelValue(it.label, C)
         if value > 0 then
             it.value = value
@@ -366,67 +370,84 @@ local function feed()
             stacks[#stacks + 1] = it
         end
     end
-    table.sort(stacks, function(a, b) return a.value > b.value end)  -- blocks first
-    stock.fuel = total
+    table.sort(stacks, function(a, b) return a.value > b.value end)
+    return stacks, total
+end
 
-    -- A full shard sitting in the slot blocks insertion.
-    shardsWaiting = hw:shardsWaiting()
-    if shardsWaiting > 0 and hw.shardSide then
-        local n, perr = hw:pullShards(shardsWaiting)
-        if n > 0 then shardsWaiting = shardsWaiting - n
-        else logOnce("shards", "WARN: could not move chaos shards out: " .. tostring(perr or "target full?"), "warn") end
+-- Fuel in the buffer chest should keep flowing into the reactor while the
+-- reactor has room and no shard blocks its slot. Warn when it does not.
+local function checkStall(d)
+    if stock.buffer > 0 and C.maxFuel - d.total >= C.nugget and shardsWaiting == 0 then
+        if prevTotal and d.total > prevTotal then stallSince = nil
+        else stallSince = stallSince or now() end
+    else
+        stallSince = nil
     end
-    if shardsWaiting > 0 and not hw.shardSide then
-        logOnce("shards", "WARN: " .. shardsWaiting .. " chaos shard(s) wait in the reactor; "
-            .. "nothing can be fed until they are pulled out.", "warn")
-    elseif shardsWaiting == 0 then
-        logOnce("shards", nil)
-    end
+    prevTotal = d.total
+    stalled = stallSince ~= nil and now() - stallSince > 30
+    logOnce("stall", stalled and ("WARN: " .. blocks(stock.buffer) .. " blocks of fuel sit in the buffer chest "
+        .. "but none reaches the reactor. Check the chest -> stabilizer link.") or nil, "warn", true)
+end
 
-    local allowed = feedOn and shardsWaiting == 0
-        and (FEED_STATES[d.status] or (d.status == "online" and cfg.feed.whileRunning))
-    local space = C.maxFuel - d.total
+local function feed()
+    local d = last
+    if not hw.tp or not d then return end
+
+    local items, err = hw:stock()
+    local inChest, berr = hw:buffer()
+    if not items or not inChest then
+        stock.known = false
+        logOnce("stock", "ERROR: " .. tostring(err or berr), "crit")
+        return
+    end
+    logOnce("stock", nil)
+    stock.known = true
+    local stacks
+    stacks, stock.fuel = fuelStacks(items)
+    local _, inBuffer = fuelStacks(inChest)
+    stock.buffer = inBuffer
+    checkStall(d)
+
+    local allowed = feedOn and (FEED_STATES[d.status] or (d.status == "online" and cfg.feed.whileRunning))
+    -- Room left once the chest has emptied into the reactor.
+    local space = C.maxFuel - d.total - stock.buffer
     local fed, moves = 0, 0
     if allowed then
         for _, st in ipairs(stacks) do
-            if not rejected[st.label] then
-                while moves < cfg.feed.maxMoves do
-                    local fit = math.min(st.size, 64, math.floor(space / st.value))
-                    if fit <= 0 then break end
-                    local n = hw:feed(st.slot, fit)
-                    moves = moves + 1
-                    if n <= 0 then
-                        rejected[st.label] = true
-                        log("WARN: the stabilizer refused \"" .. tostring(st.label)
-                            .. "\" (not ore-dictionary awakened draconium?). Ignoring it.", "warn", true)
-                        break
-                    end
-                    st.size, space = st.size - n, space - n * st.value
-                    fed = fed + n * st.value
+            while moves < cfg.feed.maxMoves do
+                local fit = math.min(st.size, 64, math.floor(space / st.value))
+                if fit <= 0 then break end
+                local n = hw:feed(st.slot, fit)
+                moves = moves + 1
+                if n <= 0 then
+                    logOnce("feed", "WARN: could not move fuel into the buffer chest (full?).", "warn")
+                    moves = cfg.feed.maxMoves
+                    break
                 end
+                logOnce("feed", nil)
+                st.size, space = st.size - n, space - n * st.value
+                fed = fed + n * st.value
             end
         end
     end
     if fed > 0 then
         session.fed, totals.fed, dirty = session.fed + fed, totals.fed + fed, true
-        stock.fuel = stock.fuel - fed
+        stock.fuel, stock.buffer = stock.fuel - fed, stock.buffer + fed
     end
 
     -- What could still go in: for "wait for the delivery".
     local usable = 0
     for _, st in ipairs(stacks) do
-        if not rejected[st.label] then
-            usable = usable + math.min(st.size, math.floor(space / st.value)) * st.value
-        end
+        usable = usable + math.min(st.size, math.floor(space / st.value)) * st.value
     end
-    stock.usable = usable
+    stock.usable = allowed and usable or 0
 
     -- One log line per fill between runs, not one per transfer.
     if d.status ~= "online" then
         if fed > 0 then
             fill = fill + fed
         elseif fill > 0 then
-            log("Fed " .. blocks(fill) .. " blocks of fuel into the reactor.", "info", true)
+            log("Moved " .. blocks(fill) .. " blocks of fuel toward the reactor.", "info", true)
             fill = 0
         end
     end
@@ -543,11 +564,12 @@ local function buildView()
     elseif not stock.known then
         v.supply, v.supplyColor = "cannot read the replenisher", "crit"
     else
-        v.supply = blocks(stock.fuel) .. " blk in replenisher"
+        v.supply = blocks(stock.fuel) .. " blk, chest " .. blocks(stock.buffer)
         if (cfg.autoStart.minTotalBlocks or 0) > 0 then
-            v.supply = blocks(stock.fuel) .. " blk, total " .. blocks(d.fuel + supplyFuel())
+            v.supply = v.supply .. ", total " .. blocks(d.fuel + stock.buffer + supplyFuel())
         end
-        if stock.fuel <= 0 then v.supplyColor = "dim" end
+        if stalled then v.supplyColor = "warn"
+        elseif stock.fuel + stock.buffer <= 0 then v.supplyColor = "dim" end
     end
     v.fed = blocks(session.fed) .. " blk now, " .. blocks(totals.fed) .. " total"
     v.shards = fmtInt(session.shards) .. " now, " .. fmtInt(totals.shards) .. " total"

@@ -15,20 +15,17 @@ cfg.ui = true
 cfg.reactor = { address = nil }
 
 -- The transposer touches the Super Stock Replenisher (fuel comes in there from
--- the main net) and one Reactor Stabilizer (fuel goes into the core through
--- it). Both are found by their block names; set a side here only to override
--- what `probe sides` reports. Sides: 0 down, 1 up, 2 north, 3 south, 4 west,
--- 5 east.
+-- the main net) and a buffer chest (a compressed chest) that something else
+-- empties into a Reactor Stabilizer. The replenisher is found by name; the
+-- chest by name (chest/compress), else as the one other inventory. Set a side
+-- here only to override what `probe sides` reports. Sides: 0 down, 1 up,
+-- 2 north, 3 south, 4 west, 5 east.
+-- Chaos shards must be pulled out of a stabilizer too (an item conduit): while
+-- a full shard waits in the reactor's slot, no fuel can get in.
 cfg.transposer = {
     address = nil,      -- nil = the transposer that touches both
     stockSide = nil,
-    reactorSide = nil,
-    -- Optional: an inventory on the same transposer (an ME interface, a chest)
-    -- to move finished chaos shards into. nil = something else pulls them out
-    -- of a stabilizer (an item conduit, as the wiki suggests). Either way they
-    -- must be pulled: while a full shard waits in the reactor's slot, the
-    -- transposer cannot insert fuel.
-    shardSide = nil,
+    targetSide = nil,   -- the buffer chest
 }
 
 -- -------------------------------------------------------------------- fuel --

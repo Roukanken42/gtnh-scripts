@@ -5,7 +5,9 @@ chaos shards**:
 
 - **Feeds** it: a transposer moves awakened draconium blocks, ingots and
   nuggets from a **Super Stock Replenisher** (stocked from the main net) into a
-  stabilizer. It fills the reactor before a run and tops it up while it runs.
+  buffer chest, which something else empties into a stabilizer. It fills the
+  reactor before a run and tops it up while it runs. Fuel in the chest counts
+  as on its way in, so the reactor is never overfilled.
 - **Auto-starts**: once the reactor holds enough fuel (`cfg.autoStart.minBlocks`)
   it charges it, then activates it as soon as it reports *charged*. Optionally
   it also waits until the reactor plus the replenisher hold enough in total
@@ -61,9 +63,14 @@ Typical results, full reactor: about 5 to 6 minutes and 1,800 to 4,900 fuel
 | What | Where | Config |
 |---|---|---|
 | Adapter | touching a Reactor Stabilizer or the Energy Injector | `cfg.reactor` (auto) |
-| Transposer | touching the Super Stock Replenisher and one Reactor Stabilizer | `cfg.transposer` (auto by block name) |
-| Shard extraction | an item conduit on a stabilizer, **or** an inventory on the transposer (`cfg.transposer.shardSide`) | |
+| Transposer | touching the Super Stock Replenisher and a buffer chest (e.g. a compressed chest) | `cfg.transposer` (auto by block name) |
+| Chest -> reactor | anything that pushes the chest's contents into a stabilizer | |
+| Shard extraction | an item conduit on a stabilizer | |
 | Screen + GPU | 80x25 or bigger (Tier 2+), keyboard | `cfg.ui` |
+
+A transposer cannot insert into a stabilizer directly, hence the chest. The
+script warns when fuel sits in the chest for 30 s without reaching the
+reactor, and when chaos shards are not being pulled out (they block the slot).
 
 The power side is unchanged from the wiki: a flux gate into the injector and
 one out of a stabilizer. The script does not control the flux gates.
@@ -71,9 +78,10 @@ one out of a stabilizer. The script does not control the flux gates.
 ## Setup
 
 1. `install draconic`, then `cd draconic`.
-2. `probe sides`: check it found the replenisher and the stabilizer. If not,
+2. `probe sides`: check it found the replenisher and the buffer chest. If not,
    set the sides in `config.lua`.
-3. `probe stock`: the replenisher's draconium should show its fuel value.
+3. `probe stock`: the draconium in the replenisher and the chest should show
+   its fuel value.
 4. `probe reactor`: the reactor answers, and the predicted shutdown.
 5. `main`. To restart it after a reboot or server restart, add these lines to
    `/home/.shrc` (with the folder you installed into):

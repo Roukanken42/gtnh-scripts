@@ -2,8 +2,8 @@
 --
 --   probe            every component
 --   probe sides      what each transposer side holds; which is the
---                    replenisher and which the stabilizer
---   probe stock      the replenisher's contents and their fuel value
+--                    replenisher and which the buffer chest
+--   probe stock      the replenisher's and the chest's contents, with fuel value
 --   probe reactor    getReactorInfo(), and a simulated shutdown from now
 
 local component = require("component")
@@ -41,10 +41,10 @@ local function probeSides()
         any = true
         local tp = component.proxy(addr)
         local survey = hw.surveySides(tp)
-        local stock, reactor, err = hw.pickSides(survey, cfg.transposer or {})
+        local stock, target, err = hw.pickSides(survey, cfg.transposer or {})
         print("== transposer " .. addr)
-        print("   replenisher: " .. (stock and sideName(stock) or "?") .. "   stabilizer: "
-            .. (reactor and sideName(reactor) or "?") .. (err and ("   (" .. err .. ")") or ""))
+        print("   replenisher: " .. (stock and sideName(stock) or "?") .. "   buffer chest: "
+            .. (target and sideName(target) or "?") .. (err and ("   (" .. err .. ")") or ""))
         for s = 0, 5 do
             local i = survey[s]
             if i.size then
@@ -63,17 +63,22 @@ local function probeStock()
     if not h.tp then print(h.tpProblem) return end
     print(h:describe())
     local C = P.constants(cfg.game)
-    local items, err = h:stock()
-    if not items then print(err) return end
-    local total = 0
-    for _, it in ipairs(items) do
-        local v = P.fuelValue(it.label, C)
-        total = total + v * it.size
-        print(string.format("  slot %-3d %6d x %-34s %s", it.slot, it.size, tostring(it.label),
-            v > 0 and (v .. " fuel each") or "(not fuel)"))
+    for _, part in ipairs({ { "replenisher", h.stock }, { "buffer chest", h.buffer } }) do
+        local items, err = part[2](h)
+        if not items then
+            print(err)
+        else
+            print(part[1] .. ":")
+            local total = 0
+            for _, it in ipairs(items) do
+                local v = P.fuelValue(it.label, C)
+                total = total + v * it.size
+                print(string.format("  slot %-3d %6d x %-34s %s", it.slot, it.size, tostring(it.label),
+                    v > 0 and (v .. " fuel each") or "(not fuel)"))
+            end
+            print(string.format("Fuel in the %s: %d (%.1f blocks)", part[1], total, total / C.block))
+        end
     end
-    print(string.format("Fuel in the replenisher: %d (%.1f blocks)", total, total / C.block))
-    print("Chaos shards waiting in the reactor slot: " .. h:shardsWaiting())
 end
 
 local function probeReactor()

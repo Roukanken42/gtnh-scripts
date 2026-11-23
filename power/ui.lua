@@ -33,7 +33,7 @@ local ui = { active = false }
 
 local gpu
 local W, H
-local origW, origH, origDepth
+local origDepth
 local buffer
 
 -- ---- palette -------------------------------------------------------------
@@ -215,12 +215,8 @@ function ui.init()
     end
     gpu = component.gpu
     origDepth = gpu.getDepth()
-    origW, origH = gpu.getResolution()
-    local mw, mh = gpu.maxResolution()
-    W = math.min(mw, 160)
-    H = math.min(mh, 50)
+    W, H = gpu.getResolution()
     pcall(gpu.setDepth, gpu.maxDepth())
-    gpu.setResolution(W, H)
 
     buffer = nil
     if gpu.allocateBuffer ~= nil then
@@ -242,9 +238,8 @@ function ui.shutdown()
         buffer = nil
     end
     setbg(C.black); setfg(C.white)
-    pcall(gpu.setResolution, origW, origH)
     pcall(gpu.setDepth, origDepth)
-    gpu.fill(1, 1, origW, origH, " ")
+    gpu.fill(1, 1, W, H, " ")
     gpu.set(1, 1, "")
     ui.active = false
 end

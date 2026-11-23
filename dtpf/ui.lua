@@ -15,18 +15,10 @@ local C = {
     titleBg = 0x1E1840,
 }
 
-local oldW, oldH
-
--- The dashboard uses the full resolution the GPU and screen allow (160x50 at
--- tier 3); the one the shell had is put back on exit.
+-- The dashboard lays out to the screen's current resolution and never changes it.
 function ui.init()
     if not component.isAvailable("gpu") or not component.isAvailable("screen") then return false end
     gpu = component.gpu
-    local ok = pcall(function()
-        oldW, oldH = gpu.getResolution()
-        gpu.setResolution(gpu.maxResolution())
-    end)
-    if not ok then return false end
     W, H = gpu.getResolution()
     gpu.setBackground(C.bg)
     gpu.fill(1, 1, W, H, " ")
@@ -38,7 +30,6 @@ function ui.shutdown()
     if not ui.active then return end
     gpu.setBackground(0x000000)
     gpu.setForeground(0xFFFFFF)
-    if oldW then pcall(gpu.setResolution, oldW, oldH) end
     local w, h = gpu.getResolution()
     gpu.fill(1, 1, w, h, " ")
     ui.active = false

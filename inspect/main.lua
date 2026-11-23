@@ -131,7 +131,7 @@ local DOWNTRI = "\xE2\x96\xBC" -- down triangle (more-below indicator)
 local EMDASH = "\xE2\x80\x94"
 
 local gpu, W, H, buffer
-local origW, origH, origDepth
+local origDepth
 local L -- computed layout (column offsets, panel geometry)
 
 local function setfg(c) gpu.setForeground(c, false) end
@@ -261,12 +261,8 @@ end
 local function initUI()
     gpu = component.gpu
     origDepth = gpu.getDepth()
-    origW, origH = gpu.getResolution()
-    local mw, mh = gpu.maxResolution()
-    W = math.min(mw, 160)
-    H = math.min(mh, 50)
+    W, H = gpu.getResolution()
     pcall(gpu.setDepth, gpu.maxDepth())
-    gpu.setResolution(W, H)
 
     -- Off-screen buffer so each redraw is blitted in one op (no flicker).
     buffer = nil
@@ -289,9 +285,8 @@ local function shutdownUI()
         buffer = nil
     end
     setbg(C.black); setfg(C.white)
-    pcall(gpu.setResolution, origW, origH)
     pcall(gpu.setDepth, origDepth)
-    gpu.fill(1, 1, origW, origH, " ")
+    gpu.fill(1, 1, W, H, " ")
     gpu.set(1, 1, "")
 end
 

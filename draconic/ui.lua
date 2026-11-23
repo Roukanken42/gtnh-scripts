@@ -53,11 +53,6 @@ end
 function ui.init()
     if not component.isAvailable("gpu") or not component.isAvailable("screen") then return false end
     gpu = component.gpu
-    local ok = pcall(function()
-        local mw, mh = gpu.maxResolution()
-        gpu.setResolution(math.min(mw, 100), math.min(mh, 32))
-    end)
-    if not ok then return false end
     W, H = gpu.getResolution()
     if W < 80 or H < 25 then return false end
     gpu.setBackground(C.bg)

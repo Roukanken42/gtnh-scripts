@@ -167,16 +167,15 @@ R.variants = {
           outputs = { shirabon = 144 } },
     },
     -- Residue, when infinity and hypogen do not make enough on the side.
-    -- First inf_t3.5: the most residue per Infinity Catalyst, and the infinity
-    -- is wanted anyway. Then chromatic glass (DTPFCalculator.calculateNonEBF
-    -- Recipe(1966080, 6000), parallel 256): no item inputs, cheap molten glass,
-    -- a useful output, and 10-20x less input per residue than the metal
-    -- recipes. Its tiers are ordered by residue per unit of catalyst energy
-    -- (MTEPlasmaForge FUEL_ENERGY_VALUES): the lower the tier, the cheaper.
-    -- cfg.catalysts.allowed (crude is off by default) and perProduct decide.
+    -- First chromatic glass (DTPFCalculator.calculateNonEBFRecipe(1966080,
+    -- 6000), parallel 256): no item inputs, cheap molten glass, a useful
+    -- output, 10-20x less input per residue than the metal recipes, and in
+    -- practice about twice as fast as inf_t3.5. Its tiers are ordered by
+    -- residue per unit of catalyst energy (MTEPlasmaForge FUEL_ENERGY_VALUES):
+    -- the lower the tier, the cheaper. Then inf_t3.5, when there is no glass:
+    -- the most residue per Infinity Catalyst, and the infinity is wanted too.
+    -- cfg.catalysts.allowed and perProduct decide which tiers may run.
     residue = {
-        inf_t35_comb,
-        inf_t35,
         { id = "cg_t1", catalyst = "crude", catalystAmount = 156040, heat = H.awakened,
           eut = 50331648, ticks = 3000,
           inputs = { fl("glass", 36864) },
@@ -193,6 +192,8 @@ R.variants = {
           eut = 402653184, ticks = 375,
           inputs = { fl("glass", 294912) },
           outputs = { residue = 11116, chromaticglass = 294912 } },
+        inf_t35_comb,
+        inf_t35,
     },
 }
 

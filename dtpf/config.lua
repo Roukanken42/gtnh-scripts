@@ -71,8 +71,9 @@ cfg.products = {
     -- Dimensionally Transcendent Residue. Infinity and hypogen make it on the
     -- side; spacetime and shirabon eat it (5000 L a batch), and their shortfall
     -- is asked of it at their priority. This target is a buffer on top. When
-    -- it is the pick, it runs inf_t3.5 (5x the residue of inf_t5 per Infinity
-    -- Catalyst, plus the infinity), else chromatic glass from molten glass.
+    -- it is the pick, it runs chromatic glass from molten glass (crude first,
+    -- the cheapest residue), else inf_t3.5 (5x the residue of inf_t5 per
+    -- Infinity Catalyst, plus the infinity).
     { name = "residue",   target = 1000000, priority = 2 },
     -- Also made elsewhere: the DTPF is just an extra passive source.
     { name = "infinity",  target = 1000000, priority = 1 },
@@ -84,13 +85,13 @@ cfg.products = {
 -- is picked; a catalyst that is missing here is never exposed.
 --   crude, prosaic, resplendent, exotic, stellar
 cfg.catalysts = {
-    allowed = { "prosaic", "resplendent", "exotic", "stellar" },
+    allowed = { "crude", "prosaic", "resplendent", "exotic", "stellar" },
     -- Never let passive recipes take a catalyst below this much (L) on the main
     -- net, so the AE-driven active recipes always have theirs.
     reserve = { crude = 0, prosaic = 0, resplendent = 0, exotic = 0, stellar = 0 },
     -- Per product, a narrower list, e.g. infinity = { "exotic", "resplendent" }
-    -- to keep stellar for hypogen, or residue = { "resplendent" } to make
-    -- chromatic glass only on resplendent.
+    -- to keep stellar for hypogen, or residue = { "crude", "resplendent" } to
+    -- keep chromatic glass off prosaic and exotic (inf_t3.5 is resplendent).
     perProduct = {},
 }
 

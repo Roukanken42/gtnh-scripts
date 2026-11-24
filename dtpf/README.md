@@ -53,11 +53,11 @@ From NewHorizonsCoreMod `DTPFRecipes.java` and GT5-Unofficial
 | Spacetime | `st_v2` | none | Eternal | Energised Tesseract, 5000 residue, 1152 infinity → 576 L (+ Hypervisor Matrix) |
 | | `st_v1` | none | Hypogen | Tesseract, 10000 residue, 2304 infinity, 1152 hypogen → 144 L |
 | Shirabon | `sh_v1` | none | Eternal | 1152 metastable oganesson, 2304 precious metals alloy, 288 spacetime, 5000 residue → 144 L (+ HiC Mk-V) |
-| Residue | `inf_t35_comb`, `inf_t35` | resplendent | Hypogen | the infinity recipes above: 25046 / 29466 residue and 9216 L infinity per Infinity Catalyst |
-| | `cg_t1` | crude 156040 | Awakened | 36864 L molten glass → chromatic glass + 19505 residue (crude is not allowed by default) |
+| Residue | `cg_t1` | crude 156040 | Awakened | 36864 L molten glass → chromatic glass + 19505 residue |
 | | `cg_t2` | prosaic 61059 | Infinity | 73728 L → 15264 residue |
 | | `cg_t3` | resplendent 26350 | Hypogen | 147456 L → 13175 residue |
 | | `cg_t4` | exotic 11116 | Eternal | 294912 L → 11116 residue |
+| | `inf_t35_comb`, `inf_t35` | resplendent | Hypogen | the infinity recipes above: 25046 / 29466 residue and 9216 L infinity per Infinity Catalyst |
 
 Items in brackets are not consumed: the stocker needs one, and keeps it.
 
@@ -76,21 +76,21 @@ hypogen make residue on the side, and spacetime and shirabon eat 5000 L a
 batch. That is more than the infinity they eat brings with it, even at t3.5,
 so residue is a product of its own:
 
-- **`inf_t35` first.** Per Infinity Catalyst it makes the same 9216 L of
-  infinity as `inf_t5`, plus 5x the residue (29466 L against 5687) for about
-  30 % more catalyst energy. Infinity made for its own sake still uses its
-  best variant; t3.5 runs only while residue is the pick.
-- **Then chromatic glass**, when there is no Infinity Catalyst. It takes no
-  items, only cheap molten glass, makes a useful output, and needs 10-20x less
-  input per residue than the metal recipes (neutronium, bedrockium, cosmic
-  neutronium). Lower tiers first: by the game's own catalyst energy values,
-  prosaic gives twice the residue per unit of energy that resplendent does,
-  and four times what exotic does. Narrow it with
+- **Chromatic glass first.** It takes no items, only cheap molten glass,
+  makes a useful output, needs 10-20x less input per residue than the metal
+  recipes (neutronium, bedrockium, cosmic neutronium), and in practice runs
+  about twice as fast as `inf_t35`. Lower tiers first: by the game's own
+  catalyst energy values, crude gives 2.3x the residue per unit of energy
+  that prosaic does, 4.6x resplendent and 9x exotic. Narrow it with
   `cfg.catalysts.perProduct.residue`.
+- **Then `inf_t35`**, when there is no glass. Per Infinity Catalyst it makes
+  the same 9216 L of infinity as `inf_t5`, plus 5x the residue (29466 L
+  against 5687) for about 30 % more catalyst energy. Infinity made for its own
+  sake still uses its best variant; t3.5 runs only while residue is the pick.
 
-The stocker needs **circuit 5** (and circuit 2 for the comb variant) for
-`inf_t35`, and a whole batch of molten glass for chromatic glass: 73728 L
-(prosaic) to 294912 L (exotic).
+The stocker needs a whole batch of molten glass for chromatic glass: 36864 L
+(crude) to 294912 L (exotic). For `inf_t35` it needs **circuit 5** (and
+circuit 2 for the comb variant).
 
 ## Which product
 

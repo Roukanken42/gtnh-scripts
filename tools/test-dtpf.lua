@@ -134,20 +134,29 @@ for p, list in pairs(R.variants) do
 end
 check(not ids.inf_t3 and not ids.inf_t3_comb, "the Awakened-coil infinity recipe is gone")
 check(R.retired.inf_t3, "inf_t3 still accepted in an old config")
-eq(R.variants.residue[2], R.variants.infinity[6], "residue's inf_t35 is infinity's")
+local function variantById(p, id)
+    for _, v in ipairs(R.variants[p]) do if v.id == id then return v end end
+end
+check(variantById("residue", "inf_t35") == variantById("infinity", "inf_t35"), "residue's inf_t35 is infinity's")
 
--- Infinity Catalyst + circuit 5 + resplendent: residue runs inf_t3.5.
+-- Chromatic glass before inf_t3.5. The stocker has glass, Infinity Catalyst
+-- and circuit 5; crude is not allowed here and prosaic 5000 < 61059, so
+-- resplendent glass.
 run, planned = plan.product(R.variants.residue, ctx())
-eq(run and run.variant.id, "inf_t35", "residue runs inf_t35 first")
-eq(planned.id, "inf_t35", "residue planned with inf_t35")
--- ...while infinity itself still runs its best variant.
-eq((plan.product(R.variants.infinity, ctx())).variant.id, "inf_t5", "infinity keeps inf_t5")
--- No Infinity Catalyst: chromatic glass. Prosaic 5000 < 61059, so resplendent.
-local noIC = plan.prepare({ items = {}, fluids = { fluid("Molten Glass", 300000, "molten.glass") } })
-run = plan.product(R.variants.residue, ctx({ stock = noIC }))
-eq(run and run.variant.id, "cg_t3", "residue falls to chromatic glass on resplendent")
+eq(run and run.variant.id, "cg_t3", "residue runs chromatic glass before inf_t35")
+eq(planned.id, "cg_t2", "residue planned with the first allowed tier")
 eq(#run.fluids, 1, "chromatic glass filter: glass only")
 eq(#run.items, 0, "chromatic glass filter: no items")
+-- Crude allowed: the most residue per unit of catalyst energy.
+local withCrude = { crude = true, prosaic = true, resplendent = true, exotic = true, stellar = true }
+run = plan.product(R.variants.residue, ctx({ allowedCat = withCrude, catalysts = { crude = 1e6, resplendent = 1e5 } }))
+eq(run and run.variant.id, "cg_t1", "crude first when allowed")
+-- No glass: inf_t3.5, while infinity itself keeps its best variant.
+run = plan.product(R.variants.residue, ctx({ stock = plan.prepare({ items = stock.items, fluids = {} }) }))
+eq(run and run.variant.id, "inf_t35", "no glass: residue runs inf_t35")
+eq((plan.product(R.variants.infinity, ctx())).variant.id, "inf_t5", "infinity keeps inf_t5")
+-- No Infinity Catalyst either way: the glass tiers.
+local noIC = plan.prepare({ items = {}, fluids = { fluid("Molten Glass", 300000, "molten.glass") } })
 run = plan.product(R.variants.residue, ctx({ stock = noIC, catalysts = { prosaic = 100000, resplendent = 100000 } }))
 eq(run and run.variant.id, "cg_t2", "prosaic first: the most residue per catalyst energy")
 run = plan.product(R.variants.residue, ctx({ stock = noIC, catalysts = { crude = 1e9, exotic = 100000 } }))
@@ -233,7 +242,7 @@ check(d.infinity.capped, "infinity over its max")
 
 -- Residue: spacetime and shirabon pass their shortfall on to it.
 local rnames = { "shirabon", "spacetime", "hypogen", "residue", "infinity" }
-plannedMap.residue = R.variants.residue[2]
+plannedMap.residue = variantById("residue", "cg_t2")
 order = plan.topo({ "residue", "infinity", "hypogen", "spacetime", "shirabon" }, plannedMap)
 pos = {}
 for i, p in ipairs(order) do pos[p] = i end
@@ -348,7 +357,7 @@ end
 
 -- The case asked about: residue (inf_t3.5) <-> infinity (inf_t5). Never
 -- circuit 4 + Infinity Catalyst with resplendent, nor circuit 5 with stellar.
-local t5, t35 = R.variants.infinity[2], R.variants.residue[2]
+local t5, t35 = variantById("infinity", "inf_t5"), variantById("residue", "inf_t35")
 check(switch(t5, "stellar", t35, "resplendent") == nil, "inf_t5 -> inf_t35 is safe")
 check(switch(t35, "resplendent", t5, "stellar") == nil, "inf_t35 -> inf_t5 is safe")
 do

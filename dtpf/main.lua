@@ -4,12 +4,12 @@
 -- themselves. Whenever a DTPF has nothing else to do it pulls a passive recipe
 -- from the stocker through two storage buses (items, fluids) and its catalyst
 -- from the main net through a third. This script decides WHICH passive recipe
--- that is -- infinity, hypogen, spacetime or shirabon, and with which catalyst
--- -- by setting those three filters, so the array never idles (an idle DTPF
--- loses its running-time discount 100x faster than it earns it).
+-- that is -- infinity, hypogen, spacetime, shirabon or residue, and with which
+-- catalyst -- by setting those three filters, so the array never idles (an
+-- idle DTPF loses its running-time discount 100x faster than it earns it).
 --
 -- Run from this folder:   main
--- Keys: SPACE/P pause (filters left as they are), 1-4 pin a product (in the
+-- Keys: SPACE/P pause (filters left as they are), 1-9 pin a product (in the
 --       order of cfg.products), A back to automatic, Q quit.
 
 local event = require("event")
@@ -82,7 +82,9 @@ do
     local ids = {}
     for _, list in pairs(R.variants) do for _, v in ipairs(list) do ids[v.id] = true end end
     for _, id in ipairs(cfg.disabledVariants or {}) do
-        if not ids[id] then bad[#bad + 1] = "disabledVariants: unknown variant " .. tostring(id) end
+        if not ids[id] and not R.retired[id] then
+            bad[#bad + 1] = "disabledVariants: unknown variant " .. tostring(id)
+        end
     end
     if #bad > 0 then error("config.lua:\n  " .. table.concat(bad, "\n  "), 0) end
 end
@@ -123,7 +125,11 @@ local forges = {}         -- latest hw.readForge per DTPF
 local stocker, mainnet    -- prepared snapshots
 local selection = nil     -- { product, since }
 local result = nil        -- the last decision, for the view
-local applied = {}        -- { ing = signature, cat = signature } last written
+-- What was last written: ing/cat signatures, the exposure (plan.exposure) the
+-- filters may hold now, and the set of variants it may form. After a failed
+-- write both are supersets of the truth, never less. startup() sets the
+-- catalysts the bus holds.
+local applied = { exposure = plan.exposure(nil, mats, nil), formed = {} }
 local busCatalyst = nil   -- catalyst key the catalyst bus holds now
 local paused = false
 local share = {}          -- seconds each product has been selected this session
@@ -225,6 +231,7 @@ end
 -- The filters for a decision. `cat` is the catalyst to put on the catalyst
 -- bus, or nil to leave it as it is (a recipe without catalyst, or nothing
 -- runnable): that bus is never emptied, see hw.writeCatalyst.
+-- Also returns the variant and the catalyst key, or nil for either.
 local function filtersFor(res)
     local items, fluids, cat = {}, {}, nil
     local run = res.pick and res.runs[res.pick]
@@ -238,9 +245,9 @@ local function filtersFor(res)
     end
     if key then
         local _, stack = plan.find(mainnet, mats, { mat = R.catalystByKey[key].mat })
-        if stack then cat = hwlib.detailOf(stack, "fluid") end
+        if stack then cat = hwlib.detailOf(stack, "fluid") else key = nil end
     end
-    return items, fluids, cat
+    return items, fluids, cat, run.variant, key
 end
 
 local function signature(list)
@@ -257,26 +264,45 @@ end
 
 -- Writes the filters of a decision.
 --   ingredients changed: block both stocker buses, set the catalyst, then
---     write the new ingredients. While they appear one by one, nothing can
---     match but the intended variant: no two passive variants with the same
---     catalyst have inputs that are a subset of one another.
---   only the catalyst changed (hyp_v3 -> hyp_v4 use the same inputs): one
---     write into slot 1 of the catalyst bus switches the variant.
+--     write the new ingredients, circuit and other kept items last
+--     (plan.writeOrder).
+--   only the catalyst changed (hyp_v3 -> hyp_v4, inf_t5 -> inf_t4 use the same
+--     inputs): one write into slot 1 of the catalyst bus switches the variant.
 -- The catalyst bus is never blocked or emptied: it is on the main net.
+--
+-- Before writing anything, every filter state on the way is checked
+-- (plan.transition, plan.hazard): none may complete a recipe other than the
+-- one running before and the one wanted after. A switch that would is not
+-- made, and the filters stay as they are.
 local function apply(res)
-    local items, fluids, cat = filtersFor(res)
+    local items, fluids, cat, variant, catKey = filtersFor(res)
     local ing = signature(items) .. " | " .. signature(fluids)
     local catSig = cat and signature({ cat }) or nil
     local ingChanged = ing ~= applied.ing
     local catChanged = catSig ~= nil and catSig ~= applied.cat
     if not ingChanged and not catChanged then return end
+
+    local exp = applied.exposure
+    local states, final = plan.transition(exp, plan.exposure(variant, mats, catKey), ingChanged, catChanged)
+    local allowed = {}
+    for v in pairs(applied.formed) do allowed[v] = true end
+    if variant then allowed[variant] = true end
+    local bad, at = plan.hazard(states, R.all, allowed)
+    if bad then
+        logOnce("hazard", string.format("FAULT: switching to %s would expose %s, which completes %s. "
+            .. "Filters left as they are.", variant and variant.id or "nothing", plan.describeState(at), bad.id))
+        return
+    end
+    logOnce("hazard", nil)
+    local only = variant and { [variant] = true } or {}
+
     if dry then
         if ingChanged then
             log("[dry] items: " .. describe(items))
             log("[dry] fluids: " .. describe(fluids))
         end
         if catChanged then log("[dry] catalyst: " .. cat.name) end
-        applied.ing = ing
+        applied.ing, applied.exposure, applied.formed = ing, final, only
         if catSig then applied.cat, busCatalyst = catSig, catalystKeyOf(cat) end
         return
     end
@@ -286,27 +312,43 @@ local function apply(res)
         if not n then log("ERROR writing the " .. label .. " bus filter: " .. tostring(err)) end
         return n
     end
+    -- `exp` and `applied.formed` follow the writes. A write that fails leaves
+    -- part of a list on the bus, so a list counts as there until it is gone,
+    -- and as there as soon as its write starts.
     if ingChanged then
         applied.ing = nil
         if not write(b.items, {}, block.item, "item") then return end
+        exp.items = {}
         if not write(b.fluids, {}, block.fluid, "fluid") then return end
+        exp.fluids = {}
+        applied.formed = {}
     end
     if catChanged then
         local ok, err = hwlib.writeCatalyst(b.catalyst, cat)
         if not ok then
-            -- A failed write leaves the old catalyst in place. Keep the
-            -- ingredients blocked: they may need the catalyst we wanted.
+            -- The old catalyst, the new one, or both may be on the bus now.
+            -- Keep the ingredients blocked: they may need the one we wanted.
             log("ERROR writing the catalyst bus filter: " .. tostring(err))
             applied.cat = nil
+            local both = {}
+            for k in pairs(exp.cats) do both[k] = true end
+            for k in pairs(final.cats) do both[k] = true end
+            exp.cats = both
+            if not ingChanged and variant then applied.formed[variant] = true end
             return
         end
         applied.cat, busCatalyst = catSig, catalystKeyOf(cat)
+        exp.cats = final.cats
     end
     if ingChanged then
+        applied.formed = only
+        exp.items = final.items
         if not write(b.items, items, block.item, "item") then return end
+        exp.fluids = final.fluids
         if not write(b.fluids, fluids, block.fluid, "fluid") then return end
         applied.ing = ing
     end
+    applied.formed = only
 end
 
 -- When a product cannot run, logs why for every one of its variants, once
@@ -411,6 +453,7 @@ local function startup()
             local key = catalystKeyOf(v)
             if key then
                 busCatalyst = busCatalyst or key
+                applied.exposure.cats[key] = true
             else
                 others = true
                 log("WARN: catalyst bus slot " .. slot .. " holds " .. tostring(v.label or v.name)

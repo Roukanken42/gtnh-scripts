@@ -1,7 +1,7 @@
 # dtpf — Dimensionally Transcendent Plasma Forge passive controller
 
 Keeps a whole DTPF array busy with **passive** recipes: infinity, hypogen,
-spacetime and shirabon. Active recipes reach the DTPFs from AE on demand and
+spacetime, shirabon and residue. Active recipes reach the DTPFs from AE on demand and
 take precedence by themselves. Whenever a DTPF has nothing else to do, it pulls
 a passive recipe through three storage buses, and this script decides which
 recipe that is by setting their filters:
@@ -45,7 +45,6 @@ From NewHorizonsCoreMod `DTPFRecipes.java` and GT5-Unofficial
 | Infinity | `inf_t5` | stellar 11373 | Eternal | 4 Infinity Catalyst → 36864 L (+ circuit 4) |
 | | `inf_t4` | exotic 26243 | Eternal | 2 → 18432 L (+ circuit 4) |
 | | `inf_t35` | resplendent 58932 | Hypogen | 1 → 9216 L (+ circuit 5) |
-| | `inf_t3` | resplendent 920 | Awakened | 1 → 144 L (+ circuit 4), **off by default** |
 | | `*_comb` | 15 % less | | the same, plus 1 Infinity Comb, half the time |
 | Hypogen | `hyp_v4` | stellar 1000 | Eternal | 11520 neutronium, 5760 quantum, 1440 infinity → 11520 L (+ Hypervisor Matrix) |
 | | `hyp_v3` | exotic 1000 | Eternal | 5760 / 5760 / 1440 → 5760 L (+ Hypervisor Matrix) |
@@ -54,9 +53,44 @@ From NewHorizonsCoreMod `DTPFRecipes.java` and GT5-Unofficial
 | Spacetime | `st_v2` | none | Eternal | Energised Tesseract, 5000 residue, 1152 infinity → 576 L (+ Hypervisor Matrix) |
 | | `st_v1` | none | Hypogen | Tesseract, 10000 residue, 2304 infinity, 1152 hypogen → 144 L |
 | Shirabon | `sh_v1` | none | Eternal | 1152 metastable oganesson, 2304 precious metals alloy, 288 spacetime, 5000 residue → 144 L (+ HiC Mk-V) |
+| Residue | `inf_t35_comb`, `inf_t35` | resplendent | Hypogen | the infinity recipes above: 25046 / 29466 residue and 9216 L infinity per Infinity Catalyst |
+| | `cg_t1` | crude 156040 | Awakened | 36864 L molten glass → chromatic glass + 19505 residue (crude is not allowed by default) |
+| | `cg_t2` | prosaic 61059 | Infinity | 73728 L → 15264 residue |
+| | `cg_t3` | resplendent 26350 | Hypogen | 147456 L → 13175 residue |
+| | `cg_t4` | exotic 11116 | Eternal | 294912 L → 11116 residue |
 
 Items in brackets are not consumed: the stocker needs one, and keeps it.
-Infinity and hypogen make the residue (DTR) that spacetime and shirabon eat.
+
+The Awakened-coil infinity recipe (circuit 4, 144 L per Infinity Catalyst) is
+left out on purpose: it burns Infinity Catalysts 64 times faster for the same
+infinity. Its old ids `inf_t3`, `inf_t3_comb` are still accepted in
+`cfg.disabledVariants`, so an older config keeps loading.
+
+### Residue
+
+Every recipe with a catalyst outputs residue (DTR) at a fixed ratio to that
+catalyst, set only by its tier: crude 1/8, prosaic 1/4, resplendent 1/2,
+exotic 1, stellar 2 L per L. The running-time discount cuts the catalyst but
+not the residue, so at 50 % each litre used gives twice that. Infinity and
+hypogen make residue on the side, and spacetime and shirabon eat 5000 L a
+batch. That is more than the infinity they eat brings with it, even at t3.5,
+so residue is a product of its own:
+
+- **`inf_t35` first.** Per Infinity Catalyst it makes the same 9216 L of
+  infinity as `inf_t5`, plus 5x the residue (29466 L against 5687) for about
+  30 % more catalyst energy. Infinity made for its own sake still uses its
+  best variant; t3.5 runs only while residue is the pick.
+- **Then chromatic glass**, when there is no Infinity Catalyst. It takes no
+  items, only cheap molten glass, makes a useful output, and needs 10-20x less
+  input per residue than the metal recipes (neutronium, bedrockium, cosmic
+  neutronium). Lower tiers first: by the game's own catalyst energy values,
+  prosaic gives twice the residue per unit of energy that resplendent does,
+  and four times what exotic does. Narrow it with
+  `cfg.catalysts.perProduct.residue`.
+
+The stocker needs **circuit 5** (and circuit 2 for the comb variant) for
+`inf_t35`, and a whole batch of molten glass for chromatic glass: 73728 L
+(prosaic) to 294912 L (exotic).
 
 ## Which product
 
@@ -98,8 +132,9 @@ Why this gets the order right without special cases:
   is not runnable and is skipped. Spacetime, which inherited shirabon's
   shortfall at shirabon's priority, is now the most urgent. Production walks
   up the chain by itself and comes back down as the inputs appear.
-- Spacetime and shirabon eat residue, which infinity and hypogen make. When
-  residue runs out they stop being runnable, and a residue maker runs.
+- Spacetime and shirabon eat residue, so their shortfall is asked of residue
+  at their priority. When residue runs out they stop being runnable, and
+  residue, now the most urgent, runs.
 - When everything is at target, the lowest fill still wins. Overproduction
   is then spread in proportion to the targets. `max` caps a product. With
   `selection.keepBusy` (the default) the cap is still ignored when nothing
@@ -111,7 +146,7 @@ priority takes over as soon as the dwell is up, whatever the margin. A
 product that stops being runnable is left at once, because the point is to
 keep the array busy.
 
-Keys **1–4** pin a product (in `cfg.products` order) while it is runnable,
+Keys **1–9** pin a product (in `cfg.products` order) while it is runnable,
 **A** goes back to automatic.
 
 ## Hardware
@@ -160,13 +195,29 @@ never leaves one empty:
     overclocks. Set `cfg.convergence.catalystForNoCatalystRecipes` to control
     which catalyst sits there for those recipes.
 
-**Switching recipes safely.** Because the catalyst cannot be withdrawn, a
-change of ingredients first blocks both stocker buses, then sets the
-catalyst, then writes the new ingredients. While they appear one by one,
-nothing but the intended variant can match: no two passive variants with the
-same catalyst have inputs that are a subset of one another. When only the
-catalyst changes (hypogen v3 and v4 share their inputs), the single catalyst
-write switches the variant.
+**Switching recipes safely.** A filter is written one slot per call, and a
+DTPF may look for a recipe between any two calls. Because the catalyst cannot
+be withdrawn, a change of ingredients first blocks both stocker buses, then
+sets the catalyst, then writes the new ingredients, **the circuit last**. When
+only the catalyst changes (hypogen v3/v4 and infinity t5/t4 share their
+inputs), the single catalyst write switches the variant.
+
+That order is not taken on trust. Before every switch, `plan.transition` lists
+each filter state on the way, and `plan.hazard` checks that none of them could
+start a recipe other than the one running before and the one wanted after. This
+includes the in-game recipes the script never runs (`R.hazards`): the
+Awakened-coil infinity recipe, which an Infinity Catalyst + circuit 4 + resplendent
+would start. A switch that fails the check is not made: the filters stay as
+they are, and the log says `FAULT` with the state and the recipe.
+`tools/test-dtpf.lua` runs that check on every switch the controller can make.
+
+**The DTPFs' own buses must hold no circuit.** A ghost circuit set on an ME
+stocking input bus, or anything in its manual slot, is always visible to the
+DTPF, whatever the filters say. A circuit 4 there, for example, plus the
+Infinity Catalyst and resplendent that `inf_t35` exposes, starts the
+Awakened-coil recipe. Circuits must come from the stocker only. (Stocked
+slots themselves are re-read from the network at every recipe start, so a
+filtered-out stack never lingers.)
 
 ## Install and first run
 
@@ -203,7 +254,7 @@ inputs last.
 | `catalysts.allowed` | Catalysts passive recipes may use at all. |
 | `catalysts.reserve` | L of each catalyst passive recipes leave for the active ones. |
 | `catalysts.perProduct` | A narrower list per product, e.g. keep stellar for hypogen. |
-| `disabledVariants` | Variant ids never to run. `inf_t3*` are off by default: they make 144 L instead of 9216 L per Infinity Catalyst, so enable them only while your coils are below Hypogen. |
+| `disabledVariants` | Variant ids never to run, e.g. `cg_t4` to keep exotic catalyst away from chromatic glass. |
 | `heat` | `"min"` (the coldest formed DTPF) or a number in K. |
 | `maxEUt` | Skip variants whose base EU/t is above this. |
 | `selection.minBatches` | Batches the stocker must hold before a product counts as runnable. |
@@ -220,6 +271,7 @@ GT5-Unofficial 5.09.54.265, NewHorizonsCoreMod 2.9.99), not tested:
   for items and `{name}` for fluids, slots counted from 1, and a missing third
   argument clears the slot. The stocker fluid bus is checked by a read-back at
   startup, and every catalyst write is read back too.
+- Molten glass is matched by its label "Molten Glass" (or name `molten.glass`).
 - Item labels the stocker is matched by: "Infinity Catalyst", "Infinity Comb",
   "Energised Tesseract", "Hypervisor Matrix (Fusion)", "Hi-Computation Station
   Mk-V Finaltype", "Programmed Circuit". `probe stock` shows whether they match.

@@ -55,6 +55,7 @@ local stock = plan.prepare({
         fluid("Molten SpaceTime", 1000),
         fluid("Molten Metastable Oganesson", 5000),
         fluid("Molten Precious Metals Alloy", 5000),
+        fluid("Molten Glass", 300000, "molten.glass"),
     },
 })
 
@@ -70,7 +71,7 @@ local function ctx(over)
         mats = mats, stock = stock, heat = 13500, catalysts = { stellar = 50000, exotic = 50000,
         resplendent = 100000, prosaic = 5000 }, catFactor = 1, catExtra = 0,
         allowedCat = { prosaic = true, resplendent = true, exotic = true, stellar = true },
-        disabled = { inf_t3 = true, inf_t3_comb = true }, minBatches = 1,
+        disabled = {}, minBatches = 1,
     }
     for k, v in pairs(over or {}) do c[k] = v end
     return c
@@ -117,6 +118,46 @@ check(run == nil and planned == nil, "shirabon needs eternal coils")
 -- allowed catalysts
 run = plan.product(R.variants.hypogen, ctx({ allowedCat = { resplendent = true } }))
 eq(run and run.variant.id, "hyp_v2", "hypogen limited to resplendent")
+
+-- ---- residue ------------------------------------------------------------------------
+-- The data: residue = catalyst x 2^(tier-1) / 8 for every variant, floored.
+local ids = {}
+for p, list in pairs(R.variants) do
+    for _, v in ipairs(list) do
+        if v.catalyst then
+            local tier = R.catalystByKey[v.catalyst].tier
+            eq(v.outputs.residue, math.floor(v.catalystAmount * 2 ^ (tier - 1) / 8),
+                p .. " " .. v.id .. " residue matches its catalyst")
+        end
+        ids[v.id] = true
+    end
+end
+check(not ids.inf_t3 and not ids.inf_t3_comb, "the Awakened-coil infinity recipe is gone")
+check(R.retired.inf_t3, "inf_t3 still accepted in an old config")
+eq(R.variants.residue[2], R.variants.infinity[6], "residue's inf_t35 is infinity's")
+
+-- Infinity Catalyst + circuit 5 + resplendent: residue runs inf_t3.5.
+run, planned = plan.product(R.variants.residue, ctx())
+eq(run and run.variant.id, "inf_t35", "residue runs inf_t35 first")
+eq(planned.id, "inf_t35", "residue planned with inf_t35")
+-- ...while infinity itself still runs its best variant.
+eq((plan.product(R.variants.infinity, ctx())).variant.id, "inf_t5", "infinity keeps inf_t5")
+-- No Infinity Catalyst: chromatic glass. Prosaic 5000 < 61059, so resplendent.
+local noIC = plan.prepare({ items = {}, fluids = { fluid("Molten Glass", 300000, "molten.glass") } })
+run = plan.product(R.variants.residue, ctx({ stock = noIC }))
+eq(run and run.variant.id, "cg_t3", "residue falls to chromatic glass on resplendent")
+eq(#run.fluids, 1, "chromatic glass filter: glass only")
+eq(#run.items, 0, "chromatic glass filter: no items")
+run = plan.product(R.variants.residue, ctx({ stock = noIC, catalysts = { prosaic = 100000, resplendent = 100000 } }))
+eq(run and run.variant.id, "cg_t2", "prosaic first: the most residue per catalyst energy")
+run = plan.product(R.variants.residue, ctx({ stock = noIC, catalysts = { crude = 1e9, exotic = 100000 } }))
+eq(run and run.variant.id, "cg_t4", "crude not allowed: exotic")
+-- Not enough glass for a resplendent batch (147456 L): prosaic's 73728 L fits.
+local lowGlass = plan.prepare({ items = {}, fluids = { fluid("Molten Glass", 100000, "molten.glass") } })
+run = plan.product(R.variants.residue, ctx({ stock = lowGlass, catalysts = { prosaic = 100000, resplendent = 100000 } }))
+eq(run and run.variant.id, "cg_t2", "glass for a prosaic batch only")
+run = plan.product(R.variants.residue, ctx({ stock = lowGlass, catalysts = { resplendent = 100000 } }))
+check(run == nil, "no batch of glass for resplendent")
 
 -- ---- a real stocker (probe output, GTNH 2.9) ----------------------------------------
 -- 2.9 labels circuits "Programmed Circuit 4": they must match by registry name.
@@ -190,6 +231,22 @@ eq(d.hypogen.downstream, 0, "st_v2 needs no hypogen")
 eq(d.hypogen.fill, math.huge, "no hypogen wanted")
 check(d.infinity.capped, "infinity over its max")
 
+-- Residue: spacetime and shirabon pass their shortfall on to it.
+local rnames = { "shirabon", "spacetime", "hypogen", "residue", "infinity" }
+plannedMap.residue = R.variants.residue[2]
+order = plan.topo({ "residue", "infinity", "hypogen", "spacetime", "shirabon" }, plannedMap)
+pos = {}
+for i, p in ipairs(order) do pos[p] = i end
+check(pos.shirabon < pos.residue and pos.spacetime < pos.residue, "residue after its consumers: "
+    .. table.concat(order, ","))
+targets.residue = { target = 20000, priority = 2 }
+d = plan.demand(rnames, targets, { shirabon = 0, spacetime = 1000, residue = 10000, infinity = 60000 }, plannedMap)
+-- 10 shirabon batches x 5000 + 5 spacetime batches x 5000
+eq(d.residue.downstream, 75000, "residue inherits shirabon's and spacetime's shortfall")
+eq(d.residue.effective, 95000, "residue: own target + inherited")
+eq(d.residue.short, 85000, "residue short")
+plannedMap.residue, targets.residue = nil, nil
+
 -- ---- priorities ---------------------------------------------------------------------
 local sel = { minDwell = 60, switchMargin = 0.05, keepBusy = true }
 -- Infinity at priority 1 (an extra source), spacetime at 2. Spacetime is 50k
@@ -258,6 +315,94 @@ eq((plan.choose(nil, cands, names, { keepBusy = false }, 0)), nil, "no keep busy
 cands.hypogen.ok = true
 eq((plan.choose(nil, cands, names, { pin = "hypogen" }, 0)), "hypogen", "pin")
 eq((plan.choose({ product = "spacetime", since = 0 }, cands, names, sel, 1)), "hypogen", "unrunnable current is left")
+
+-- ---- switching safety -----------------------------------------------------------------
+-- The circuit goes in last.
+local wo = plan.writeOrder(R.variants.infinity[2])
+eq(wo[#wo].mat, "circuit", "inf_t5 writes its circuit last")
+wo = plan.writeOrder(R.variants.hypogen[1])
+eq(wo[#wo].mat, "hypervisor", "hyp_v4 writes the Hypervisor Matrix last")
+run = plan.product(R.variants.infinity, ctx())
+eq(run.items[#run.items].name, "gregtech:gt.integrated_circuit", "the checked filter list ends with the circuit")
+
+local function expSig(e)
+    local l = {}
+    for _, list in ipairs({ e.items, e.fluids }) do
+        for _, s in ipairs(list) do l[#l + 1] = s.mat .. ":" .. tostring(s.damage) end
+        l[#l + 1] = "|"
+    end
+    return table.concat(l, ",")
+end
+-- One switch, as apply() makes it. Returns the offending recipe and state.
+local function switch(old, oldCat, new, newCat)
+    local from = plan.exposure(old, mats, oldCat)
+    local to = plan.exposure(new, mats, newCat)
+    local ingChanged = expSig(from) ~= expSig(to)
+    local catChanged = newCat ~= nil and newCat ~= oldCat
+    local states = plan.transition(from, to, ingChanged, catChanged)
+    local allowed = {}
+    if old then allowed[old] = true end
+    if new then allowed[new] = true end
+    return plan.hazard(states, R.all, allowed)
+end
+
+-- The case asked about: residue (inf_t3.5) <-> infinity (inf_t5). Never
+-- circuit 4 + Infinity Catalyst with resplendent, nor circuit 5 with stellar.
+local t5, t35 = R.variants.infinity[2], R.variants.residue[2]
+check(switch(t5, "stellar", t35, "resplendent") == nil, "inf_t5 -> inf_t35 is safe")
+check(switch(t35, "resplendent", t5, "stellar") == nil, "inf_t35 -> inf_t5 is safe")
+do
+    local from, to = plan.exposure(t5, mats, "stellar"), plan.exposure(t35, mats, "resplendent")
+    local states = plan.transition(from, to, true, true)
+    for i, st in ipairs(states) do
+        local hasC4 = false
+        for _, s in ipairs(st.items) do if s.mat == "circuit" and s.damage == 4 then hasC4 = true end end
+        check(not (hasC4 and st.cats.resplendent), "state " .. i .. " never has circuit 4 with resplendent: "
+            .. plan.describeState(st))
+    end
+    -- The checker itself: swapping only the catalyst under inf_t5's inputs
+    -- would complete the in-game Awakened-coil recipe, and must be caught.
+    local bad = plan.hazard(plan.transition(from, plan.exposure(t5, mats, "resplendent"), false, true),
+        R.all, { [t5] = true })
+    eq(bad and bad.id, "inf_t3 (in-game)", "a catalyst-only swap to resplendent under circuit 4 is caught")
+    -- Writing the circuit first, with the old catalyst still on the bus: caught too.
+    local early = { { items = { { mat = "infinityCatalyst" }, { mat = "circuit", damage = 4 } }, fluids = {},
+        cats = { stellar = true } } }
+    bad = plan.hazard(early, R.all, { [t35] = true })
+    eq(bad and bad.id, "inf_t5", "circuit 4 + Infinity Catalyst + stellar is caught when inf_t35 is wanted")
+end
+
+-- Every switch the controller can make: from any variant (or blocked) with
+-- any catalyst on the bus, to any variant with its catalyst (or, for one
+-- without, the bus left as it is or the Convergence catalyst).
+local keys = {}
+for _, c in ipairs(R.catalysts) do keys[#keys + 1] = c.key end
+local olds = { false }
+for _, v in ipairs(R.all) do if v.catalystAmount or v.outputs then olds[#olds + 1] = v end end
+local news = { false }
+for _, v in ipairs(R.all) do if v.outputs then news[#news + 1] = v end end
+local switches, unsafe = 0, {}
+for _, old in ipairs(olds) do
+    old = old or nil
+    local oldCats = (old and old.catalyst) and { old.catalyst } or keys
+    for _, oldCat in ipairs(oldCats) do
+        for _, new in ipairs(news) do
+            new = new or nil
+            local newCats = (new and new.catalyst) and { new.catalyst } or { false, table.unpack(keys) }
+            for _, newCat in ipairs(newCats) do
+                switches = switches + 1
+                local bad, st = switch(old, oldCat, new, newCat or nil)
+                if bad and #unsafe < 10 then
+                    unsafe[#unsafe + 1] = string.format("%s(%s) -> %s(%s): %s completes %s",
+                        old and old.id or "blocked", oldCat, new and new.id or "blocked", tostring(newCat),
+                        plan.describeState(st), bad.id)
+                end
+            end
+        end
+    end
+end
+check(#unsafe == 0, "every switch is safe:\n    " .. table.concat(unsafe, "\n    "))
+check(switches > 1000, "switches tried: " .. switches)
 
 -- ---- sensor -------------------------------------------------------------------------
 local f = hw.parseForgeSensor({

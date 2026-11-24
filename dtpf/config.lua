@@ -68,6 +68,12 @@ cfg.products = {
     { name = "shirabon",  target = 50000,   priority = 2 },
     { name = "spacetime", target = 100000,  priority = 2 },
     { name = "hypogen",   target = 200000,  priority = 2 },
+    -- Dimensionally Transcendent Residue. Infinity and hypogen make it on the
+    -- side; spacetime and shirabon eat it (5000 L a batch), and their shortfall
+    -- is asked of it at their priority. This target is a buffer on top. When
+    -- it is the pick, it runs inf_t3.5 (5x the residue of inf_t5 per Infinity
+    -- Catalyst, plus the infinity), else chromatic glass from molten glass.
+    { name = "residue",   target = 1000000, priority = 2 },
     -- Also made elsewhere: the DTPF is just an extra passive source.
     { name = "infinity",  target = 1000000, priority = 1 },
 }
@@ -83,14 +89,14 @@ cfg.catalysts = {
     -- net, so the AE-driven active recipes always have theirs.
     reserve = { crude = 0, prosaic = 0, resplendent = 0, exotic = 0, stellar = 0 },
     -- Per product, a narrower list, e.g. infinity = { "exotic", "resplendent" }
-    -- to keep stellar for hypogen.
+    -- to keep stellar for hypogen, or residue = { "resplendent" } to make
+    -- chromatic glass only on resplendent.
     perProduct = {},
 }
 
--- Variants never to run (ids from recipes.lua). The Awakened-coil infinity
--- recipe gives 144 L per Infinity Catalyst instead of 9216 L: it only makes
--- sense while your coils are below Hypogen, so it is off by default.
-cfg.disabledVariants = { "inf_t3", "inf_t3_comb" }
+-- Variants never to run (ids from recipes.lua), e.g. { "cg_t4" } to keep
+-- exotic catalyst away from chromatic glass.
+cfg.disabledVariants = {}
 
 -- Coil heat the variants are checked against. "min" = the coldest formed DTPF
 -- (they share one input, so every machine must be able to run the pick), or a

@@ -100,6 +100,17 @@ function plan.catalystNeed(v, ctx)
     return math.ceil((v.catalystAmount + (ctx.catExtra or 0)) * (ctx.catFactor or 1))
 end
 
+-- The order a variant's inputs go into the filters: what is consumed first,
+-- then what is not (circuits, Hypervisor Matrix, HiC). Recipes that share
+-- everything else are told apart by their circuit, so it goes in last: after
+-- the catalyst and every other input. plan.transition checks the rest.
+function plan.writeOrder(v)
+    local out = {}
+    for _, inp in ipairs(v.inputs) do if inp.amount > 0 then out[#out + 1] = inp end end
+    for _, inp in ipairs(v.inputs) do if inp.amount == 0 then out[#out + 1] = inp end end
+    return out
+end
+
 -- Can the array run variant `v` right now?
 -- ctx: mats, stock (prepared stocker snapshot), heat, maxEUt, catalysts
 --      ({ key = L usable, reserve already taken off }), catFactor, catExtra,
@@ -113,9 +124,10 @@ function plan.check(v, ctx)
 
     -- Every problem is collected, not just the first, so the explanation of
     -- a product that cannot run is complete.
+    -- In write order, so r.items and r.fluids are written in that order too.
     local batches, missing = math.huge, {}
     local seen = {}
-    for _, inp in ipairs(v.inputs) do
+    for _, inp in ipairs(plan.writeOrder(v)) do
         local have, stack = plan.find(ctx.stock, ctx.mats, inp)
         local need = inp.amount == 0 and 1 or inp.amount
         if inp.amount > 0 then batches = math.min(batches, math.floor(have / inp.amount)) end
@@ -183,6 +195,119 @@ function plan.product(variants, ctx)
         end
     end
     return runnable, planned or plannedExtra, explain or explainExtra, checks
+end
+
+-- ---- switching safety ---------------------------------------------------------------
+-- A storage bus filter is written one slot per call, and the DTPFs may look
+-- for a recipe between any two calls. So a switch passes through a series of
+-- filter states, and in none of them may the exposed inputs + catalyst
+-- complete a recipe other than the one running before or the one wanted
+-- after: inf_t5 (circuit 4 + stellar) when inf_t3.5 is wanted, or the in-game
+-- Awakened-coil recipe (circuit 4 + resplendent, R.hazards).
+--
+-- An exposure is { items = {spec...}, fluids = {spec...}, cats = {key=true} }:
+-- the inputs in the slots of the item and fluid buses, slot 1 up, and the
+-- catalysts that may be on the catalyst bus.
+
+local function catSet(cat) return cat and { [cat] = true } or {} end
+
+-- What the filters expose when they hold variant `v` (nil: blocked) in write
+-- order, with catalyst `cat` (nil: none known).
+function plan.exposure(v, mats, cat)
+    local e = { items = {}, fluids = {}, cats = catSet(cat) }
+    local seen = {}
+    for _, inp in ipairs(v and plan.writeOrder(v) or {}) do
+        local id = inp.mat .. ":" .. tostring(inp.damage)
+        if not seen[id] then
+            seen[id] = true
+            local list = mats[inp.mat].kind == "fluid" and e.fluids or e.items
+            list[#list + 1] = { mat = inp.mat, damage = inp.damage }
+        end
+    end
+    return e
+end
+
+local function slice(list, a, b)
+    local t = {}
+    for i = a, b do t[#t + 1] = list[i] end
+    return t
+end
+
+local function union(a, b)
+    local t = {}
+    for k in pairs(a) do t[k] = true end
+    for k in pairs(b) do t[k] = true end
+    return t
+end
+
+-- Every filter state on the way from exposure `from` to exposure `to`, in the
+-- order apply() in main.lua writes: with `ingChanged`, block the item bus slot
+-- by slot from slot 1, then the fluid bus; with `catChanged`, swap the
+-- catalyst (both may be on the bus while its other slots are cleared); with
+-- `ingChanged`, fill the item bus slot 1 up, then the fluid bus. `to.cats`
+-- empty means the catalyst is left as it is. Returns the states and the
+-- exposure at the end.
+function plan.transition(from, to, ingChanged, catChanged)
+    local states = {}
+    local items, fluids, cats = from.items, from.fluids, from.cats
+    local function add() states[#states + 1] = { items = items, fluids = fluids, cats = cats } end
+    if ingChanged then
+        for k = 1, #from.items do items = slice(from.items, k + 1, #from.items); add() end
+        for k = 1, #from.fluids do fluids = slice(from.fluids, k + 1, #from.fluids); add() end
+        items, fluids = {}, {}
+    end
+    if catChanged then
+        cats = union(cats, to.cats); add()
+        cats = to.cats; add()
+    end
+    if ingChanged then
+        for k = 1, #to.items do items = slice(to.items, 1, k); add() end
+        for k = 1, #to.fluids do fluids = slice(to.fluids, 1, k); add() end
+    end
+    return states, { items = items, fluids = fluids, cats = cats }
+end
+
+local function exposes(state, spec)
+    for _, list in ipairs({ state.items, state.fluids }) do
+        for _, s in ipairs(list) do
+            if s.mat == spec.mat and (spec.damage == nil or s.damage == spec.damage) then return true end
+        end
+    end
+    return false
+end
+
+-- Could recipe `r` start in filter state `state`? By presence only, never by
+-- amount: an amount can change at any time, so this errs on the safe side.
+function plan.completes(state, r)
+    if r.catalyst and not state.cats[r.catalyst] then return false end
+    for _, inp in ipairs(r.inputs) do
+        if not exposes(state, inp) then return false end
+    end
+    return true
+end
+
+-- The first state in which a recipe of `recipes` (R.all) that is not in
+-- `allowed` (a set of variant tables) could start. Returns that recipe and the
+-- state, or nil when the switch is safe.
+function plan.hazard(states, recipes, allowed)
+    for _, st in ipairs(states) do
+        for _, r in ipairs(recipes) do
+            if not allowed[r] and plan.completes(st, r) then return r, st end
+        end
+    end
+    return nil
+end
+
+-- A filter state as text, for the log.
+function plan.describeState(st)
+    local l = {}
+    for _, list in ipairs({ st.items, st.fluids }) do
+        for _, s in ipairs(list) do l[#l + 1] = s.mat .. (s.damage and (" " .. s.damage) or "") end
+    end
+    local c = {}
+    for k in pairs(st.cats) do c[#c + 1] = k end
+    table.sort(c)
+    return (#l > 0 and table.concat(l, ", ") or "nothing") .. " + " .. (#c > 0 and table.concat(c, "/") or "no catalyst")
 end
 
 -- How much of `p` one batch of `v` makes, net of what it eats of itself.

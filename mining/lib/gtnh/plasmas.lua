@@ -39,7 +39,7 @@ local RAW = {
     { tier = 2, name = "Bismuth Plasma",       material = "Bismuth",      consumed = 550 },
     { tier = 3, name = "Radon Plasma",         material = "Radon",        consumed = 375 },
     { tier = 4, name = "Technetium Plasma",    material = "Technetium",   consumed = 250 },  -- MaterialsElements
-    { tier = 5, name = "Plutonium-241 Plasma", material = "Plutonium241", consumed = 150 },
+    { tier = 5, name = "Plutonium 241 Plasma", material = "Plutonium241", consumed = 150 },
 }
 
 plasmas.list = {}
